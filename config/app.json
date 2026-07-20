@@ -1,0 +1,13 @@
+{
+  "default_agent": "general",
+  "timezone": "Asia/Shanghai",
+  "history_rounds": 6,
+  "image_prompt": "请描述这张图片，并识别图片中的文字。",
+  "active_model": "deepseek_cloud",
+  "fallback_model": "deepseek_cloud",
+  "local_model": "ollama_local",
+  "flash_model": "deepseek_cloud",
+  "pro_model": "deepseek_pro",
+  "vision_model": "ollama_local",
+  "fallback_cooldown_seconds": 60
+}

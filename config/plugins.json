@@ -1,0 +1,43 @@
+{
+  "plugins": [
+    {
+      "id": "browser_automation",
+      "enabled": false,
+      "settings": {
+        "headless": true,
+        "navigation_timeout_seconds": 30,
+        "session_ttl_seconds": 600,
+        "max_sessions_per_tenant": 1,
+        "max_snapshot_chars": 12000,
+        "max_snapshot_elements": 100
+      }
+    },
+    {
+      "id": "codex_tasks",
+      "enabled": false,
+      "settings": {
+        "admin_tenant_ids": [],
+        "projects": [
+          {
+            "id": "botplatform",
+            "path": "."
+          }
+        ],
+        "default_project": "botplatform",
+        "max_concurrent_tasks": 2,
+        "notify_on_completion": false,
+        "monitor_external_tasks": false,
+        "monitor_tenant_id": "",
+        "external_poll_interval_seconds": 15,
+        "interaction_ttl_seconds": 300,
+        "notify_events": [
+          "waiting_approval",
+          "waiting_input",
+          "completed",
+          "failed",
+          "interrupted"
+        ]
+      }
+    }
+  ]
+}

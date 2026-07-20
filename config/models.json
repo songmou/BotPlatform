@@ -1,0 +1,68 @@
+{
+  "profiles": {
+    "ollama_local": {
+      "enabled": false,
+      "type": "ollama",
+      "provider": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "YOUR_OLLAMA_MODEL",
+      "temperature": 0.2,
+      "max_tokens": 2048,
+      "timeout_seconds": 30,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    "deepseek_cloud": {
+      "enabled": true,
+      "type": "openai_compatible",
+      "provider": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-flash",
+      "temperature": 0.2,
+      "max_tokens": 1024,
+      "timeout_seconds": 120,
+      "capabilities": {
+        "tools": true,
+        "vision": false,
+        "reasoning": false
+      },
+      "request_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "assistant_passthrough_fields": [
+        "reasoning_content"
+      ]
+    },
+    "deepseek_pro": {
+      "enabled": true,
+      "type": "openai_compatible",
+      "provider": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-pro",
+      "temperature": 0.2,
+      "max_tokens": 4096,
+      "timeout_seconds": 120,
+      "capabilities": {
+        "tools": true,
+        "vision": false,
+        "reasoning": true
+      },
+      "request_extra": {
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "high"
+      },
+      "assistant_passthrough_fields": [
+        "reasoning_content"
+      ]
+    }
+  }
+}
