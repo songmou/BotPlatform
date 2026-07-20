@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from notification_service import NotificationError
+from src.services.notification import NotificationError
 
 from .base import PluginContext, PluginError, PluginToolDefinition
 

@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Compatibility launcher for BotPlatform."""
+"""Run BotPlatform with ``python -m src``."""
 
 from src.application.cli import main
 

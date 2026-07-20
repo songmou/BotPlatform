@@ -7,12 +7,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from config_loader import ScheduledTask, TaskAction, TaskCondition
-from ilink import Credentials, ILinkError
-from image_source import ImageSourceError
-from notification_service import TenantRecipientStore
-from scheduler_service import SchedulerService
-from tenant_store import ScheduleStore, TenantRegistry
+from src.config.loader import ScheduledTask, TaskAction, TaskCondition
+from src.integrations.ilink import Credentials, ILinkError
+from src.integrations.images import ImageSourceError
+from src.services.notification import TenantRecipientStore
+from src.services.scheduler import SchedulerService
+from src.storage.tenants import ScheduleStore, TenantRegistry
 
 
 class FakeAgentService:

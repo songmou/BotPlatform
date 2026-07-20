@@ -10,7 +10,7 @@ from typing import List, Mapping, Optional, TextIO
 
 import httpx
 
-from config_loader import ConfigError, ProjectConfig, load_project_config
+from src.config.loader import ConfigError, ProjectConfig, load_project_config
 
 
 PLACEHOLDERS = {"YOUR_OLLAMA_MODEL", "CHANGE_ME", "YOUR_MODEL"}

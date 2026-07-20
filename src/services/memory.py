@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from config_loader import ModelProfile
-from tenant_store import TenantRegistry
+from src.config.loader import ModelProfile
+from src.storage.tenants import TenantRegistry
 
 
 MEMORY_KINDS = {"preference", "identity", "goal", "constraint"}

@@ -4,6 +4,8 @@ BotPlatform 是一个运行在自己电脑上的微信 AI 机器人。它通过�
 
 默认安装只需要 Python 和 DeepSeek API Key。Ollama、图片理解、向量检索、浏览器自动化和 Codex 开发任务均为可选能力，不配置也能正常使用文字聊天。
 
+核心代码位于 `src/` 包：`application/` 负责入口和消息编排，`services/` 承载业务服务，`storage/` 管理 SQLite 与租户数据，`integrations/` 对接微信、图片和向量能力，`infrastructure/` 提供诊断、日志与单实例运行支持。模型、工具和插件分别位于同名子包中。根目录 `main.py` 仅作为兼容启动入口，也可以使用 `python -m src` 启动。
+
 ## 5 分钟快速开始
 
 ### 1. 准备环境

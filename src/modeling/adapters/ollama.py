@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from modeling.contracts import (
+from src.modeling.contracts import (
     CanonicalMessage,
     CanonicalToolCall,
     ModelCapabilities,

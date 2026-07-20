@@ -18,16 +18,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from config_loader import ScriptDefinition, validate_script_parameters
-from ilink import Credentials
-from image_source import ImageSource, ImageSourceError, ImageSourceLoader
-from notification_service import (
+from src.config.loader import ScriptDefinition, validate_script_parameters
+from src.integrations.ilink import Credentials
+from src.integrations.images import ImageSource, ImageSourceError, ImageSourceLoader
+from src.services.notification import (
     NotificationError,
     NotificationService,
     Recipient,
     TenantRecipientStore,
 )
-from tenant_store import TenantContext, TenantRegistry
+from src.storage.tenants import TenantContext, TenantRegistry
 
 
 FINAL_STATUSES = {"success", "failed", "skipped", "timed_out", "cancelled"}

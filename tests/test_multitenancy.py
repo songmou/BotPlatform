@@ -8,19 +8,19 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
-from config_loader import ScriptDefinition, ToolConfig
-from ilink import Credentials
-from main import WeChatBot, run_notify_command
-from notification_service import TenantRecipientStore
-from script_service import ScriptService
-from tenant_store import (
+from src.config.loader import ScriptDefinition, ToolConfig
+from src.integrations.ilink import Credentials
+from src.application import WeChatBot, run_notify_command
+from src.services.notification import TenantRecipientStore
+from src.services.script import ScriptService
+from src.storage.tenants import (
     ConversationStore,
     ScheduleStore,
     SettingsStore,
     TenantRegistry,
     TenantStoreError,
 )
-from tooling import ToolError, ToolRuntime
+from src.tooling import ToolError, ToolRuntime
 
 
 class MultiTenantStorageTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class MultiTenantStorageTests(unittest.TestCase):
         self.assertNotIn("wechat-a", str(self.registry.tenant_root(self.a.tenant_id)))
 
         conversations = ConversationStore(self.registry, max_messages=2)
-        from modeling import CanonicalMessage
+        from src.modeling import CanonicalMessage
 
         conversations.save_context(
             self.a.tenant_id,

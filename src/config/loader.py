@@ -13,8 +13,8 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
-from modeling import ModelCapabilities
-from plugins.registry import (
+from src.modeling import ModelCapabilities
+from src.plugins.registry import (
     known_plugin_ids,
     plugin_tool_names,
     validate_plugin_settings,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from config_loader import ModelProfile
+from src.config.loader import ModelProfile
 
 from .adapters import OllamaAdapter, OpenAICompatibleAdapter
 from .contracts import ModelClient, ModelError

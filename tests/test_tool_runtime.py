@@ -7,9 +7,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from config_loader import load_project_config
-from tenant_store import TenantRegistry
-from tooling import ToolAuditContext, ToolError, ToolRuntime
+from src.config.loader import load_project_config
+from src.storage.tenants import TenantRegistry
+from src.tooling import ToolAuditContext, ToolError, ToolRuntime
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
@@ -199,7 +199,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def communicate(self, timeout=None):
                 return b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789extra", b""
 
-        with patch("tooling.commands.subprocess.Popen", return_value=FakeProcess()) as popen:
+        with patch("src.tooling.commands.subprocess.Popen", return_value=FakeProcess()) as popen:
             result = self.runtime.command_runner.execute(prepared)
         self.assertEqual(result["exit_code"], 0)
         self.assertTrue(result["output_truncated"])

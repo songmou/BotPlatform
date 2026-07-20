@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from knowledge_service import KnowledgeService
-from memory_service import MemoryService
+from src.services.knowledge import KnowledgeService
+from src.services.memory import MemoryService
 from scripts.todo.todo_manager import execute_action
-from tenant_store import ConversationStore, TenantRegistry
+from src.storage.tenants import ConversationStore, TenantRegistry
 
 
 class FakeEmbedding:

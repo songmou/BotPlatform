@@ -6,15 +6,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
-from ilink import (
+from src.integrations.ilink import (
     Credentials,
     ILinkClient,
     ILinkError,
     PartialDeliveryError,
     SessionExpired,
 )
-from image_source import ImageSource, ImageSourceError, ImageSourceLoader
-from tenant_store import TenantContext, TenantRegistry
+from src.integrations.images import ImageSource, ImageSourceError, ImageSourceLoader
+from src.storage.tenants import TenantContext, TenantRegistry
 
 
 class RecipientStoreError(RuntimeError):

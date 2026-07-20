@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from modeling import CanonicalMessage
+from src.modeling import CanonicalMessage
 
 
 class ToolError(RuntimeError):

@@ -9,18 +9,18 @@ from typing import Any, Callable, List, Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from agent_service import AgentService
-from config_loader import ScheduledTask
-from console_logging import log_scheduled_task
-from ilink import Credentials, ILinkClient
-from image_source import ImageSource, ImageSourceLoader
-from notification_service import (
+from src.services.agent import AgentService
+from src.config.loader import ScheduledTask
+from src.infrastructure.logging import log_scheduled_task
+from src.integrations.ilink import Credentials, ILinkClient
+from src.integrations.images import ImageSource, ImageSourceLoader
+from src.services.notification import (
     NotificationService,
     Recipient,
     TenantRecipientStore,
 )
-from script_service import ScriptService
-from tenant_store import ScheduleStore, TenantContext, TenantRegistry
+from src.services.script import ScriptService
+from src.storage.tenants import ScheduleStore, TenantContext, TenantRegistry
 
 
 class SchedulerService:

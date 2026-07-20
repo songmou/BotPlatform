@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
-    from database import Database
+    from src.storage.database import Database
 except ModuleNotFoundError:  # Direct script execution outside the project launcher.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from database import Database
+    from src.storage.database import Database
 
 
 SCHEMA_VERSION = 1

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from config_loader import ConfigError, load_project_config
+from src.config.loader import ConfigError, load_project_config
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"

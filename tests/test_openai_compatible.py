@@ -7,7 +7,7 @@ import unittest
 import httpx
 from PIL import Image
 
-from modeling import (
+from src.modeling import (
     CanonicalMessage,
     CanonicalToolCall,
     GenerationOptions,
@@ -15,7 +15,7 @@ from modeling import (
     ModelError,
     ModelRequest,
 )
-from modeling.adapters.openai_compatible import OpenAICompatibleAdapter
+from src.modeling.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
 class OpenAICompatibleAdapterTests(unittest.TestCase):

@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from embedding_service import EmbeddingClient, EmbeddingError
-from tenant_store import TenantContext, TenantRegistry
+from src.integrations.embeddings import EmbeddingClient, EmbeddingError
+from src.storage.tenants import TenantContext, TenantRegistry
 
 
 MAX_TEXT_CHARACTERS = 20_000

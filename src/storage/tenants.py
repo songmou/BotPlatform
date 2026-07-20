@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from database import Database, DatabaseError
-from legacy_migration import LegacyDataMigrator, LegacyMigrationError
-from modeling import CanonicalMessage
+from src.storage.database import Database, DatabaseError
+from src.storage.migration import LegacyDataMigrator, LegacyMigrationError
+from src.modeling import CanonicalMessage
 
 
 SCHEMA_VERSION = 1

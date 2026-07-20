@@ -20,15 +20,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
-from config_loader import ToolConfig
-from plugins.base import PlatformPlugin, PluginError, PluginToolDefinition
+from src.config.loader import ToolConfig
+from src.plugins.base import PlatformPlugin, PluginError, PluginToolDefinition
 from .commands import CommandRunner
 from .models import ToolAuditContext, ToolError, ToolResult
-from tenant_store import TenantContext, TenantRegistry
+from src.storage.tenants import TenantContext, TenantRegistry
 
 if TYPE_CHECKING:
-    from script_service import ScriptService
-    from knowledge_service import KnowledgeService
+    from src.services.script import ScriptService
+    from src.services.knowledge import KnowledgeService
 
 
 APPROVAL_TOOLS = {

@@ -1,0 +1,1 @@
+"""BotPlatform application package."""

@@ -8,9 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from config_loader import load_project_config
-from plugins.base import PluginError, PluginToolDefinition
-from plugins.browser_automation import (
+from src.config.loader import load_project_config
+from src.plugins.base import PluginError, PluginToolDefinition
+from src.plugins.browser_automation import (
     BrowserAutomationConfig,
     BrowserAutomationPlugin,
     BrowserSession,
@@ -18,8 +18,8 @@ from plugins.browser_automation import (
     _AgentPageController,
     validate_public_https_url,
 )
-from tenant_store import TenantRegistry
-from tooling import ToolRuntime
+from src.storage.tenants import TenantRegistry
+from src.tooling import ToolRuntime
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
@@ -78,7 +78,7 @@ class BrowserCoreTests(unittest.TestCase):
 
     def test_url_policy_allows_public_https_and_blocks_unsafe_targets(self) -> None:
         public_record = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
-        with patch("plugins.browser_automation.socket.getaddrinfo", return_value=public_record):
+        with patch("src.plugins.browser_automation.socket.getaddrinfo", return_value=public_record):
             validate_public_https_url("https://example.test/path")
         validate_public_https_url("data:text/plain,ok", subresource=True)
         for url in (
@@ -203,10 +203,10 @@ class PluginFrameworkTests(unittest.TestCase):
         tenant = SimpleNamespace(tenant_id="tenant-a")
         try:
             with patch(
-                "plugins.browser_automation._ManagedAgentSession",
+                "src.plugins.browser_automation._ManagedAgentSession",
                 FakeManagedSession,
             ), patch(
-                "plugins.browser_automation.socket.getaddrinfo",
+                "src.plugins.browser_automation.socket.getaddrinfo",
                 return_value=public_record,
             ):
                 opened = plugin.execute(

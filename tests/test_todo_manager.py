@@ -16,7 +16,7 @@ from scripts.todo.todo_manager import (
     TodoError,
     execute_action,
 )
-from tenant_store import TenantRegistry
+from src.storage.tenants import TenantRegistry
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "todo" / "todo_manager.py"

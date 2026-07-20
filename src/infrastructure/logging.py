@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from modeling import ModelIdentity, ModelUsage
-from tooling.models import ToolAuditContext
+from src.modeling import ModelIdentity, ModelUsage
+from src.tooling.models import ToolAuditContext
 
 
 def mask_user_id(user_id: str) -> str:

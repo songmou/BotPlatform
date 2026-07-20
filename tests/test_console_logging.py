@@ -4,9 +4,9 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 
-from console_logging import log_model_call, log_tool_call
-from modeling import ModelIdentity, ModelUsage
-from tooling import ToolAuditContext
+from src.infrastructure.logging import log_model_call, log_tool_call
+from src.modeling import ModelIdentity, ModelUsage
+from src.tooling import ToolAuditContext
 
 
 class ConsoleLoggingTests(unittest.TestCase):

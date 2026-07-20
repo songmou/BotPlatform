@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from modeling.contracts import (
+from src.modeling.contracts import (
     CanonicalMessage,
     CanonicalToolCall,
     ModelCapabilities,

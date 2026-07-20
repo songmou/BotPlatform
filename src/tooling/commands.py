@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from config_loader import ToolConfig
+from src.config.loader import ToolConfig
 from .models import ToolError
 
 

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from preflight import check_configuration
+from src.infrastructure.diagnostics import check_configuration
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
@@ -33,7 +33,7 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("插件 browser_automation 未启用", warning_text)
 
     def test_key_is_not_sent_to_provider_and_optional_warnings_do_not_fail(self):
-        with patch("preflight.httpx.get") as request:
+        with patch("src.infrastructure.diagnostics.httpx.get") as request:
             report = check_configuration(
                 SOURCE_CONFIG, environment={"DEEPSEEK_API_KEY": "test-key"}
             )
@@ -55,7 +55,7 @@ class PreflightTests(unittest.TestCase):
 
             data["profiles"]["ollama_local"]["model"] = "qwen-test"
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            with patch("preflight._ollama_models", return_value=["qwen-test"]):
+            with patch("src.infrastructure.diagnostics._ollama_models", return_value=["qwen-test"]):
                 report = check_configuration(
                     config, environment={"DEEPSEEK_API_KEY": "test-key"}
                 )

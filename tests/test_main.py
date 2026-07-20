@@ -13,27 +13,28 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-import main as main_module
-from agent_service import AgentService
-from config_loader import load_project_config
-from ilink import Credentials
-from instance_lock import SingleInstanceLock
-from main import (
+import src.application.cli as main_module
+import src.application.bootstrap as bootstrap_module
+from src.services.agent import AgentService
+from src.config.loader import load_project_config
+from src.integrations.ilink import Credentials
+from src.infrastructure.instance_lock import SingleInstanceLock
+from src.infrastructure.logging import log_interaction
+from src.application import (
     WeChatBot,
     load_credentials,
-    log_interaction,
     parse_args,
     run_notify_command,
     save_credentials,
 )
-from modeling import (
+from src.modeling import (
     CanonicalMessage,
     ModelCapabilities,
     ModelError,
     ModelIdentity,
     ModelResponse,
 )
-from tooling import ApprovalRequired, FinalAnswer
+from src.tooling import ApprovalRequired, FinalAnswer
 
 
 def text_message(user: str, text: str, **extra):
@@ -511,7 +512,7 @@ class MainBotTests(unittest.TestCase):
 
     def test_notify_command_returns_before_model_initialization(self) -> None:
         with patch.object(main_module, "run_notify_command", return_value=0) as notify:
-            with patch.object(main_module, "create_model_client") as create_model:
+            with patch.object(bootstrap_module, "create_model_client") as create_model:
                 result = main_module.main(["notify", "--user", "tenant-a", "--message", "告警"])
         self.assertEqual(result, 0)
         notify.assert_called_once()

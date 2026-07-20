@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import httpx
 
-from config_loader import EmbeddingProfile
+from src.config.loader import EmbeddingProfile
 
 
 class EmbeddingError(RuntimeError):

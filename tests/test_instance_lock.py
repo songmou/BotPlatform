@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from instance_lock import AlreadyRunning, SingleInstanceLock
+from src.infrastructure.instance_lock import AlreadyRunning, SingleInstanceLock
 
 
 class SingleInstanceLockTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class SingleInstanceLockTests(unittest.TestCase):
                     (
                         "import sys; "
                         "from pathlib import Path; "
-                        "from instance_lock import AlreadyRunning, SingleInstanceLock; "
+                        "from src.infrastructure.instance_lock import AlreadyRunning, SingleInstanceLock; "
                         "\ntry:\n"
                         "  with SingleInstanceLock(Path(sys.argv[1])): pass\n"
                         "except AlreadyRunning as exc:\n"

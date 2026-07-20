@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from modeling import (
+from src.modeling import (
     CanonicalMessage,
     ModelCapabilities,
     ModelError,

@@ -9,8 +9,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Union
 
-from config_loader import AgentPreset, AppConfig
-from modeling import (
+from src.config.loader import AgentPreset, AppConfig
+from src.modeling import (
     CanonicalMessage,
     CanonicalToolCall,
     GenerationOptions,
@@ -21,17 +21,17 @@ from modeling import (
     ModelResponse,
     ModelSession,
 )
-from tooling import (
+from src.tooling import (
     ApprovalRequired,
     FinalAnswer,
     ToolAuditContext,
     ToolError,
     ToolRuntime,
 )
-from tooling.models import PendingApproval, PreparedToolCall, ToolResult
-from tenant_store import ConversationStore, SettingsStore, TenantContext
-from knowledge_service import KnowledgeService
-from memory_service import MemoryService
+from src.tooling.models import PendingApproval, PreparedToolCall, ToolResult
+from src.storage.tenants import ConversationStore, SettingsStore, TenantContext
+from src.services.knowledge import KnowledgeService
+from src.services.memory import MemoryService
 
 
 AgentOutcome = Union[FinalAnswer, ApprovalRequired]
