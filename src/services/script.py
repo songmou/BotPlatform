@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.config.loader import ScriptDefinition, validate_script_parameters
+from src.integrations.keychain import KeychainReference, KeychainService
 from src.integrations.ilink import Credentials
 from src.integrations.images import ImageSource, ImageSourceError, ImageSourceLoader
 from src.services.notification import (
@@ -27,7 +28,7 @@ from src.services.notification import (
     Recipient,
     TenantRecipientStore,
 )
-from src.storage.tenants import TenantContext, TenantRegistry
+from src.storage.tenants import IntegrationStore, TenantContext, TenantRegistry
 
 
 FINAL_STATUSES = {"success", "failed", "skipped", "timed_out", "cancelled"}
@@ -78,10 +79,11 @@ class ScriptService:
         recipient_store: TenantRecipientStore,
         project_root: Path,
         tenant_registry: TenantRegistry,
-        integration_store: Any = None,
+        integration_store: Optional[IntegrationStore] = None,
         python_executable: Optional[str] = None,
         notification_service: Optional[NotificationService] = None,
         image_loader: Optional[ImageSourceLoader] = None,
+        keychain_service: Optional[KeychainService] = None,
     ) -> None:
         self.definitions = dict(definitions)
         self.credentials = credentials
@@ -94,6 +96,8 @@ class ScriptService:
         )
         self.image_loader = image_loader or ImageSourceLoader()
         self.tenant_registry = tenant_registry
+        self.integration_store = integration_store or IntegrationStore(tenant_registry)
+        self.keychain_service = keychain_service or KeychainService()
         self._lock = threading.RLock()
         self._active: Dict[str, str] = {}
         self._processes: Dict[str, subprocess.Popen] = {}
@@ -184,6 +188,7 @@ class ScriptService:
     ) -> Dict[str, Any]:
         if self.tenant_registry.get(tenant.tenant_id) != tenant:
             raise ValueError("租户身份不匹配")
+        self._require_integration(tenant, script_id)
         definition, normalized = self.normalize(script_id, parameters)
         now = datetime.now(timezone.utc)
         run_id = "{}-{}-{}".format(
@@ -222,6 +227,30 @@ class ScriptService:
             self._persist(run)
             self._executor.submit(self._execute, definition, run)
         return run.to_dict()
+
+    @staticmethod
+    def _integration_id(script_id: str) -> Optional[str]:
+        return {
+            "ctsehr_check": "ctsehr",
+            "autogen_monitor": "autogen",
+        }.get(script_id)
+
+    def _require_integration(self, tenant: TenantContext, script_id: str) -> None:
+        integration_id = self._integration_id(script_id)
+        if integration_id is None:
+            return
+        metadata = self.integration_store.get(tenant.tenant_id, integration_id)
+        if not metadata or not self.keychain_service.exists(
+            KeychainReference(
+                str(metadata.get("keychain_service", "")),
+                str(metadata.get("keychain_account", "credential")),
+            )
+        ):
+            raise ValueError(
+                "尚未配置 {}，请先使用 /integration setup {}".format(
+                    integration_id, integration_id
+                )
+            )
 
     @staticmethod
     def _active_key(run: ScriptRun) -> str:
@@ -341,6 +370,23 @@ class ScriptService:
         )
         environment["ILINKBOT_TENANT_ID"] = run.tenant_id
         environment["ILINKBOT_DATABASE_PATH"] = str(self.tenant_registry.database_path)
+        integration_id = self._integration_id(run.script_id)
+        if integration_id:
+            metadata = self.integration_store.get(run.tenant_id, integration_id)
+            if not metadata:
+                raise ValueError("租户集成配置缺失")
+            environment["ILINKBOT_INTEGRATION_ID"] = integration_id
+            environment["ILINKBOT_INTEGRATION_ACCOUNT"] = str(
+                metadata.get("account", "")
+            )
+            environment["ILINKBOT_KEYCHAIN_SERVICE"] = str(
+                metadata.get("keychain_service", "")
+            )
+            environment["ILINKBOT_KEYCHAIN_ACCOUNT"] = str(
+                metadata.get("keychain_account", "credential")
+            )
+        if run.script_id == "autogen_monitor":
+            environment["AUTOGEN_ENV_FILE"] = str(outputs_root / "autogen.env")
         return environment
 
     def _execute(self, definition: ScriptDefinition, run: ScriptRun) -> None:

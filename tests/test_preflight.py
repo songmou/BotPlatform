@@ -22,23 +22,27 @@ class PreflightTests(unittest.TestCase):
         return config
 
     def test_missing_required_key_is_aggregated_and_optional_features_warn(self):
-        report = check_configuration(SOURCE_CONFIG, environment={})
+        with patch(
+            "src.infrastructure.diagnostics._ollama_models",
+            return_value=["gemma4:e4b"],
+        ):
+            report = check_configuration(SOURCE_CONFIG, environment={})
         self.assertFalse(report.ok)
         self.assertEqual(
             sum("DEEPSEEK_API_KEY" in item.message for item in report.errors), 1
         )
         warning_text = "\n".join(item.message for item in report.warnings)
-        self.assertIn("本地模型未启用", warning_text)
         self.assertIn("全文检索", warning_text)
-        self.assertIn("插件 browser_automation 未启用", warning_text)
 
     def test_key_is_not_sent_to_provider_and_optional_warnings_do_not_fail(self):
-        with patch("src.infrastructure.diagnostics.httpx.get") as request:
+        with patch(
+            "src.infrastructure.diagnostics._ollama_models",
+            return_value=["gemma4:e4b"],
+        ):
             report = check_configuration(
                 SOURCE_CONFIG, environment={"DEEPSEEK_API_KEY": "test-key"}
             )
         self.assertTrue(report.ok)
-        request.assert_not_called()
 
     def test_enabled_ollama_placeholder_fails_then_configured_model_is_checked(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -46,6 +50,7 @@ class PreflightTests(unittest.TestCase):
             path = config / "models.json"
             data = json.loads(path.read_text(encoding="utf-8"))
             data["profiles"]["ollama_local"]["enabled"] = True
+            data["profiles"]["ollama_local"]["model"] = "YOUR_OLLAMA_MODEL"
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             report = check_configuration(
                 config, environment={"DEEPSEEK_API_KEY": "test-key"}

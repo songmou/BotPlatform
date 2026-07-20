@@ -2,7 +2,7 @@
 
 BotPlatform 是一个运行在自己电脑上的微信 AI 机器人。它通过微信 iLink 接收私聊消息，默认调用 DeepSeek V4 Flash，并提供多租户会话、可审批的本机工具、知识库、长期记忆、待办、定时任务以及可选插件。
 
-默认安装只需要 Python 和 DeepSeek API Key。Ollama、图片理解、向量检索、浏览器自动化和 Codex 开发任务均为可选能力，不配置也能正常使用文字聊天。
+当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化、Codex 开发任务和个人业务脚本。向量检索保持关闭，不需要安装 `bge-m3`。
 
 核心代码位于 `src/` 包：`application/` 负责入口和消息编排，`services/` 承载业务服务，`storage/` 管理 SQLite 与租户数据，`integrations/` 对接微信、图片和向量能力，`infrastructure/` 提供诊断、日志与单实例运行支持。模型、工具和插件分别位于同名子包中。根目录 `main.py` 仅作为兼容启动入口，也可以使用 `python -m src` 启动。
 
@@ -92,7 +92,7 @@ Windows：
 - `auto`：使用全局默认档案，开箱为 `deepseek-v4-flash`；
 - `flash`：使用 DeepSeek V4 Flash；
 - `pro`：使用 DeepSeek V4 Pro 思考模式；
-- `local`：使用用户启用的 Ollama 档案，默认不可用。
+- `local`：使用本机 Ollama 的 `gemma4:e4b`，也负责微信图片理解和本地长期记忆提取。
 
 DeepSeek V4 的模型标识与接口说明见 [DeepSeek API 文档](https://api-docs.deepseek.com/quick_start/pricing)。每位微信用户的模式独立保存在 SQLite 中：
 
@@ -106,7 +106,7 @@ DeepSeek V4 的模型标识与接口说明见 [DeepSeek API 文档](https://api-
 
 `active_model` 与 `fallback_model` 默认都指向 Flash，因此不会在失败时自动升级到费用更高的 Pro。需要自定义兜底时，可把 `fallback_model` 改为另一个已启用档案。
 
-## 可选：启用 Ollama
+## 本地 Ollama
 
 BotPlatform 不会安装、启动或停止 Ollama。请先自行安装并启动服务，然后拉取适合机器的聊天/视觉模型：
 
@@ -123,7 +123,7 @@ ollama pull <你的模型名>
   "type": "ollama",
   "provider": "ollama",
   "base_url": "http://127.0.0.1:11434",
-  "model": "替换为已安装的模型名",
+  "model": "gemma4:e4b",
   "temperature": 0.2,
   "max_tokens": 2048,
   "timeout_seconds": 30,
@@ -172,6 +172,9 @@ ollama pull bge-m3
 /memory                        查看长期记忆
 /memory confirm|forget <编号>  确认或停用记忆
 /memory clear                  二次确认后停用全部记忆
+/integration setup <ctsehr|autogen>  安全配置业务集成
+/integration status [编号]     查看集成状态
+/integration delete <编号>     删除集成凭据
 /codex                         查看 Codex 确认命令
 /clear                         清空短期模型上下文
 /delete-data                   二次确认后删除自己的租户数据
@@ -193,13 +196,13 @@ ollama pull bge-m3
 
 ## 插件
 
-[`config/plugins.json`](config/plugins.json) 中的插件默认关闭。
+当前本地配置已启用 `browser_automation` 和 `codex_tasks`。
 
 ### 浏览器自动化
 
 启用 `browser_automation` 后，模型可以在隔离的无痕会话中访问公网 HTTPS 页面。浏览器会拒绝本机、私网、云元数据地址及越界重定向。
 
-可使用 Playwright Chromium、系统 Chrome/Edge，或通过 `BROWSER_EXECUTABLE` 指定路径。网页正文始终作为不可信资料处理。
+可使用 Playwright Chromium、系统 Chrome/Edge，或通过 `BROWSER_EXECUTABLE` 指定路径。备份恢复的文生图脚本直接复用同一套隔离浏览器能力；网页正文始终作为不可信资料处理。
 
 ### Codex 开发任务
 
@@ -210,13 +213,13 @@ ollama pull bge-m3
 3. 将得到的租户编号加入 `admin_tenant_ids`；
 4. 按需配置允许的项目路径并重启。
 
-管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。
+管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。BotPlatform 创建的任务会在排队、开始运行、等待交互和终态发送去重通知；外部 Codex 任务每 5 秒轮询一次，启动时不会补发旧任务。
 
 ## 定时任务与待办
 
-默认公开配置只保留通用提醒、待办提醒和归档示例，所有主动任务均为关闭状态。先修改 [`config/schedules.json`](config/schedules.json)，重启后再由每位用户通过 `/schedule on <任务编号>` 订阅。
+当前本地时间表启用文生图（08:00、14:00）、OA 考勤（08:50、18:00）、待办提醒（09:00、18:00）、每月 1 日 09:05 归档，以及每 10 分钟执行的离线窗口检查。普通早安和晚间总结保持关闭；各用户是否接收仍由已有订阅决定。
 
-内置 `todo_manager` 使用 SQLite 保存带稳定编号的待办，支持新增、查看、编辑、完成、恢复、提醒和归档。脚本注册位于 [`config/scripts.json`](config/scripts.json)。
+脚本注册位于 [`config/scripts.json`](config/scripts.json)：`autogen_monitor` 负责文生图，`ctsehr_check` 负责 OA 考勤与待审批，`todo_manager` 负责待办。业务账号与密码通过 `/integration` 配置，密码只保存在权限为 `0600` 的受限凭据文件中，不进入日志、聊天历史或模型上下文。
 
 机器人停机期间不会补跑普通任务。主动通知还依赖用户最近一次私聊留下的微信上下文；失效时请再次私聊机器人。
 

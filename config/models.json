@@ -1,11 +1,11 @@
 {
   "profiles": {
     "ollama_local": {
-      "enabled": false,
+      "enabled": true,
       "type": "ollama",
       "provider": "ollama",
       "base_url": "http://127.0.0.1:11434",
-      "model": "YOUR_OLLAMA_MODEL",
+      "model": "gemma4:e4b",
       "temperature": 0.2,
       "max_tokens": 2048,
       "timeout_seconds": 30,

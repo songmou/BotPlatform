@@ -1,6 +1,34 @@
 {
   "scripts": [
     {
+      "id": "autogen_monitor",
+      "name": "悟空 AI 文生图监控",
+      "description": "生成随机图片提示词、检查悟空 AI 文生图流程并保存本次图片。",
+      "entrypoint": "scripts/autogen/monitor.py",
+      "timeout_seconds": 900,
+      "requires_approval": false,
+      "data_directory": "autogen",
+      "parameters": {},
+      "artifact_types": ["image"]
+    },
+    {
+      "id": "ctsehr_check",
+      "name": "CTS EHR 考勤与待审批检查",
+      "description": "只读汇总昨天和今天的 OA 考勤记录及待审批，并生成摘要与 PNG 报告。",
+      "entrypoint": "scripts/ctsehr/cts_ehr_monitor.py",
+      "timeout_seconds": 300,
+      "requires_approval": false,
+      "data_directory": "ctsehr",
+      "parameters": {
+        "date": {
+          "type": "date",
+          "required": false,
+          "flag": "--date"
+        }
+      },
+      "artifact_types": ["image"]
+    },
+    {
       "id": "todo_manager",
       "name": "待办提醒与管理",
       "description": "使用 SQLite 私人待办库查询、新增、编辑、完成、恢复和归档事项，并生成定时提醒。",

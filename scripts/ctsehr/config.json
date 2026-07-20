@@ -1,0 +1,32 @@
+{
+  "oa": {
+    "base_url": "https://ehr.chowtaiseng.com/ZDSHRS",
+    "timeout_seconds": 30,
+    "retries": 3
+  },
+  "attendance": {
+    "clock_in_before": "09:00",
+    "clock_out_at_or_after": "17:30"
+  },
+  "calendar": {
+    "force_workdays": [],
+    "force_offdays": [],
+    "off_shift_keywords": ["休", "公休", "休息", "无班"]
+  },
+  "approvals": {
+    "max_items": 20
+  },
+  "ollama": {
+    "base_url": "http://127.0.0.1:11434",
+    "model": "gemma4:e4b",
+    "reasoning": false,
+    "timeout_seconds": 120,
+    "temperature": 0.1,
+    "num_predict": 512
+  },
+  "output": {
+    "results_dir": "results",
+    "logs_dir": "logs",
+    "font_path": "auto"
+  }
+}

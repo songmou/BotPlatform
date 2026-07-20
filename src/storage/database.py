@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 SCHEMA_V1 = r"""
@@ -308,6 +308,43 @@ CREATE INDEX IF NOT EXISTS ix_codex_events_delivery
 """
 
 
+SCHEMA_V5 = r"""
+CREATE TABLE codex_task_events_v5 (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL UNIQUE,
+    thread_id TEXT NOT NULL REFERENCES codex_task_runs(thread_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (
+        event_type IN (
+            'queued', 'running', 'waiting_approval', 'waiting_input',
+            'completed', 'failed', 'interrupted', 'interaction_expired'
+        )
+    ),
+    message TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        delivery_status IN ('pending', 'sending', 'retry', 'sent', 'failed', 'disabled')
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT
+);
+INSERT INTO codex_task_events_v5(
+    event_id, event_key, thread_id, tenant_id, event_type, message,
+    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
+)
+SELECT
+    event_id, event_key, thread_id, tenant_id, event_type, message,
+    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
+FROM codex_task_events;
+DROP TABLE codex_task_events;
+ALTER TABLE codex_task_events_v5 RENAME TO codex_task_events;
+CREATE INDEX ix_codex_events_delivery
+    ON codex_task_events(delivery_status, next_attempt_at, event_id);
+"""
+
+
 class DatabaseError(RuntimeError):
     pass
 
@@ -404,6 +441,13 @@ class Database:
                         "INSERT INTO schema_migrations(version, applied_at) "
                         "VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
+                    current = 4
+                if current < 5:
+                    connection.executescript(SCHEMA_V5)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
             except sqlite3.Error as exc:
                 raise DatabaseError("无法初始化 SQLite 数据库：{}".format(exc)) from exc
             finally:
@@ -418,5 +462,9 @@ class Database:
             Path(str(self.path) + "-wal"),
             Path(str(self.path) + "-shm"),
         ):
-            if path.exists():
+            try:
                 os.chmod(str(path), 0o600)
+            except FileNotFoundError:
+                # SQLite can remove its transient WAL/SHM files between the
+                # directory lookup and chmod when the last connection closes.
+                continue

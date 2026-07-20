@@ -23,7 +23,15 @@ ACTIVE_STATUSES = {"queued", "running"}
 ACTIVE_PHASES = {"queued", "running", "waiting_approval", "waiting_input"}
 WAITING_PHASES = {"waiting_approval", "waiting_input"}
 DEFAULT_NOTIFY_EVENTS = frozenset(
-    {"waiting_approval", "waiting_input", "completed", "failed", "interrupted"}
+    {
+        "queued",
+        "running",
+        "waiting_approval",
+        "waiting_input",
+        "completed",
+        "failed",
+        "interrupted",
+    }
 )
 SUPPORTED_NOTIFY_EVENTS = DEFAULT_NOTIFY_EVENTS
 APPROVAL_METHODS = {
@@ -609,10 +617,14 @@ class CodexTaskStore:
         now = _utc_now()
         with self.registry.database.read() as connection:
             rows = connection.execute(
-                "SELECT * FROM codex_task_events WHERE "
-                "delivery_status='pending' OR "
-                "(delivery_status='retry' AND next_attempt_at<=?) "
-                "ORDER BY event_id LIMIT ?",
+                "SELECT event.* FROM codex_task_events AS event WHERE ("
+                "event.delivery_status='pending' OR "
+                "(event.delivery_status='retry' AND event.next_attempt_at<=?)) "
+                "AND NOT EXISTS (SELECT 1 FROM codex_task_events AS earlier "
+                "WHERE earlier.thread_id=event.thread_id "
+                "AND earlier.event_id<event.event_id "
+                "AND earlier.delivery_status IN ('pending', 'sending', 'retry')) "
+                "ORDER BY event.event_id LIMIT ?",
                 (now, limit),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -670,7 +682,10 @@ class CodexTaskService:
 
     SOURCE_KINDS = ["cli", "vscode", "exec", "appServer"]
     RESULT_LIMIT = 6000
-    RETRY_DELAYS = (30, 120, 600)
+    # The WeChat gateway can briefly return ``prepare failed`` when two
+    # lifecycle messages follow each other immediately. Retry quickly first;
+    # the store keeps later events behind earlier unsent events per task.
+    RETRY_DELAYS = (2, 10, 30, 120, 600)
 
     def __init__(
         self,
@@ -820,6 +835,7 @@ class CodexTaskService:
                 title,
                 self.config.notify_on_completion,
             )
+            self._notify_phase(thread_id, "queued")
             with self._lock:
                 self._task_sessions[thread_id] = session
             self._executor.submit(
@@ -840,8 +856,10 @@ class CodexTaskService:
                 self.store.finish(thread_id, "interrupted", error="任务在开始前已被中止")
                 self._task_sessions.pop(thread_id, None)
                 self._close_task_session(session)
+                self._notify(thread_id)
                 return
         self.store.mark_running(thread_id)
+        self._notify_phase(thread_id, "running")
         handle: Any = None
         result: Any = None
         status = "completed"
@@ -886,6 +904,35 @@ class CodexTaskService:
             error=error,
         )
         self._notify(thread_id)
+
+    def _notify_phase(self, thread_id: str, phase: str) -> None:
+        if phase not in ACTIVE_PHASES:
+            raise ValueError("无效的 Codex 活动阶段")
+        task = self.store.get(thread_id)
+        if not task or phase not in self.config.notify_events:
+            return
+        labels = {
+            "queued": "已排队",
+            "running": "开始执行",
+            "waiting_approval": "等待审批",
+            "waiting_input": "等待回答",
+        }
+        message = "Codex 开发任务{}：{}\n项目：{}\n任务编号：{}".format(
+            labels.get(phase, phase),
+            task["title"],
+            task["project_id"],
+            thread_id,
+        )
+        event = self.store.enqueue_event(
+            "phase:{}:{}:{}".format(
+                thread_id, phase, task.get("updated_at") or _utc_now()
+            ),
+            thread_id,
+            str(task["tenant_id"]),
+            phase,
+            message,
+        )
+        self._deliver_event(event)
 
     def _notify(self, thread_id: str) -> None:
         task = self.store.get(thread_id)
@@ -1148,9 +1195,15 @@ class CodexTaskService:
                 )
             except (NotificationError, OSError, ValueError) as exc:
                 attempt = int(claimed.get("attempt_count", 0))
+                safe_error = self._safe_error(exc)
                 delay = self.RETRY_DELAYS[attempt] if attempt < len(self.RETRY_DELAYS) else None
+                if delay is None and "prepare failed" in safe_error.lower():
+                    # A stale/rate-limited WeChat prepare window often becomes
+                    # usable again after the user next interacts with the bot.
+                    # Keep this event durable instead of discarding it.
+                    delay = self.RETRY_DELAYS[-1]
                 self.store.finish_event_delivery(
-                    event_id, False, self._safe_error(exc), delay
+                    event_id, False, safe_error, delay
                 )
                 if delay is None and claimed["event_type"] in TERMINAL_STATUSES:
                     self.store.set_notification(str(claimed["thread_id"]), "failed")
@@ -1179,6 +1232,8 @@ class CodexTaskService:
         self, task: Mapping[str, Any], phase: str
     ) -> str:
         labels = {
+            "queued": "已排队",
+            "running": "开始执行",
             "waiting_approval": "等待审批",
             "waiting_input": "等待回答",
             "completed": "已完成",
@@ -1212,7 +1267,7 @@ class CodexTaskService:
                 task, self.config.monitor_tenant_id
             )
             phase = str(stored.get("phase", task.get("phase", "completed")))
-            if baseline or previous_phase is None or previous_phase == phase:
+            if baseline or previous_phase == phase:
                 continue
             if phase not in self.config.notify_events:
                 continue
@@ -1426,6 +1481,7 @@ class CodexTaskService:
             self._close_task_session(session)
             raise PluginError("恢复 Codex 任务失败：{}".format(self._safe_error(exc))) from exc
         self.store.requeue(task_id, self.config.notify_on_completion)
+        self._notify_phase(task_id, "queued")
         with self._lock:
             self._task_sessions[task_id] = session
         self._executor.submit(
@@ -1740,8 +1796,8 @@ class CodexTasksPlugin:
             or not set(notify_events).issubset(SUPPORTED_NOTIFY_EVENTS)
         ):
             raise ValueError(
-                "codex_tasks.notify_events 只能包含 waiting_approval、waiting_input、"
-                "completed、failed、interrupted，且不能重复"
+                "codex_tasks.notify_events 只能包含 queued、running、waiting_approval、"
+                "waiting_input、completed、failed、interrupted，且不能重复"
             )
 
     def __init__(

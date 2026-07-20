@@ -27,6 +27,7 @@ from src.paths import CONFIG_DIR, DATA_DIR, PROJECT_ROOT
 from src.plugins import PluginContext, build_plugins
 from src.services.agent import AgentService
 from src.services.knowledge import KnowledgeService
+from src.services.integration import IntegrationService
 from src.services.memory import MemoryService, OllamaMemoryExtractor
 from src.services.notification import NotificationService, TenantRecipientStore
 from src.services.scheduler import SchedulerService
@@ -35,6 +36,7 @@ from src.storage.tenants import (
     ConversationStore,
     ScheduleStore,
     SettingsStore,
+    IntegrationStore,
     TenantRegistry,
     TenantStoreError,
 )
@@ -64,6 +66,8 @@ def run_bot(args, project_config=None) -> int:
     )
     settings_store = SettingsStore(tenant_registry)
     schedule_store = ScheduleStore(tenant_registry)
+    integration_store = IntegrationStore(tenant_registry)
+    integration_service = IntegrationService(integration_store)
     embedding_client = (
         EmbeddingClient(project_config.embedding)
         if project_config.embedding.enabled
@@ -163,6 +167,8 @@ def run_bot(args, project_config=None) -> int:
                     recipient_store,
                     PROJECT_ROOT,
                     tenant_registry,
+                    integration_store,
+                    keychain_service=integration_service.keychain,
                 )
                 platform_plugins = build_plugins(
                     project_config.plugins,
@@ -240,6 +246,7 @@ def run_bot(args, project_config=None) -> int:
                     knowledge_service=knowledge_service,
                     memory_service=memory_service,
                     codex_tasks_plugin=codex_tasks_plugin,
+                    integration_service=integration_service,
                 ).run()
             except SessionExpired:
                 print("微信登录已失效，将重新扫码。", file=sys.stderr)

@@ -10,17 +10,40 @@ from pathlib import Path
 
 from src.config.loader import ScriptDefinition, ToolConfig
 from src.integrations.ilink import Credentials
+from src.integrations.keychain import KeychainReference, KeychainService
 from src.application import WeChatBot, run_notify_command
+from src.services.integration import IntegrationService
 from src.services.notification import TenantRecipientStore
 from src.services.script import ScriptService
 from src.storage.tenants import (
     ConversationStore,
+    IntegrationStore,
     ScheduleStore,
     SettingsStore,
     TenantRegistry,
     TenantStoreError,
 )
 from src.tooling import ToolError, ToolRuntime
+
+
+class FakeKeychain:
+    def __init__(self):
+        self.values = {}
+
+    def reference(self, tenant_id, integration_id):
+        return KeychainReference("test.{}.{}".format(tenant_id, integration_id))
+
+    def set_secret(self, reference, secret):
+        self.values[(reference.service, reference.account)] = secret
+
+    def get_secret(self, reference):
+        return self.values[(reference.service, reference.account)]
+
+    def delete_secret(self, reference):
+        self.values.pop((reference.service, reference.account), None)
+
+    def exists(self, reference):
+        return (reference.service, reference.account) in self.values
 
 
 class MultiTenantStorageTests(unittest.TestCase):
@@ -177,8 +200,106 @@ Path(os.environ['ILINKBOT_SCRIPT_RESULT_FILE']).write_text(
         with self.assertRaises(ValueError):
             service.get_run(self.b, first["run_id"])
 
+    def test_integration_secret_and_migrated_reference_are_supported(self):
+        keychain = FakeKeychain()
+        service = IntegrationService(IntegrationStore(self.registry), keychain=keychain)
+        service.setup(self.a, "ctsehr")
+        self.assertTrue(service.consume(self.a, "account-a")[0])
+        secret = "very-private-password"
+        handled, reply = service.consume(self.a, secret)
+        self.assertTrue(handled)
+        self.assertIn("安全保存", reply)
+        self.assertIn("已配置", service.status(self.a, "ctsehr"))
+
+        migrated = KeychainReference("legacy.service", "credential")
+        keychain.set_secret(migrated, secret)
+        IntegrationStore(self.registry).set(
+            self.a.tenant_id,
+            "ctsehr",
+            {
+                "account": "account-a",
+                "keychain_service": migrated.service,
+                "keychain_account": migrated.account,
+            },
+        )
+        self.assertIn("已配置", service.status(self.a, "ctsehr"))
+        service.delete(self.a, "ctsehr")
+        self.assertFalse(keychain.exists(migrated))
+
 
 class TenantCommandTests(unittest.TestCase):
+    def test_file_credentials_are_private_and_isolated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "credentials.json"
+            service = KeychainService(storage_path=target)
+            first = service.reference(
+                "00000000-0000-0000-0000-000000000001", "ctsehr"
+            )
+            second = service.reference(
+                "00000000-0000-0000-0000-000000000002", "ctsehr"
+            )
+            service.set_secret(first, "first-secret")
+            service.set_secret(second, "second-secret")
+            self.assertEqual(service.get_secret(first), "first-secret")
+            self.assertEqual(service.get_secret(second), "second-secret")
+            if os.name != "nt":
+                self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_integration_password_bypasses_transcript(self):
+        class FakeILink:
+            def __init__(self):
+                self.credentials = Credentials(
+                    "token", "https://gateway", "bot", "owner"
+                )
+                self.sent = []
+
+            def send_text(self, user_id, context_token, text):
+                self.sent.append((user_id, context_token, text))
+
+        class FakeAgent:
+            image_prompt = "看图"
+
+            def has_pending_approval(self, _subject):
+                return False
+
+        with tempfile.TemporaryDirectory() as directory:
+            registry = TenantRegistry(Path(directory) / "data")
+            conversations = ConversationStore(registry, 12)
+            keychain = FakeKeychain()
+            integrations = IntegrationService(
+                IntegrationStore(registry), keychain=keychain
+            )
+            bot = WeChatBot(
+                FakeILink(),
+                FakeAgent(),
+                tenant_registry=registry,
+                conversation_store=conversations,
+                integration_service=integrations,
+            )
+
+            def message(text):
+                return {
+                    "message_type": 1,
+                    "from_user_id": "wechat-user",
+                    "context_token": "context",
+                    "item_list": [{"type": 1, "text_item": {"text": text}}],
+                }
+
+            bot.handle_message(message("/integration setup ctsehr"))
+            bot.handle_message(message("account-value"))
+            bot.handle_message(message("secret-value"))
+            tenant = registry.resolve("bot", "wechat-user")
+            with registry.database.read() as connection:
+                transcript = "\n".join(
+                    str(row["content"])
+                    for row in connection.execute(
+                        "SELECT content FROM conversation_events WHERE tenant_id=?",
+                        (tenant.tenant_id,),
+                    ).fetchall()
+                )
+            self.assertNotIn("account-value", transcript)
+            self.assertNotIn("secret-value", transcript)
+
     def test_commands_subscription_delete_and_explicit_notify_target(self):
         class FakeILink:
             def __init__(self):

@@ -25,6 +25,7 @@ from src.modeling import ModelError
 from src.paths import CREDENTIALS_PATH
 from src.services.agent import AgentService
 from src.services.knowledge import KnowledgeService
+from src.services.integration import IntegrationService
 from src.services.memory import MemoryService
 from src.plugins import PluginError
 from src.services.script import ScriptService
@@ -126,6 +127,7 @@ class WeChatBot:
         knowledge_service: Optional[KnowledgeService] = None,
         memory_service: Optional[MemoryService] = None,
         codex_tasks_plugin: Optional[Any] = None,
+        integration_service: Optional[IntegrationService] = None,
     ) -> None:
         self.ilink = ilink
         self.agent_service = agent_service
@@ -141,6 +143,7 @@ class WeChatBot:
         self.knowledge_service = knowledge_service
         self.memory_service = memory_service
         self.codex_tasks_plugin = codex_tasks_plugin
+        self.integration_service = integration_service
         self._approval_timer_lock = threading.Lock()
         self._approval_timers: Dict[str, Tuple[str, Any]] = {}
         self._deletion_pending: Dict[str, Tuple[str, datetime]] = {}
@@ -320,6 +323,17 @@ class WeChatBot:
             self._log("微信输出", user_id, reply)
             return
 
+        if (
+            tenant is not None
+            and self.integration_service is not None
+            and self.integration_service.has_pending(tenant)
+        ):
+            handled, reply = self.integration_service.consume(tenant, normalized_text)
+            if handled:
+                self._reply(user_id, context_token, reply, tenant, record=False)
+                self._log("微信输出", user_id, reply)
+                return
+
         if text or image_item:
             transcript_input = text or self.agent_service.image_prompt
             self._append_transcript(
@@ -498,6 +512,35 @@ class WeChatBot:
             self._log("微信输出", user_id, reply)
             return
 
+        if not image_item and (
+            lowered_text == "/integration" or lowered_text.startswith("/integration ")
+        ):
+            parts = normalized_text.split()
+            if tenant is None or self.integration_service is None:
+                reply = "当前未启用用户集成配置。"
+            else:
+                try:
+                    if len(parts) == 1 or (
+                        len(parts) >= 2 and parts[1].lower() == "status"
+                    ):
+                        reply = self.integration_service.status(
+                            tenant, parts[2] if len(parts) == 3 else ""
+                        )
+                    elif len(parts) == 3 and parts[1].lower() == "setup":
+                        reply = self.integration_service.setup(tenant, parts[2])
+                    elif len(parts) == 3 and parts[1].lower() == "delete":
+                        reply = self.integration_service.delete(tenant, parts[2])
+                    else:
+                        reply = (
+                            "格式错误，请使用 /integration status [编号]、"
+                            "/integration setup <编号> 或 /integration delete <编号>。"
+                        )
+                except ValueError as exc:
+                    reply = str(exc)
+            self._reply(user_id, context_token, reply, tenant)
+            self._log("微信输出", user_id, reply)
+            return
+
         if not image_item and lowered_text == "/delete-data":
             if tenant is None:
                 reply = "当前未启用多用户存储。"
@@ -508,7 +551,7 @@ class WeChatBot:
                     datetime.now(timezone.utc) + timedelta(minutes=5),
                 )
                 reply = (
-                    "此操作会永久删除你的历史、设置、订阅、工作区和脚本产物。"
+                    "此操作会永久删除你的历史、设置、订阅、工作区、脚本产物和集成凭据。"
                     "Codex 账号级任务历史仍由 Codex 自身保存，不会随本操作删除。"
                     "如确定，请在 5 分钟内回复 /confirm-delete {}。"
                 ).format(code)
@@ -538,6 +581,8 @@ class WeChatBot:
                     )
                     if callable(close_resources):
                         close_resources(tenant.tenant_id)
+                    if self.integration_service is not None:
+                        self.integration_service.delete_all(tenant)
                     self.tenant_registry.delete(tenant)
                 except (OSError, ValueError, TenantStoreError) as exc:
                     reply = "暂时无法删除用户数据：{}。请稍后重试。".format(exc)

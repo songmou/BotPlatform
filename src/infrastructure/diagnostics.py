@@ -47,6 +47,29 @@ def _ollama_models(base_url: str, timeout: float = 3.0) -> List[str]:
     ]
 
 
+def _browser_runtime() -> Optional[str]:
+    """Return the browser runtime selected by the same order as the plugin."""
+    try:
+        from playwright.sync_api import sync_playwright
+
+        playwright = sync_playwright().start()
+        try:
+            bundled = Path(str(playwright.chromium.executable_path)).expanduser()
+            if bundled.is_file():
+                return "Playwright Chromium"
+        finally:
+            playwright.stop()
+    except Exception:
+        pass
+    for label, candidate in (
+        ("Google Chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ("Microsoft Edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    ):
+        if Path(candidate).is_file():
+            return label
+    return None
+
+
 def check_configuration(
     config_dir: Path,
     *,
@@ -213,15 +236,25 @@ def check_configuration(
                 Diagnostic("插件 {} 未启用".format(plugin_id), config_dir / "plugins.json")
             )
             continue
-        if plugin_id == "browser_automation" and not (
-            env.get("BROWSER_EXECUTABLE") or shutil.which("google-chrome") or shutil.which("chromium")
-        ):
-            report.warnings.append(
-                Diagnostic(
-                    "浏览器插件已启用；请确认 Playwright Chromium 或系统浏览器已安装",
-                    config_dir / "plugins.json",
-                )
+        if plugin_id == "browser_automation":
+            explicit = env.get("BROWSER_EXECUTABLE")
+            runtime = (
+                "显式浏览器"
+                if explicit and Path(explicit).expanduser().is_file()
+                else _browser_runtime()
+                or ("Chromium" if shutil.which("chromium") else None)
+                or ("Google Chrome" if shutil.which("google-chrome") else None)
             )
+            target = config_dir / "plugins.json"
+            if runtime:
+                report.ready.append(Diagnostic("浏览器运行环境可用：{}".format(runtime), target))
+            else:
+                report.warnings.append(
+                    Diagnostic(
+                        "浏览器插件已启用；请确认 Playwright Chromium 或系统浏览器已安装",
+                        target,
+                    )
+                )
         if plugin_id == "codex_tasks" and not plugin.settings.get("admin_tenant_ids"):
             report.warnings.append(
                 Diagnostic(
