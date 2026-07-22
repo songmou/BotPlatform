@@ -148,6 +148,11 @@ class AgentPreset:
     capabilities: List[Capability]
     image_prompt: Optional[str] = None
     tools: List[str] = field(default_factory=list)
+    model: Optional[str] = None
+    greeting: Optional[str] = None
+    greeting_hints: List[str] = field(default_factory=list)
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -360,31 +365,29 @@ def _load_tools(path: Path) -> ToolConfig:
     tenant_workspace_placeholder = Path("/__ilinkbot_tenant_workspace__")
     roots: List[Path] = []
     for index, raw_root in enumerate(_string_list(data, "allowed_roots", path)):
-        root = (
-            tenant_workspace_placeholder
-            if raw_root == tenant_workspace_marker
-            else Path(raw_root).expanduser()
-        )
+        if raw_root == tenant_workspace_marker:
+            roots.append(tenant_workspace_placeholder)
+            continue
+        root = Path(raw_root).expanduser()
         if not root.is_absolute():
             raise _error(path, "allowed_roots[{}]".format(index), "必须是绝对路径")
         root = root.resolve()
-        if root != tenant_workspace_placeholder and not root.is_dir():
+        if not root.is_dir():
             raise _error(path, "allowed_roots[{}]".format(index), "目录不存在：{}".format(root))
         if root in roots:
             raise _error(path, "allowed_roots", "解析后存在重复目录：{}".format(root))
         roots.append(root)
 
     raw_default = _required_string(data, "default_working_directory", path)
-    default_directory = (
-        tenant_workspace_placeholder
-        if raw_default == tenant_workspace_marker
-        else Path(raw_default).expanduser()
-    )
-    if not default_directory.is_absolute():
-        raise _error(path, "default_working_directory", "必须是绝对路径")
-    default_directory = default_directory.resolve()
-    if default_directory != tenant_workspace_placeholder and not default_directory.is_dir():
-        raise _error(path, "default_working_directory", "目录不存在：{}".format(default_directory))
+    if raw_default == tenant_workspace_marker:
+        default_directory = tenant_workspace_placeholder
+    else:
+        default_directory = Path(raw_default).expanduser()
+        if not default_directory.is_absolute():
+            raise _error(path, "default_working_directory", "必须是绝对路径")
+        default_directory = default_directory.resolve()
+        if not default_directory.is_dir():
+            raise _error(path, "default_working_directory", "目录不存在：{}".format(default_directory))
     if not _is_within(default_directory, roots):
         raise _error(path, "default_working_directory", "必须位于 allowed_roots 中")
 
@@ -661,7 +664,8 @@ def _load_agent(path: Path) -> AgentPreset:
     data = _load_json(path)
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
-        "capabilities", "tools",
+        "capabilities", "tools", "model", "greeting", "greeting_hints",
+        "temperature", "max_tokens",
     }, path)
     capabilities_data = data.get("capabilities")
     if not isinstance(capabilities_data, list) or not capabilities_data:
@@ -698,6 +702,28 @@ def _load_agent(path: Path) -> AgentPreset:
             raise _error(path, "tools", "不能包含重复工具：{}".format(name))
         tools.append(name)
 
+    raw_greeting_hints = data.get("greeting_hints", [])
+    if not isinstance(raw_greeting_hints, list):
+        raise _error(path, "greeting_hints", "必须是数组")
+    greeting_hints: List[str] = []
+    for index, hint in enumerate(raw_greeting_hints):
+        if not isinstance(hint, str) or not hint.strip():
+            raise _error(path, "greeting_hints[{}]".format(index), "必须是非空字符串")
+        greeting_hints.append(hint.strip())
+
+    temperature = data.get("temperature")
+    if temperature is not None:
+        if not isinstance(temperature, (int, float)):
+            raise _error(path, "temperature", "必须是数字")
+        temperature = float(temperature)
+        if temperature < 0 or temperature > 2:
+            raise _error(path, "temperature", "必须在 0-2 之间")
+
+    max_tokens = data.get("max_tokens")
+    if max_tokens is not None:
+        if not isinstance(max_tokens, int) or max_tokens <= 0:
+            raise _error(path, "max_tokens", "必须是正整数")
+
     return AgentPreset(
         id=_required_string(data, "id", path),
         name=_required_string(data, "name", path),
@@ -707,6 +733,11 @@ def _load_agent(path: Path) -> AgentPreset:
         image_prompt=_optional_string(data, "image_prompt", path),
         capabilities=capabilities,
         tools=tools,
+        model=_optional_string(data, "model", path),
+        greeting=_optional_string(data, "greeting", path),
+        greeting_hints=greeting_hints,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 

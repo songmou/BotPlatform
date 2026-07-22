@@ -23,7 +23,7 @@ from src.integrations.embeddings import EmbeddingClient
 from src.integrations.ilink import ILinkClient, ILinkError, SessionExpired
 from src.modeling import ModelError, ModelRouter
 from src.modeling.factory import create_model_client
-from src.paths import CONFIG_DIR, DATA_DIR, PROJECT_ROOT
+from src.paths import CONFIG_DIR, CREDENTIALS_PATH, DATA_DIR, PROJECT_ROOT
 from src.plugins import PluginContext, build_plugins
 from src.services.agent import AgentService
 from src.services.knowledge import KnowledgeService
