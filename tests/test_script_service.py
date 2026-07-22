@@ -6,12 +6,12 @@ import time
 import unittest
 from pathlib import Path
 
-from src.config.loader import ScriptDefinition, ScriptParameter
-from src.integrations.ilink import Credentials
-from src.integrations.keychain import KeychainService
-from src.services.notification import TenantRecipientStore
-from src.services.script import ScriptRun, ScriptService
-from src.storage.tenants import IntegrationStore, TenantRegistry
+from src.core.config.loader import ScriptDefinition, ScriptParameter
+from src.core.integrations.ilink import Credentials
+from src.core.integrations.keychain import KeychainService
+from src.core.services.notification import TenantRecipientStore
+from src.core.services.script import ScriptRun, ScriptService
+from src.core.storage.tenants import IntegrationStore, TenantRegistry
 
 
 FAKE_SCRIPT = r'''from __future__ import annotations

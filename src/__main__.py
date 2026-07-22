@@ -1,6 +1,6 @@
 """Run BotPlatform with ``python -m src``."""
 
-from src.application.cli import main
+from src.core.application.cli import main
 
 
 if __name__ == "__main__":

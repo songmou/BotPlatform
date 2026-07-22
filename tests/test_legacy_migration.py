@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.storage.migration import LegacyDataMigrator
-from src.modeling import CanonicalMessage
-from src.services.notification import TenantRecipientStore
-from src.storage.tenants import ConversationStore, ScheduleStore, TenantRegistry
+from src.core.storage.migration import LegacyDataMigrator
+from src.core.modeling import CanonicalMessage
+from src.core.services.notification import TenantRecipientStore
+from src.core.storage.tenants import ConversationStore, ScheduleStore, TenantRegistry
 
 
 class LegacyMigrationTests(unittest.TestCase):

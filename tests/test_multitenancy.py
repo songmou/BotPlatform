@@ -8,14 +8,14 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
-from src.config.loader import ScriptDefinition, ToolConfig
-from src.integrations.ilink import Credentials
-from src.integrations.keychain import KeychainReference, KeychainService
-from src.application import WeChatBot, run_notify_command
-from src.services.integration import IntegrationService
-from src.services.notification import TenantRecipientStore
-from src.services.script import ScriptService
-from src.storage.tenants import (
+from src.core.config.loader import ScriptDefinition, ToolConfig
+from src.core.integrations.ilink import Credentials
+from src.core.integrations.keychain import KeychainReference, KeychainService
+from src.core.application import WeChatBot, run_notify_command
+from src.core.services.integration import IntegrationService
+from src.core.services.notification import TenantRecipientStore
+from src.core.services.script import ScriptService
+from src.core.storage.tenants import (
     ConversationStore,
     IntegrationStore,
     ScheduleStore,
@@ -23,7 +23,7 @@ from src.storage.tenants import (
     TenantRegistry,
     TenantStoreError,
 )
-from src.tooling import ToolError, ToolRuntime
+from src.core.tooling import ToolError, ToolRuntime
 
 
 class FakeKeychain:
@@ -60,7 +60,7 @@ class MultiTenantStorageTests(unittest.TestCase):
         self.assertNotIn("wechat-a", str(self.registry.tenant_root(self.a.tenant_id)))
 
         conversations = ConversationStore(self.registry, max_messages=2)
-        from src.modeling import CanonicalMessage
+        from src.core.modeling import CanonicalMessage
 
         conversations.save_context(
             self.a.tenant_id,

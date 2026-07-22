@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.services.knowledge import KnowledgeService
-from src.services.memory import MemoryService
-from scripts.todo.todo_manager import execute_action
-from src.storage.tenants import ConversationStore, TenantRegistry
+from src.core.services.knowledge import KnowledgeService
+from src.core.services.memory import MemoryService
+from src.core.plugins.todo import execute_action
+from src.core.storage.tenants import ConversationStore, TenantRegistry
 
 
 class FakeEmbedding:
@@ -126,16 +126,16 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
 
     def test_sqlite_todo_backend(self):
         result = execute_action(
-            self.registry.tenant_root(self.tenant.tenant_id) / "scripts" / "todo",
+            self.registry.database_path,
+            self.tenant.tenant_id,
             "add",
             title="SQLite 待办",
-            database_path=self.registry.database_path,
-            tenant_id=self.tenant.tenant_id,
         )
         self.assertIn("T0001", result.summary)
         listed = execute_action(
-            Path("."), "list", database_path=self.registry.database_path,
-            tenant_id=self.tenant.tenant_id,
+            self.registry.database_path,
+            self.tenant.tenant_id,
+            "list",
         )
         self.assertIn("SQLite 待办", listed.summary)
         self.assertFalse((self.registry.tenant_root(self.tenant.tenant_id) / "scripts" / "todo" / "todos.json").exists())

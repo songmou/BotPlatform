@@ -8,13 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.plugins import PluginContext
-from src.plugins.base import PluginError
-from src.plugins.codex_tasks import (
+from src.core.plugins import PluginContext
+from src.core.plugins.base import PluginError
+from src.core.plugins.codex_tasks import (
     CodexTaskStore,
     CodexTasksPlugin,
 )
-from src.storage.tenants import TenantRegistry
+from src.core.storage.tenants import TenantRegistry
 
 
 def wait_for(predicate, timeout=3.0):

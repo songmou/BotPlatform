@@ -1,6 +1,11 @@
 {
   "plugins": [
     {
+      "id": "todo",
+      "enabled": true,
+      "settings": {}
+    },
+    {
       "id": "browser_automation",
       "enabled": true,
       "settings": {

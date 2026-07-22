@@ -27,40 +27,6 @@
         }
       },
       "artifact_types": ["image"]
-    },
-    {
-      "id": "todo_manager",
-      "name": "待办提醒与管理",
-      "description": "使用 SQLite 私人待办库查询、新增、编辑、完成、恢复和归档事项，并生成定时提醒。",
-      "entrypoint": "scripts/todo/todo_manager.py",
-      "timeout_seconds": 15,
-      "requires_approval": false,
-      "data_directory": "todo",
-      "parameters": {
-        "action": {
-          "type": "string",
-          "required": true,
-          "choices": ["list", "add", "edit", "complete", "reopen", "remind", "archive"],
-          "positional": true
-        },
-        "todo_id": {
-          "type": "string",
-          "required": false,
-          "flag": "--todo-id"
-        },
-        "title": {
-          "type": "string",
-          "required": false,
-          "flag": "--title"
-        },
-        "scope": {
-          "type": "string",
-          "required": false,
-          "choices": ["pending", "completed", "archived", "all"],
-          "flag": "--scope"
-        }
-      },
-      "artifact_types": []
     }
   ]
 }

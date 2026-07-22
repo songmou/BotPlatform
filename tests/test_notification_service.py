@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.integrations.ilink import Credentials, ILinkError, PartialDeliveryError, SessionExpired
-from src.integrations.images import ImageSource
-from src.services.notification import (
+from src.core.integrations.ilink import Credentials, ILinkError, PartialDeliveryError, SessionExpired
+from src.core.integrations.images import ImageSource
+from src.core.services.notification import (
     NotificationCredentialsError,
     NotificationDeliveryError,
     NotificationError,
@@ -15,7 +15,7 @@ from src.services.notification import (
     NotificationService,
     TenantRecipientStore,
 )
-from src.storage.tenants import TenantRegistry
+from src.core.storage.tenants import TenantRegistry
 
 
 class FakeILink:

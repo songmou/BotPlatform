@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from dotenv import load_dotenv
-from src.plugins.browser_automation import (
+from src.core.plugins.browser_automation import (
     BrowserAutomation,
     BrowserAutomationConfig,
     BrowserUnavailableError,
@@ -218,7 +218,7 @@ def load_config() -> Config:
     password = os.getenv("SITE_PASSWORD", "")
     keychain_service = os.getenv("ILINKBOT_KEYCHAIN_SERVICE", "")
     if keychain_service:
-        from src.integrations.keychain import (
+        from src.core.integrations.keychain import (
             KeychainError,
             KeychainReference,
             KeychainService,

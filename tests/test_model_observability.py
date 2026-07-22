@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.modeling import (
+from src.core.modeling import (
     CanonicalMessage,
     CanonicalToolCall,
     ModelCapabilities,
@@ -12,7 +12,7 @@ from src.modeling import (
     ModelResponse,
     ModelUsage,
 )
-from src.modeling.observability import ObservedModelClient
+from src.core.modeling.observability import ObservedModelClient
 
 
 class FakeClient:

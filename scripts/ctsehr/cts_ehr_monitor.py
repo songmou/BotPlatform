@@ -893,7 +893,7 @@ def execute_monitor(
     if not keychain_service:
         raise CredentialError("未配置当前用户的 OA 凭据引用")
     if os.getenv("ILINKBOT_KEYCHAIN_SERVICE"):
-        from src.integrations.keychain import (
+        from src.core.integrations.keychain import (
             KeychainError,
             KeychainReference,
             KeychainService,

@@ -11,7 +11,7 @@ import httpx
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from src.integrations.ilink import (
+from src.core.integrations.ilink import (
     CANCEL_TYPING_STATUS,
     Credentials,
     ILinkClient,
@@ -30,7 +30,7 @@ from src.integrations.ilink import (
 
 class ILinkClientTests(unittest.TestCase):
     def test_headers_include_auth_and_encoded_random_uin(self) -> None:
-        with patch("src.integrations.ilink.secrets.randbits", return_value=123):
+        with patch("src.core.integrations.ilink.secrets.randbits", return_value=123):
             headers = build_headers("secret-token")
         self.assertEqual(headers["Authorization"], "Bearer secret-token")
         self.assertEqual(headers["AuthorizationType"], "ilink_bot_token")
@@ -161,7 +161,7 @@ class ILinkClientTests(unittest.TestCase):
             credentials=credentials,
             client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
-        with patch("src.integrations.ilink.TYPING_KEEPALIVE_SECONDS", 0.01):
+        with patch("src.core.integrations.ilink.TYPING_KEEPALIVE_SECONDS", 0.01):
             with client.typing("user", "context"):
                 threading.Event().wait(0.025)
 
@@ -276,8 +276,8 @@ class ILinkClientTests(unittest.TestCase):
             client=http,
             cdn_base_url="https://cdn.test/c2c",
         )
-        with patch("src.integrations.ilink.secrets.token_bytes", return_value=key):
-            with patch("src.integrations.ilink.secrets.token_hex", return_value="file-key"):
+        with patch("src.core.integrations.ilink.secrets.token_bytes", return_value=key):
+            with patch("src.core.integrations.ilink.secrets.token_hex", return_value="file-key"):
                 client.send_image("user", "context", image, caption="图片说明")
 
         metadata = captured[0][1]

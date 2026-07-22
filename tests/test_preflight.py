@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.infrastructure.diagnostics import check_configuration
+from src.core.infrastructure.diagnostics import check_configuration
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
@@ -23,7 +23,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_missing_required_key_is_aggregated_and_optional_features_warn(self):
         with patch(
-            "src.infrastructure.diagnostics._ollama_models",
+            "src.core.infrastructure.diagnostics._ollama_models",
             return_value=["gemma4:e4b"],
         ):
             report = check_configuration(SOURCE_CONFIG, environment={})
@@ -36,7 +36,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_key_is_not_sent_to_provider_and_optional_warnings_do_not_fail(self):
         with patch(
-            "src.infrastructure.diagnostics._ollama_models",
+            "src.core.infrastructure.diagnostics._ollama_models",
             return_value=["gemma4:e4b"],
         ):
             report = check_configuration(
@@ -60,7 +60,7 @@ class PreflightTests(unittest.TestCase):
 
             data["profiles"]["ollama_local"]["model"] = "qwen-test"
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            with patch("src.infrastructure.diagnostics._ollama_models", return_value=["qwen-test"]):
+            with patch("src.core.infrastructure.diagnostics._ollama_models", return_value=["qwen-test"]):
                 report = check_configuration(
                     config, environment={"DEEPSEEK_API_KEY": "test-key"}
                 )

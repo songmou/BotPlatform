@@ -55,8 +55,9 @@
       ],
       "target": "last_active_user",
       "action": {
-        "type": "script",
-        "script_id": "todo_manager",
+        "type": "plugin",
+        "plugin_id": "todo",
+        "tool_name": "todo_manage",
         "parameters": {
           "action": "remind"
         }
@@ -68,8 +69,9 @@
       "cron": "5 9 1 * *",
       "target": "last_active_user",
       "action": {
-        "type": "script",
-        "script_id": "todo_manager",
+        "type": "plugin",
+        "plugin_id": "todo",
+        "tool_name": "todo_manage",
         "parameters": {
           "action": "archive"
         }
