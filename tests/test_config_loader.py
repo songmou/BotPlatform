@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.config.loader import ConfigError, load_project_config
+from src.core.config.loader import ConfigError, load_project_config
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
@@ -34,8 +34,10 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config.app.default_agent, "general")
         self.assertEqual(config.active_agent.name, "通用 AI 助手")
         self.assertIn("translator", config.agents)
-        self.assertEqual(len(config.schedules), 5)
-        self.assertEqual(set(config.scripts), {"todo_manager"})
+        self.assertEqual(len(config.schedules), 7)
+        self.assertEqual(
+            set(config.scripts), {"autogen_monitor", "ctsehr_check"}
+        )
         self.assertTrue(
             all(not script.requires_approval for script in config.scripts.values())
         )
@@ -43,7 +45,9 @@ class ConfigLoaderTests(unittest.TestCase):
             task for task in config.schedules if task.id == "todo_reminder"
         )
         self.assertEqual(todo_reminder.crons, ["0 9 * * *", "0 18 * * *"])
-        self.assertEqual(todo_reminder.action.script_id, "todo_manager")
+        self.assertEqual(todo_reminder.action.type, "plugin")
+        self.assertEqual(todo_reminder.action.plugin_id, "todo")
+        self.assertEqual(todo_reminder.action.tool_name, "todo_manage")
         self.assertEqual(todo_reminder.action.parameters, {"action": "remind"})
         todo_archive = next(
             task for task in config.schedules if task.id == "todo_monthly_archive"
@@ -53,7 +57,7 @@ class ConfigLoaderTests(unittest.TestCase):
         reminder = next(
             task for task in config.schedules if task.id == "inactive_user_reminder"
         )
-        self.assertFalse(reminder.enabled)
+        self.assertTrue(reminder.enabled)
         self.assertEqual(reminder.condition.type, "inactivity_once")
         self.assertEqual(reminder.condition.after_hours, 20)
         self.assertEqual(reminder.condition.before_hours, 24)
@@ -62,7 +66,8 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config.app.active_model, "deepseek_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
         self.assertTrue(config.active_model.enabled)
-        self.assertFalse(config.models["ollama_local"].enabled)
+        self.assertTrue(config.models["ollama_local"].enabled)
+        self.assertEqual(config.models["ollama_local"].model, "gemma4:e4b")
         self.assertEqual(config.app.local_model, "ollama_local")
         self.assertEqual(config.app.vision_model, "ollama_local")
         self.assertFalse(config.embedding.enabled)
@@ -98,16 +103,18 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "scripts.json"
             data = self.load_json(path)
-            data["scripts"][0].pop("requires_approval")
+            ctsehr = next(item for item in data["scripts"] if item["id"] == "ctsehr_check")
+            ctsehr.pop("requires_approval")
             self.save_json(path, data)
             config = load_project_config(config_dir)
-            self.assertTrue(config.scripts["todo_manager"].requires_approval)
+            self.assertTrue(config.scripts["ctsehr_check"].requires_approval)
 
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
             path = config_dir / "scripts.json"
             data = self.load_json(path)
-            data["scripts"][0]["requires_approval"] = "false"
+            ctsehr = next(item for item in data["scripts"] if item["id"] == "ctsehr_check")
+            ctsehr["requires_approval"] = "false"
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "requires_approval.*布尔值"):
                 load_project_config(config_dir)
@@ -302,17 +309,17 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "schedules.json"
             data = self.load_json(path)
-            task = next(item for item in data["tasks"] if item["id"] == "todo_reminder")
-            task["action"]["parameters"] = {"action": "invalid"}
+            task = next(item for item in data["tasks"] if item["id"] == "ctsehr_check")
+            task["action"]["parameters"] = {"date": "invalid"}
             self.save_json(path, data)
-            with self.assertRaisesRegex(ConfigError, "仅允许"):
+            with self.assertRaisesRegex(ConfigError, "必须是.*日期"):
                 load_project_config(config_dir)
 
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
             path = config_dir / "schedules.json"
             data = self.load_json(path)
-            task = next(item for item in data["tasks"] if item["id"] == "todo_reminder")
+            task = next(item for item in data["tasks"] if item["id"] == "ctsehr_check")
             task["action"]["parameters"] = {"phase": "morning"}
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "未知参数.*phase"):
@@ -332,8 +339,17 @@ class ConfigLoaderTests(unittest.TestCase):
             config = load_project_config(SOURCE_CONFIG)
             self.assertEqual(config.active_model.id, "deepseek_cloud")
         with patch.dict("os.environ", {"MODEL_PROFILE": "ollama_local"}, clear=False):
-            with self.assertRaisesRegex(ConfigError, "必须启用"):
-                load_project_config(SOURCE_CONFIG)
+            config = load_project_config(SOURCE_CONFIG)
+            self.assertEqual(config.active_model.id, "ollama_local")
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            models_path = config_dir / "models.json"
+            models = self.load_json(models_path)
+            models["profiles"]["ollama_local"]["enabled"] = False
+            self.save_json(models_path, models)
+            with patch.dict("os.environ", {"MODEL_PROFILE": "ollama_local"}, clear=False):
+                with self.assertRaisesRegex(ConfigError, "必须启用"):
+                    load_project_config(config_dir)
 
     def test_fallback_reference_and_cooldown_are_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

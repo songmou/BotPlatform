@@ -6,11 +6,12 @@ import time
 import unittest
 from pathlib import Path
 
-from src.config.loader import ScriptDefinition, ScriptParameter
-from src.integrations.ilink import Credentials
-from src.services.notification import TenantRecipientStore
-from src.services.script import ScriptService
-from src.storage.tenants import IntegrationStore, TenantRegistry
+from src.core.config.loader import ScriptDefinition, ScriptParameter
+from src.core.integrations.ilink import Credentials
+from src.core.integrations.keychain import KeychainService
+from src.core.services.notification import TenantRecipientStore
+from src.core.services.script import ScriptRun, ScriptService
+from src.core.storage.tenants import IntegrationStore, TenantRegistry
 
 
 FAKE_SCRIPT = r'''from __future__ import annotations
@@ -170,6 +171,76 @@ class ScriptServiceTests(unittest.TestCase):
         result = self.wait_for(service, submitted["run_id"], timeout=3)
         self.assertEqual(result["status"], "timed_out")
         self.assertEqual(result["exit_code"], -15)
+
+    def test_integration_metadata_is_injected_without_secret(self) -> None:
+        integration_store = IntegrationStore(self.registry)
+        keychain = KeychainService(storage_path=self.root / "credentials.json")
+        reference = keychain.reference(self.tenant.tenant_id, "autogen")
+        keychain.set_secret(reference, "never-in-environment")
+        integration_store.set(
+            self.tenant.tenant_id,
+            "autogen",
+            {
+                "account": "account-value",
+                "keychain_service": reference.service,
+                "keychain_account": reference.account,
+            },
+        )
+        definition = ScriptDefinition(
+            id="autogen_monitor",
+            name="AutoGen",
+            description="test",
+            entrypoint=str(self.entrypoint),
+            timeout_seconds=5,
+            requires_approval=False,
+        )
+        service = ScriptService(
+            {"autogen_monitor": definition},
+            Credentials("token", "https://gateway", "bot", "owner"),
+            self.store,
+            self.root,
+            self.registry,
+            integration_store,
+            keychain_service=keychain,
+            notification_service=self.notifications,
+        )
+        self.addCleanup(service.shutdown)
+        run = ScriptRun(
+            run_id="autogen_monitor-20260720T120000-12345678",
+            script_id="autogen_monitor",
+            script_name="AutoGen",
+            trigger="verification",
+            parameters={},
+            status="running",
+            summary="",
+            tenant_id=self.tenant.tenant_id,
+        )
+        environment = service._environment(run, self.root / "result.json")
+        self.assertEqual(environment["ILINKBOT_INTEGRATION_ACCOUNT"], "account-value")
+        self.assertEqual(environment["ILINKBOT_KEYCHAIN_SERVICE"], reference.service)
+        self.assertNotIn("never-in-environment", environment.values())
+
+    def test_integration_script_is_rejected_before_queue_when_credentials_are_missing(self) -> None:
+        definition = ScriptDefinition(
+            id="ctsehr_check",
+            name="CTS EHR",
+            description="test",
+            entrypoint=str(self.entrypoint),
+            timeout_seconds=5,
+            requires_approval=False,
+        )
+        service = ScriptService(
+            {"ctsehr_check": definition},
+            Credentials("token", "https://gateway", "bot", "owner"),
+            self.store,
+            self.root,
+            self.registry,
+            notification_service=self.notifications,
+            keychain_service=KeychainService(storage_path=self.root / "credentials.json"),
+        )
+        self.addCleanup(service.shutdown)
+        with self.assertRaisesRegex(ValueError, "/integration setup ctsehr"):
+            service.submit(self.tenant, "ctsehr_check", {}, trigger="schedule")
 
 
 if __name__ == "__main__":

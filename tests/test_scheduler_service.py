@@ -7,12 +7,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.config.loader import ScheduledTask, TaskAction, TaskCondition
-from src.integrations.ilink import Credentials, ILinkError
-from src.integrations.images import ImageSourceError
-from src.services.notification import TenantRecipientStore
-from src.services.scheduler import SchedulerService
-from src.storage.tenants import ScheduleStore, TenantRegistry
+from src.core.config.loader import ScheduledTask, TaskAction, TaskCondition
+from src.core.integrations.ilink import Credentials, ILinkError
+from src.core.integrations.images import ImageSourceError
+from src.core.services.notification import TenantRecipientStore
+from src.core.services.scheduler import SchedulerService
+from src.core.storage.tenants import ScheduleStore, TenantRegistry
 
 
 class FakeAgentService:
@@ -133,6 +133,17 @@ class FakeScriptService:
         return {"run_id": "job-1", "status": "running"}
 
 
+class FakePlugin:
+    def __init__(self, result=None) -> None:
+        self.id = "todo"
+        self.calls = []
+        self.result = result or {"summary": "提醒内容"}
+
+    def execute(self, tool_name, arguments, tenant):
+        self.calls.append((tool_name, arguments, tenant))
+        return self.result
+
+
 def script_task():
     return ScheduledTask(
         id="script",
@@ -143,6 +154,21 @@ def script_task():
             type="script",
             script_id="example_check",
             parameters={},
+        ),
+    )
+
+
+def plugin_task():
+    return ScheduledTask(
+        id="plugin",
+        enabled=True,
+        cron="0 9 * * *",
+        target="last_active_user",
+        action=TaskAction(
+            type="plugin",
+            plugin_id="todo",
+            tool_name="todo_manage",
+            parameters={"action": "remind"},
         ),
     )
 
@@ -171,7 +197,8 @@ class SchedulerServiceTests(unittest.TestCase):
         return client
 
     def service(
-        self, tasks, factory=None, scheduler=None, image_loader=None, script_service=None
+        self, tasks, factory=None, scheduler=None, image_loader=None, script_service=None,
+        plugins=None,
     ):
         for task in tasks:
             self.schedules.set_enabled(self.tenant.tenant_id, task.id, True)
@@ -191,6 +218,7 @@ class SchedulerServiceTests(unittest.TestCase):
             script_service=script_service,
             tenant_registry=self.registry,
             schedule_store=self.schedules,
+            plugins=plugins,
         )
 
     def test_recipient_is_atomic_private_and_reloadable(self) -> None:
@@ -258,6 +286,35 @@ class SchedulerServiceTests(unittest.TestCase):
             [(self.tenant, "example_check", {}, "schedule", None)],
         )
         self.assertEqual(self.clients, [])
+
+    def test_plugin_schedule_executes_tool_and_notifies(self) -> None:
+        self.store.update(self.tenant, "context")
+        plugin = FakePlugin()
+        task = plugin_task()
+        service = self.service([task], plugins=[plugin])
+        self.assertTrue(service.run_task(task))
+        self.assertEqual(len(plugin.calls), 1)
+        tool_name, arguments, tenant = plugin.calls[0]
+        self.assertEqual(tool_name, "todo_manage")
+        self.assertEqual(arguments, {"action": "remind"})
+        self.assertEqual(tenant, self.tenant)
+        self.assertEqual(self.clients[-1].sent[-1], ("user@im.wechat", "context", "提醒内容"))
+        self.assertEqual(self.logs[-1][1], "成功")
+        self.assertIn("todo", self.logs[-1][2])
+
+    def test_plugin_schedule_without_recipient_skips_notification(self) -> None:
+        plugin = FakePlugin()
+        task = plugin_task()
+        service = self.service([task], plugins=[plugin])
+        self.assertTrue(service.run_task(task))
+        self.assertEqual(len(plugin.calls), 1)
+        self.assertEqual(self.clients, [])
+
+    def test_plugin_schedule_missing_plugin_raises_failure(self) -> None:
+        task = plugin_task()
+        service = self.service([task], plugins=[])
+        self.assertFalse(service.run_task(task))
+        self.assertEqual(self.logs[-1][1], "失败")
 
     def test_one_logical_task_can_register_two_cron_triggers(self) -> None:
         scheduler = FakeScheduler()

@@ -22,16 +22,42 @@
       }
     },
     {
+      "id": "autogen_monitor",
+      "enabled": true,
+      "cron": "0 8,14 * * *",
+      "target": "last_active_user",
+      "action": {
+        "type": "script",
+        "script_id": "autogen_monitor",
+        "parameters": {}
+      }
+    },
+    {
+      "id": "ctsehr_check",
+      "enabled": true,
+      "crons": [
+        "50 8 * * *",
+        "0 18 * * *"
+      ],
+      "target": "last_active_user",
+      "action": {
+        "type": "script",
+        "script_id": "ctsehr_check",
+        "parameters": {}
+      }
+    },
+    {
       "id": "todo_reminder",
-      "enabled": false,
+      "enabled": true,
       "crons": [
         "0 9 * * *",
         "0 18 * * *"
       ],
       "target": "last_active_user",
       "action": {
-        "type": "script",
-        "script_id": "todo_manager",
+        "type": "plugin",
+        "plugin_id": "todo",
+        "tool_name": "todo_manage",
         "parameters": {
           "action": "remind"
         }
@@ -39,12 +65,13 @@
     },
     {
       "id": "todo_monthly_archive",
-      "enabled": false,
+      "enabled": true,
       "cron": "5 9 1 * *",
       "target": "last_active_user",
       "action": {
-        "type": "script",
-        "script_id": "todo_manager",
+        "type": "plugin",
+        "plugin_id": "todo",
+        "tool_name": "todo_manage",
         "parameters": {
           "action": "archive"
         }
@@ -52,7 +79,7 @@
     },
     {
       "id": "inactive_user_reminder",
-      "enabled": false,
+      "enabled": true,
       "cron": "*/10 * * * *",
       "target": "last_active_user",
       "condition": {

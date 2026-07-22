@@ -7,9 +7,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.services.agent import AgentService
-from src.config.loader import load_project_config
-from src.modeling import (
+from src.core.services.agent import AgentService
+from src.core.config.loader import load_project_config
+from src.core.modeling import (
     CanonicalMessage,
     CanonicalToolCall,
     ModelCapabilities,
@@ -18,8 +18,8 @@ from src.modeling import (
     ModelRouter,
     ModelResponse,
 )
-from src.tooling import ApprovalRequired, FinalAnswer, ToolError, ToolRuntime
-from src.storage.tenants import TenantRegistry
+from src.core.tooling import ApprovalRequired, FinalAnswer, ToolError, ToolRuntime
+from src.core.storage.tenants import TenantRegistry
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"

@@ -9,7 +9,7 @@ from unittest.mock import patch
 import httpx
 from PIL import Image
 
-from src.integrations.images import (
+from src.core.integrations.images import (
     ImageSource,
     ImageSourceError,
     ImageSourceLoader,
@@ -63,7 +63,7 @@ class ImageSourceTests(unittest.TestCase):
 
             oversized = root / "large.png"
             oversized.write_bytes(b"x" * 33)
-            with patch("src.integrations.images.MAX_OUTBOUND_IMAGE_BYTES", 32):
+            with patch("src.core.integrations.images.MAX_OUTBOUND_IMAGE_BYTES", 32):
                 with self.assertRaisesRegex(ImageSourceError, "20MB"):
                     loader.load(ImageSource.local(oversized))
 
@@ -108,7 +108,7 @@ class ImageSourceTests(unittest.TestCase):
 
         oversized_client = httpx.Client(transport=httpx.MockTransport(oversized_handler))
         loader = ImageSourceLoader(client_factory=lambda: oversized_client)
-        with patch("src.integrations.images.MAX_OUTBOUND_IMAGE_BYTES", 32):
+        with patch("src.core.integrations.images.MAX_OUTBOUND_IMAGE_BYTES", 32):
             with self.assertRaisesRegex(ImageSourceError, "20MB"):
                 loader.load_url("http://internal.test/image")
 

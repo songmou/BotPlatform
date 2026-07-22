@@ -13,28 +13,28 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-import src.application.cli as main_module
-import src.application.bootstrap as bootstrap_module
-from src.services.agent import AgentService
-from src.config.loader import load_project_config
-from src.integrations.ilink import Credentials
-from src.infrastructure.instance_lock import SingleInstanceLock
-from src.infrastructure.logging import log_interaction
-from src.application import (
+import src.core.application.cli as main_module
+import src.core.application.bootstrap as bootstrap_module
+from src.core.services.agent import AgentService
+from src.core.config.loader import load_project_config
+from src.core.integrations.ilink import Credentials
+from src.core.infrastructure.instance_lock import SingleInstanceLock
+from src.core.infrastructure.logging import log_interaction
+from src.core.application import (
     WeChatBot,
     load_credentials,
     parse_args,
     run_notify_command,
     save_credentials,
 )
-from src.modeling import (
+from src.core.modeling import (
     CanonicalMessage,
     ModelCapabilities,
     ModelError,
     ModelIdentity,
     ModelResponse,
 )
-from src.tooling import ApprovalRequired, FinalAnswer
+from src.core.tooling import ApprovalRequired, FinalAnswer
 
 
 def text_message(user: str, text: str, **extra):

@@ -8,13 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.plugins import PluginContext
-from src.plugins.base import PluginError
-from src.plugins.codex_tasks import (
+from src.core.plugins import PluginContext
+from src.core.plugins.base import PluginError
+from src.core.plugins.codex_tasks import (
     CodexTaskStore,
     CodexTasksPlugin,
 )
-from src.storage.tenants import TenantRegistry
+from src.core.storage.tenants import TenantRegistry
 
 
 def wait_for(predicate, timeout=3.0):
@@ -165,6 +165,13 @@ class CodexTasksPluginTests(unittest.TestCase):
             "max_concurrent_tasks": 1,
             "notify_on_completion": True,
             "monitor_external_tasks": False,
+            "notify_events": [
+                "waiting_approval",
+                "waiting_input",
+                "completed",
+                "failed",
+                "interrupted",
+            ],
         }
 
     def plugin(self, fake=None):
@@ -243,6 +250,44 @@ class CodexTasksPluginTests(unittest.TestCase):
 
         plugin.service._notify("thread-1")
         self.assertEqual(len(self.notifications.messages), 1)
+
+    def test_full_lifecycle_notifies_queued_running_and_terminal_once(self):
+        settings = self.settings()
+        settings["notify_events"] = [
+            "queued",
+            "running",
+            "waiting_approval",
+            "waiting_input",
+            "completed",
+            "failed",
+            "interrupted",
+        ]
+        plugin = CodexTasksPlugin(
+            settings,
+            context=PluginContext(
+                project_root=self.root,
+                tenant_registry=self.registry,
+                notification_service=self.notifications,
+            ),
+            client_factory=lambda: FakeCodex(),
+        )
+        self.addCleanup(plugin.close)
+        created = plugin.execute(
+            "codex_create_task",
+            {"title": "Lifecycle", "instruction": "Complete"},
+            self.admin,
+        )
+        wait_for(
+            lambda: plugin.service.store.get(created["task_id"])["status"]
+            == "completed"
+        )
+        wait_for(lambda: len(self.notifications.messages) == 3)
+        messages = [message for _, message in self.notifications.messages]
+        self.assertIn("已排队", messages[0])
+        self.assertIn("开始执行", messages[1])
+        self.assertIn("已完成", messages[2])
+        plugin.service._notify(created["task_id"])
+        self.assertEqual(len(self.notifications.messages), 3)
 
     def test_active_list_and_cancel_interrupt_running_turn(self):
         plugin, client = self.plugin(FakeCodex(block=True))
@@ -679,6 +724,34 @@ class CodexTasksPluginTests(unittest.TestCase):
         self.assertEqual(task["origin"], "external")
         self.assertEqual(task["phase"], "waiting_approval")
 
+    def test_new_external_task_notifies_running_then_completed(self):
+        fake = FakeCodex()
+        settings = self.settings()
+        settings["monitor_external_tasks"] = True
+        settings["external_poll_interval_seconds"] = 300
+        settings["notify_events"] = ["running", "completed"]
+        plugin = CodexTasksPlugin(
+            settings,
+            context=PluginContext(
+                project_root=self.root,
+                tenant_registry=self.registry,
+                notification_service=self.notifications,
+            ),
+            client_factory=lambda: fake,
+        )
+        self.addCleanup(plugin.close)
+        wait_for(lambda: plugin.service._external_baseline_done)
+        new_thread = FakeThread("external-new")
+        new_thread.status_type = "active"
+        fake.threads[new_thread.id] = new_thread
+        plugin.service._reconcile_external_tasks()
+        wait_for(lambda: len(self.notifications.messages) == 1)
+        self.assertIn("开始执行", self.notifications.messages[0][1])
+        new_thread.status_type = "idle"
+        plugin.service._reconcile_external_tasks()
+        wait_for(lambda: len(self.notifications.messages) == 2)
+        self.assertIn("已完成", self.notifications.messages[1][1])
+
     def test_terminal_notification_retries_and_updates_legacy_status(self):
         flaky = FlakyNotificationService()
         plugin = CodexTasksPlugin(
@@ -704,9 +777,13 @@ class CodexTasksPluginTests(unittest.TestCase):
                 "WHERE thread_id=? AND delivery_status='retry'",
                 ("2000-01-01T00:00:00+00:00", thread_id),
             )
-        event = plugin.service.store.due_events()[0]
-        plugin.service._deliver_event(event)
-        self.assertEqual(plugin.service.store.get(thread_id)["notification_status"], "sent")
+        due = plugin.service.store.due_events()
+        if due:
+            plugin.service._deliver_event(due[0])
+        wait_for(
+            lambda: plugin.service.store.get(thread_id)["notification_status"]
+            == "sent"
+        )
         self.assertEqual(len(flaky.messages), 1)
 
     def test_pinned_protocol_response_shapes_are_fail_closed(self):

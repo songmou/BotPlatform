@@ -4,9 +4,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from src.services.agent import AgentService
-from src.config.loader import load_project_config
-from src.modeling import (
+from src.core.services.agent import AgentService
+from src.core.config.loader import load_project_config
+from src.core.modeling import (
     CanonicalMessage,
     ModelCapabilities,
     ModelError,
