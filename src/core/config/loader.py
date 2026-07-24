@@ -833,7 +833,7 @@ def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]
     if not isinstance(items, list):
         raise _error(path, "scripts", "必须是数组")
     scripts: Dict[str, ScriptDefinition] = {}
-    scripts_root = (project_root / "scripts").resolve()
+    jobs_root = (project_root / "src" / "core" / "jobs").resolve()
     for index, item in enumerate(items):
         prefix = "scripts[{}]".format(index)
         if not isinstance(item, dict):
@@ -860,9 +860,9 @@ def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]
         except OSError as exc:
             raise _error(path, prefix + ".entrypoint", "不存在") from exc
         if not entrypoint.is_file() or not (
-            entrypoint == scripts_root or scripts_root in entrypoint.parents
+            entrypoint == jobs_root or jobs_root in entrypoint.parents
         ):
-            raise _error(path, prefix + ".entrypoint", "必须是 scripts 目录内的文件")
+            raise _error(path, prefix + ".entrypoint", "必须是 src/core/jobs 目录内的文件")
         timeout = item.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 3600:
             raise _error(path, prefix + ".timeout_seconds", "必须是 1 到 3600 的整数")

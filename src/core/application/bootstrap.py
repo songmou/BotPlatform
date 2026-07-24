@@ -30,7 +30,7 @@ from src.core.plugins import PluginContext, build_plugins
 from src.core.services.agent import AgentService
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
-from src.core.services.memory import MemoryService, OllamaMemoryExtractor
+from src.core.services.memory import MemoryService, ModelMemoryExtractor
 from src.core.services.notification import NotificationService, TenantRecipientStore
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
@@ -76,19 +76,6 @@ def run_bot(args, project_config=None) -> int:
         else None
     )
     knowledge_service = KnowledgeService(tenant_registry, embedding_client)
-    local_memory_profile = next(
-        (
-            profile
-            for profile in project_config.models.values()
-            if profile.enabled and profile.type == "ollama"
-        ),
-        None,
-    )
-    memory_service = MemoryService(
-        tenant_registry,
-        OllamaMemoryExtractor(local_memory_profile) if local_memory_profile else None,
-    )
-
     if args.logout:
         delete_credentials()
         print("已清除微信登录凭证。")
@@ -110,10 +97,13 @@ def run_bot(args, project_config=None) -> int:
             cooldown_seconds=project_config.app.fallback_cooldown_seconds,
             fallback_logger=log_model_fallback,
         )
+        memory_service = MemoryService(
+            tenant_registry,
+            ModelMemoryExtractor(model),
+        )
     except (ModelError, ValueError) as exc:
         for client in clients.values():
             client.close()
-        memory_service.close()
         if embedding_client:
             embedding_client.close()
         print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
@@ -235,6 +225,7 @@ def run_bot(args, project_config=None) -> int:
                     tenant_registry=tenant_registry,
                     schedule_store=schedule_store,
                     plugins=platform_plugins,
+                    memory_service=memory_service,
                 )
                 scheduler.start()
                 print(

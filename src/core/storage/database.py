@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 9
 
 
 SCHEMA_V1 = r"""
@@ -346,6 +346,100 @@ CREATE INDEX ix_codex_events_delivery
 
 
 SCHEMA_V6 = r"""
+ALTER TABLE codex_task_runs ADD COLUMN source_cwd TEXT;
+
+CREATE TABLE codex_task_events_v6 (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL UNIQUE,
+    thread_id TEXT NOT NULL REFERENCES codex_task_runs(thread_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (
+        event_type IN (
+            'queued', 'running', 'waiting_approval', 'waiting_input',
+            'completed', 'failed', 'interrupted', 'interaction_expired'
+        )
+    ),
+    message TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        delivery_status IN (
+            'pending', 'sending', 'retry', 'waiting_recipient',
+            'sent', 'failed', 'disabled'
+        )
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT
+);
+INSERT INTO codex_task_events_v6(
+    event_id, event_key, thread_id, tenant_id, event_type, message,
+    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
+)
+SELECT
+    event_id, event_key, thread_id, tenant_id, event_type, message,
+    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
+FROM codex_task_events;
+DROP TABLE codex_task_events;
+ALTER TABLE codex_task_events_v6 RENAME TO codex_task_events;
+CREATE INDEX ix_codex_events_delivery
+    ON codex_task_events(delivery_status, next_attempt_at, event_id);
+UPDATE codex_task_events
+SET delivery_status='waiting_recipient', next_attempt_at=NULL
+WHERE delivery_status='retry'
+  AND attempt_count>=3
+  AND lower(COALESCE(last_error, '')) LIKE '%prepare failed%';
+"""
+
+
+SCHEMA_V7 = r"""
+ALTER TABLE todos ADD COLUMN reminder_at TEXT;
+
+CREATE TABLE IF NOT EXISTS todo_reminder_events (
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    todo_number INTEGER NOT NULL,
+    due_at TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        delivery_status IN ('pending', 'sending', 'sent', 'cancelled')
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT,
+    PRIMARY KEY (tenant_id, todo_number)
+);
+CREATE INDEX IF NOT EXISTS ix_todo_reminders_due
+    ON todo_reminder_events(delivery_status, due_at, tenant_id, todo_number);
+"""
+
+
+SCHEMA_V8 = r"""
+ALTER TABLE todos ADD COLUMN is_one_off INTEGER NOT NULL DEFAULT 0 CHECK (is_one_off IN (0, 1));
+"""
+
+SCHEMA_V9 = r"""
+ALTER TABLE memory_items ADD COLUMN evidence_type TEXT NOT NULL DEFAULT 'legacy'
+    CHECK (evidence_type IN ('explicit', 'inferred', 'legacy'));
+ALTER TABLE memory_items ADD COLUMN confirmed_at TEXT;
+
+CREATE TABLE IF NOT EXISTS soul_profiles (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL DEFAULT '',
+    source_memory_ids TEXT NOT NULL DEFAULT '[]',
+    last_scanned_event_id INTEGER NOT NULL DEFAULT 0,
+    dirty INTEGER NOT NULL DEFAULT 1 CHECK (dirty IN (0, 1)),
+    generated_at TEXT,
+    compacted_at TEXT,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_soul_profiles_dirty
+    ON soul_profiles(dirty, tenant_id);
+"""
+
+
+SCHEMA_V6 = r"""
 CREATE TABLE IF NOT EXISTS tool_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -466,6 +560,34 @@ class Database:
                     connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) "
                         "VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 5
+                if current < 6:
+                    connection.executescript(SCHEMA_V6)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 6
+                if current < 7:
+                    connection.executescript(SCHEMA_V7)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 7
+                if current < 8:
+                    connection.executescript(SCHEMA_V8)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 8
+                if current < 9:
+                    connection.executescript(SCHEMA_V9)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
                     current = 5
                 if current < 6:

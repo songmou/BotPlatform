@@ -228,6 +228,66 @@ Path(os.environ['ILINKBOT_SCRIPT_RESULT_FILE']).write_text(
 
 
 class TenantCommandTests(unittest.TestCase):
+    def test_soul_commands_show_and_rebuild_tenant_profile(self):
+        class FakeILink:
+            def __init__(self):
+                self.credentials = Credentials(
+                    "token", "https://gateway", "bot", "owner"
+                )
+                self.sent = []
+
+            def send_text(self, user_id, context_token, text):
+                self.sent.append((user_id, context_token, text))
+
+        class FakeAgent:
+            image_prompt = "看图"
+
+            def has_pending_approval(self, _subject):
+                return False
+
+        class FakeMemory:
+            def __init__(self):
+                self.calls = []
+
+            def get_soul(self, tenant_id, force_rebuild=False):
+                self.calls.append((tenant_id, force_rebuild))
+                return {
+                    "revision": 2 if force_rebuild else 1,
+                    "updated_at": "2026-07-24T00:00:00+00:00",
+                    "content": "# SOUL\n\n## 习惯与交流偏好\n- 简洁回答\n",
+                    "source_memory_ids": ["memory"],
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            registry = TenantRegistry(Path(directory) / "data")
+            ilink = FakeILink()
+            memory = FakeMemory()
+            bot = WeChatBot(
+                ilink,
+                FakeAgent(),
+                tenant_registry=registry,
+                conversation_store=ConversationStore(registry, 12),
+                memory_service=memory,
+            )
+
+            def message(text):
+                return {
+                    "message_type": 1,
+                    "from_user_id": "wechat-user",
+                    "context_token": "context",
+                    "item_list": [{"type": 1, "text_item": {"text": text}}],
+                }
+
+            bot.handle_message(message("/soul"))
+            bot.handle_message(message("/soul rebuild"))
+            tenant = registry.resolve("bot", "wechat-user")
+            self.assertEqual(
+                memory.calls,
+                [(tenant.tenant_id, False), (tenant.tenant_id, True)],
+            )
+            self.assertIn("修订 2", ilink.sent[-1][2])
+            self.assertIn("简洁回答", ilink.sent[-1][2])
+
     def test_file_credentials_are_private_and_isolated(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "credentials.json"

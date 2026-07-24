@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from src.core.services.knowledge import KnowledgeService
-from src.core.services.memory import MemoryService
+from src.core.services.memory import MemoryService, ModelMemoryExtractor
 from src.core.plugins.todo import execute_action
 from src.core.storage.tenants import ConversationStore, TenantRegistry
+from src.core.modeling import (
+    CanonicalMessage,
+    ModelCapabilities,
+    ModelIdentity,
+    ModelResponse,
+    ModelRouter,
+)
 
 
 class FakeEmbedding:
@@ -31,6 +39,59 @@ class FakeExtractor:
 
     def extract(self, _question, _answer):
         return list(self.values)
+
+    def close(self):
+        pass
+
+
+class FlakyExtractor:
+    def __init__(self):
+        self.calls = 0
+
+    def extract_with_status(self, _question, _answer):
+        self.calls += 1
+        if self.calls == 1:
+            return False, []
+        return True, [{
+            "kind": "preference",
+            "key": "reply-style",
+            "content": "用户偏好简洁回答",
+            "confidence": 0.99,
+            "evidence_type": "explicit",
+        }]
+
+    def close(self):
+        pass
+
+
+class CompactingExtractor(FakeExtractor):
+    def compact(self, items):
+        return [{
+            "kind": "identity",
+            "content": "用户有多项经过归并的稳定背景信息",
+            "source_memory_ids": [
+                item["memory_id"] for item in items
+            ],
+        }]
+
+
+class FakeDefaultModel:
+    identity = ModelIdentity("default", "cloud", "default-model")
+    capabilities = ModelCapabilities()
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def ensure_ready(self):
+        pass
+
+    def complete(self, request):
+        self.calls.append(request)
+        return ModelResponse(
+            CanonicalMessage("assistant", self.responses.pop(0)),
+            actual_model="default-model",
+        )
 
     def close(self):
         pass
@@ -123,6 +184,237 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
         tea = next(item for item in active if "绿茶" in item["content"])
         self.assertTrue(service.forget(self.tenant.tenant_id, tea["memory_id"][:8]))
         self.assertNotIn("绿茶", " ".join(item["content"] for item in service.search(self.tenant.tenant_id, "绿茶")))
+
+    def test_model_memory_extractor_uses_default_model_router(self):
+        default = FakeDefaultModel([
+            '{"memories":[{"kind":"preference","key":"style",'
+            '"content":"用户偏好简洁回答","confidence":0.99,'
+            '"evidence_type":"explicit"}]}',
+            '{"items":[{"kind":"preference","content":"用户偏好简洁回答",'
+            '"source_memory_ids":["memory-1"]}]}',
+        ])
+        router = ModelRouter(
+            {"default": default},
+            primary_profile_id="default",
+            fallback_profile_id="default",
+        )
+        extractor = ModelMemoryExtractor(router)
+
+        succeeded, memories = extractor.extract_with_status("请简洁回答", "好的")
+        compacted = extractor.compact([{
+            "memory_id": "memory-1",
+            "kind": "preference",
+            "content": "用户偏好简洁回答",
+        }])
+
+        self.assertTrue(succeeded)
+        self.assertEqual(memories[0]["content"], "用户偏好简洁回答")
+        self.assertEqual(compacted[0]["source_memory_ids"], ["memory-1"])
+        self.assertEqual(len(default.calls), 2)
+        self.assertTrue(
+            all(call.generation.reasoning is False for call in default.calls)
+        )
+
+    def test_soul_projection_is_isolated_private_and_rebuildable(self):
+        other = self.registry.resolve("bot", "other")
+        extractor = FakeExtractor([
+            {
+                "kind": "preference",
+                "key": "reply-style",
+                "content": "用户偏好简洁、直接的回答",
+                "confidence": 0.99,
+                "evidence_type": "explicit",
+            },
+            {
+                "kind": "goal",
+                "key": "career",
+                "content": "用户可能想学习数据库",
+                "confidence": 0.95,
+                "evidence_type": "inferred",
+            },
+            {
+                "kind": "identity",
+                "key": "medical",
+                "content": "用户的医疗记录包含高血压",
+                "confidence": 1.0,
+                "evidence_type": "explicit",
+            },
+        ])
+        service = MemoryService(self.registry, extractor)
+        self.addCleanup(service.close)
+        created = service.extract(
+            self.tenant.tenant_id,
+            "请记住我的习惯",
+            "好的",
+            source_event_ids=[1],
+        )
+        self.assertEqual(len(created), 2)
+
+        path = self.registry.tenant_root(self.tenant.tenant_id) / "SOUL.md"
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("用户偏好简洁、直接的回答", content)
+        self.assertNotIn("数据库", content)
+        self.assertNotIn("医疗", content)
+        self.assertLessEqual(len(content), 1200)
+        if os.name != "nt":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(
+            (self.registry.tenant_root(other.tenant_id) / "SOUL.md").exists()
+        )
+
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO memory_items("
+                "memory_id, tenant_id, kind, content, normalized_key, confidence, "
+                "status, source_event_ids, created_at, updated_at"
+                ") VALUES (?, ?, 'identity', ?, 'identity:legacy-sensitive', 1, "
+                "'active', '[]', ?, ?)",
+                (
+                    "legacy-sensitive",
+                    self.tenant.tenant_id,
+                    "用户患有糖尿病",
+                    "2026-07-24T00:00:00+00:00",
+                    "2026-07-24T00:00:00+00:00",
+                ),
+            )
+        service.rebuild_soul(self.tenant.tenant_id)
+        self.assertNotIn(
+            "糖尿病",
+            service.get_soul(self.tenant.tenant_id)["content"],
+        )
+        self.assertNotIn(
+            "糖尿病",
+            " ".join(
+                item["content"]
+                for item in service.search(self.tenant.tenant_id, "糖尿病")
+            ),
+        )
+
+        profile = service.get_soul(self.tenant.tenant_id)
+        self.assertEqual(
+            service.search(
+                self.tenant.tenant_id,
+                "简洁",
+                exclude_soul=True,
+            ),
+            [],
+        )
+        path.write_text("被人工篡改", encoding="utf-8")
+        rebuilt = service.get_soul(self.tenant.tenant_id)
+        self.assertNotEqual(rebuilt["content"], "被人工篡改")
+        self.assertGreater(rebuilt["revision"], profile["revision"])
+
+        pending = next(
+            item for item in service.list(self.tenant.tenant_id)
+            if item["status"] == "pending"
+        )
+        self.assertTrue(
+            service.confirm(self.tenant.tenant_id, pending["memory_id"][:8])
+        )
+        self.assertIn(
+            "数据库",
+            service.get_soul(self.tenant.tenant_id)["content"],
+        )
+
+    def test_soul_projection_enforces_hard_budget_and_item_limit(self):
+        extractor = FakeExtractor([
+            {
+                "kind": "identity",
+                "key": "fact-{}".format(index),
+                "content": "用户稳定背景信息第{}项：{}".format(index, "长内容" * 30),
+                "confidence": 0.99,
+                "evidence_type": "explicit",
+            }
+            for index in range(30)
+        ])
+        service = MemoryService(self.registry, extractor)
+        self.addCleanup(service.close)
+        service.extract(self.tenant.tenant_id, "记住这些背景", "好的")
+        profile = service.get_soul(self.tenant.tenant_id)
+        bullets = [
+            line for line in profile["content"].splitlines() if line.startswith("- ")
+        ]
+        self.assertLessEqual(len(profile["content"]), 1200)
+        self.assertLessEqual(len(bullets), 16)
+        self.assertTrue(all(len(line[2:]) <= 80 for line in bullets))
+        self.assertFalse(
+            list(
+                self.registry.tenant_root(self.tenant.tenant_id).glob(
+                    ".SOUL.*.tmp"
+                )
+            )
+        )
+
+    def test_soul_over_soft_limit_uses_validated_local_compaction(self):
+        extractor = CompactingExtractor([
+            {
+                "kind": "identity",
+                "key": "compact-{}".format(index),
+                "content": "用户稳定背景第{}项：{}".format(index, "背景内容" * 15),
+                "confidence": 0.99,
+                "evidence_type": "explicit",
+            }
+            for index in range(14)
+        ])
+        service = MemoryService(self.registry, extractor)
+        self.addCleanup(service.close)
+        service.extract(self.tenant.tenant_id, "记住这些长期背景", "好的")
+        profile = service.get_soul(self.tenant.tenant_id)
+        self.assertIn("经过归并", profile["content"])
+        self.assertEqual(len(profile["source_memory_ids"]), 14)
+        with self.registry.database.read() as connection:
+            compacted_at = connection.execute(
+                "SELECT compacted_at FROM soul_profiles WHERE tenant_id=?",
+                (self.tenant.tenant_id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(compacted_at)
+
+    def test_daily_scan_retries_failed_local_extraction(self):
+        conversation = ConversationStore(self.registry, 12)
+        conversation.append_transcript(
+            self.tenant.tenant_id, "user", "以后请简洁回答"
+        )
+        service = MemoryService(self.registry, FlakyExtractor())
+        self.addCleanup(service.close)
+
+        self.assertEqual(service.scan_tenant(self.tenant.tenant_id), 0)
+        with self.registry.database.read() as connection:
+            cursor = connection.execute(
+                "SELECT last_scanned_event_id FROM soul_profiles WHERE tenant_id=?",
+                (self.tenant.tenant_id,),
+            ).fetchone()[0]
+        self.assertEqual(cursor, 0)
+
+        self.assertEqual(service.scan_tenant(self.tenant.tenant_id), 1)
+        self.assertIn(
+            "用户偏好简洁回答",
+            service.get_soul(self.tenant.tenant_id)["content"],
+        )
+
+    def test_soul_atomic_write_never_exposes_partial_content(self):
+        path = self.registry.tenant_root(self.tenant.tenant_id) / "SOUL.md"
+        versions = {
+            "<!-- auto-generated; revision: 1 -->\n" + "甲" * 800 + "\n",
+            "<!-- auto-generated; revision: 2 -->\n" + "乙" * 800 + "\n",
+        }
+        MemoryService._atomic_write(path, next(iter(versions)))
+        failures = []
+
+        def writer():
+            try:
+                for _ in range(30):
+                    for content in versions:
+                        MemoryService._atomic_write(path, content)
+            except Exception as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        while thread.is_alive():
+            self.assertIn(path.read_text(encoding="utf-8"), versions)
+        thread.join()
+        self.assertEqual(failures, [])
+        self.assertIn(path.read_text(encoding="utf-8"), versions)
 
     def test_sqlite_todo_backend(self):
         result = execute_action(

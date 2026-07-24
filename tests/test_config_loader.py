@@ -11,14 +11,16 @@ from src.core.config.loader import ConfigError, load_project_config
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
-SOURCE_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SOURCE_JOBS = Path(__file__).resolve().parents[1] / "src" / "core" / "jobs"
 
 
 class ConfigLoaderTests(unittest.TestCase):
     def copy_config(self, directory: str) -> Path:
         target = Path(directory) / "config"
         shutil.copytree(SOURCE_CONFIG, target)
-        shutil.copytree(SOURCE_SCRIPTS, Path(directory) / "scripts")
+        jobs_target = Path(directory) / "src" / "core" / "jobs"
+        jobs_target.parent.mkdir(parents=True)
+        shutil.copytree(SOURCE_JOBS, jobs_target)
         return target
 
     @staticmethod
@@ -347,7 +349,7 @@ class ConfigLoaderTests(unittest.TestCase):
             data = self.load_json(path)
             data["scripts"][0]["entrypoint"] = "outside.py"
             self.save_json(path, data)
-            with self.assertRaisesRegex(ConfigError, "scripts 目录内"):
+            with self.assertRaisesRegex(ConfigError, "src/core/jobs 目录内"):
                 load_project_config(config_dir)
 
         with tempfile.TemporaryDirectory() as directory:

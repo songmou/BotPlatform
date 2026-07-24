@@ -11,9 +11,14 @@ from types import SimpleNamespace
 from src.core.plugins import PluginContext
 from src.core.plugins.base import PluginError
 from src.core.plugins.codex_tasks import (
+    CodexHookIngestor,
+    CodexHookInputError,
     CodexTaskStore,
+    CodexTasksConfig,
     CodexTasksPlugin,
 )
+from src.core.integrations.ilink import ILinkAPIError
+from src.core.services.notification import NotificationRecipientStaleError
 from src.core.storage.tenants import TenantRegistry
 
 
@@ -44,6 +49,21 @@ class FlakyNotificationService(FakeNotificationService):
         if self.failures:
             self.failures -= 1
             raise OSError("temporary delivery failure")
+        super().send_text_to_tenant(tenant_id, message)
+
+
+class StaleRecipientNotificationService(FakeNotificationService):
+    def __init__(self):
+        super().__init__()
+        self.stale = True
+
+    def send_text_to_tenant(self, tenant_id, message):
+        if self.stale:
+            api_error = ILinkAPIError(1, 1001, "prepare failed")
+            raise NotificationRecipientStaleError(
+                "微信收件上下文已失效，等待用户再次私聊机器人",
+                api_error,
+            )
         super().send_text_to_tenant(tenant_id, message)
 
 
@@ -324,7 +344,10 @@ class CodexTasksPluginTests(unittest.TestCase):
         completed = plugin.execute(
             "codex_list_tasks", {"status": "completed", "limit": 10}, self.admin
         )
-        self.assertIn("external-thread", [item["task_id"] for item in completed["tasks"]])
+        self.assertNotIn(
+            "external-thread",
+            [item["task_id"] for item in completed["tasks"]],
+        )
         detail = plugin.execute(
             "codex_get_task", {"task_id": "external-thread"}, self.admin
         )
@@ -342,6 +365,26 @@ class CodexTasksPluginTests(unittest.TestCase):
             else None
         )
         self.assertEqual(client.external.instructions, ["Continue it"])
+
+    def test_not_loaded_is_unknown_and_never_completed(self):
+        plugin, client = self.plugin()
+        client.external.status_type = "notLoaded"
+
+        listed = plugin.execute(
+            "codex_list_tasks", {"status": "all", "limit": 10}, self.admin
+        )
+        external = next(
+            item for item in listed["tasks"] if item["task_id"] == "external-thread"
+        )
+        self.assertEqual(external["status"], "unknown")
+        self.assertEqual(external["phase"], "unknown")
+        completed = plugin.execute(
+            "codex_list_tasks", {"status": "completed", "limit": 10}, self.admin
+        )
+        self.assertNotIn(
+            "external-thread",
+            [item["task_id"] for item in completed["tasks"]],
+        )
 
     def test_restart_reconciles_running_rows(self):
         store = CodexTaskStore(self.registry)
@@ -698,7 +741,7 @@ class CodexTasksPluginTests(unittest.TestCase):
         self.assertIsNone(stored["response_json"])
         client.threads[thread_id].handle.release.set()
 
-    def test_external_waiting_transition_notifies_but_cannot_be_resolved(self):
+    def test_external_poll_does_not_emit_waiting_transition(self):
         fake = FakeCodex()
         settings = self.settings()
         settings["monitor_external_tasks"] = True
@@ -717,19 +760,16 @@ class CodexTasksPluginTests(unittest.TestCase):
         fake.external.status_type = "active"
         fake.external.active_flags = ["waitingOnApproval"]
         plugin.service._reconcile_external_tasks()
-        wait_for(
-            lambda: any("请回原 Codex 端处理" in message for _, message in self.notifications.messages)
-        )
-        task = plugin.service.store.get("external-thread")
-        self.assertEqual(task["origin"], "external")
-        self.assertEqual(task["phase"], "waiting_approval")
+        time.sleep(0.05)
+        self.assertEqual(self.notifications.messages, [])
+        self.assertIsNone(plugin.service.store.get("external-thread"))
 
-    def test_new_external_task_notifies_running_then_completed(self):
+    def test_external_poll_is_metadata_only_without_system_error(self):
         fake = FakeCodex()
         settings = self.settings()
         settings["monitor_external_tasks"] = True
         settings["external_poll_interval_seconds"] = 300
-        settings["notify_events"] = ["running", "completed"]
+        settings["notify_events"] = ["failed"]
         plugin = CodexTasksPlugin(
             settings,
             context=PluginContext(
@@ -745,12 +785,23 @@ class CodexTasksPluginTests(unittest.TestCase):
         new_thread.status_type = "active"
         fake.threads[new_thread.id] = new_thread
         plugin.service._reconcile_external_tasks()
+        time.sleep(0.05)
+        self.assertEqual(self.notifications.messages, [])
+        self.assertIsNone(plugin.service.store.get("external-new"))
+        new_thread.status_type = "systemError"
+        plugin.service._reconcile_external_tasks()
+        task = plugin.service.store.get("external-new")
+        self.assertEqual(task["status"], "failed")
         wait_for(lambda: len(self.notifications.messages) == 1)
-        self.assertIn("开始执行", self.notifications.messages[0][1])
+        self.assertIn("失败", self.notifications.messages[0][1])
         new_thread.status_type = "idle"
         plugin.service._reconcile_external_tasks()
-        wait_for(lambda: len(self.notifications.messages) == 2)
-        self.assertIn("已完成", self.notifications.messages[1][1])
+        time.sleep(0.05)
+        self.assertEqual(len(self.notifications.messages), 1)
+        self.assertEqual(
+            plugin.service.store.get("external-new")["status"],
+            "failed",
+        )
 
     def test_terminal_notification_retries_and_updates_legacy_status(self):
         flaky = FlakyNotificationService()
@@ -785,6 +836,242 @@ class CodexTasksPluginTests(unittest.TestCase):
             == "sent"
         )
         self.assertEqual(len(flaky.messages), 1)
+
+    def test_prepare_failed_waits_for_recipient_then_requeues_in_order(self):
+        stale = StaleRecipientNotificationService()
+        plugin = CodexTasksPlugin(
+            self.settings(),
+            context=PluginContext(
+                project_root=self.root,
+                tenant_registry=self.registry,
+                notification_service=stale,
+            ),
+            client_factory=lambda: FakeCodex(),
+        )
+        self.addCleanup(plugin.close)
+        plugin.service._watchdog_stop.set()
+        plugin.service._watchdog.join(timeout=2)
+        store = plugin.service.store
+        store.create(
+            "stale-context-thread",
+            self.admin.tenant_id,
+            "botplatform",
+            "Stale context",
+            notify=True,
+        )
+        event = store.enqueue_event(
+            "stale-context-event",
+            "stale-context-thread",
+            self.admin.tenant_id,
+            "completed",
+            "completion",
+        )
+
+        plugin.service._deliver_event(event)
+        plugin.service._deliver_event(event)
+        plugin.service._deliver_event(event)
+        latest = store.latest_event("stale-context-thread")
+        self.assertEqual(latest["delivery_status"], "waiting_recipient")
+        self.assertEqual(latest["attempt_count"], 3)
+        self.assertEqual(store.due_events(), [])
+
+        stale.stale = False
+        self.assertEqual(
+            plugin.on_recipient_refreshed(self.admin.tenant_id),
+            1,
+        )
+        due = store.due_events()
+        self.assertEqual([item["event_id"] for item in due], [event["event_id"]])
+        plugin.service._deliver_event(due[0])
+        latest = store.latest_event("stale-context-thread")
+        self.assertEqual(latest["delivery_status"], "sent")
+        self.assertEqual(stale.messages, [(self.admin.tenant_id, "completion")])
+
+    def test_hook_lifecycle_is_idempotent_and_new_turn_reopens_task(self):
+        settings = self.settings()
+        settings["external_project_scope"] = "all"
+        settings["monitor_tenant_id"] = self.admin.tenant_id
+        settings["notify_events"] = [
+            "running",
+            "waiting_approval",
+            "waiting_input",
+            "completed",
+        ]
+        config = CodexTasksConfig.from_mapping(settings, self.root)
+        ingestor = CodexHookIngestor(config, self.registry)
+        cwd = str((self.root.parent / "unconfigured-project").resolve())
+        base = {
+            "session_id": "external-session",
+            "turn_id": "turn-1",
+            "cwd": cwd,
+        }
+        payloads = [
+            {
+                **base,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Implement the feature\nwith tests",
+            },
+            {
+                **base,
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "shell",
+                "tool_input": {"command": "git push"},
+                "tool_use_id": "permission-1",
+            },
+            {
+                **base,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "request_user_input",
+                "tool_input": {
+                    "questions": [{"question": "Choose a deployment target"}]
+                },
+                "tool_use_id": "input-1",
+            },
+            {
+                **base,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "request_user_input",
+                "tool_input": {},
+                "tool_use_id": "input-1",
+            },
+            {
+                **base,
+                "hook_event_name": "Stop",
+                "last_assistant_message": "Implemented and tested.",
+            },
+        ]
+        for payload in payloads[:-1]:
+            ingestor.ingest(payload)
+        ingestor.ingest(
+            {
+                **base,
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "shell",
+                "tool_input": {"command": "git status"},
+                "tool_use_id": "permission-2",
+            }
+        )
+        ingestor.ingest(payloads[-1])
+        ingestor.ingest(payloads[2])
+
+        task = ingestor.store.get("external-session")
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["phase"], "completed")
+        self.assertEqual(task["source_cwd"], cwd)
+        self.assertTrue(task["project_id"].startswith("external-"))
+        with self.registry.database.read() as connection:
+            events = connection.execute(
+                "SELECT event_type FROM codex_task_events "
+                "WHERE thread_id=? ORDER BY event_id",
+                ("external-session",),
+            ).fetchall()
+        self.assertEqual(
+            [row["event_type"] for row in events],
+            [
+                "running",
+                "waiting_approval",
+                "waiting_input",
+                "completed",
+            ],
+        )
+
+        ingestor.ingest(
+            {
+                **base,
+                "turn_id": "turn-2",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Continue with a second turn",
+            }
+        )
+        reopened = ingestor.store.get("external-session")
+        self.assertEqual(reopened["status"], "running")
+        self.assertEqual(reopened["phase"], "running")
+
+        with self.registry.database.read() as connection:
+            phase_keys = connection.execute(
+                "SELECT event_key FROM codex_task_events WHERE thread_id=? "
+                "ORDER BY event_id",
+                ("external-session",),
+            ).fetchall()
+        self.assertEqual(len(phase_keys), 5)
+        self.assertTrue(
+            all(str(row["event_key"]).startswith("hook-phase:") for row in phase_keys)
+        )
+
+    def test_legacy_unsent_hook_duplicates_are_collapsed_before_requeue(self):
+        store = CodexTaskStore(self.registry)
+        store.create(
+            "legacy-hook-thread",
+            self.admin.tenant_id,
+            "botplatform",
+            "Legacy hook",
+            notify=False,
+        )
+        first = store.enqueue_event(
+            "hook:sessionhash:turnhash:PermissionRequest:first",
+            "legacy-hook-thread",
+            self.admin.tenant_id,
+            "waiting_approval",
+            "first approval",
+        )
+        second = store.enqueue_event(
+            "hook:sessionhash:turnhash:PermissionRequest:second",
+            "legacy-hook-thread",
+            self.admin.tenant_id,
+            "waiting_approval",
+            "second approval",
+        )
+        self.assertEqual(store.collapse_pending_legacy_hook_events(self.admin.tenant_id), 1)
+        self.assertEqual(store.latest_event("legacy-hook-thread")["delivery_status"], "disabled")
+        self.assertEqual(
+            [event["event_id"] for event in store.due_events()],
+            [first["event_id"]],
+        )
+        self.assertNotEqual(first["event_id"], second["event_id"])
+
+    def test_malformed_hook_input_does_not_create_task(self):
+        settings = self.settings()
+        settings["external_project_scope"] = "all"
+        settings["monitor_tenant_id"] = self.admin.tenant_id
+        ingestor = CodexHookIngestor(
+            CodexTasksConfig.from_mapping(settings, self.root),
+            self.registry,
+        )
+        with self.assertRaises(CodexHookInputError):
+            ingestor.ingest(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "bad-session",
+                    "cwd": str(self.root),
+                }
+            )
+        self.assertIsNone(ingestor.store.get("bad-session"))
+
+    def test_watchdog_logs_exception_and_continues(self):
+        plugin, _client = self.plugin()
+        plugin.service._watchdog_stop.set()
+        plugin.service._watchdog.join(timeout=2)
+        calls = []
+
+        def due_events():
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                raise RuntimeError("watchdog boom")
+            plugin.service._watchdog_stop.set()
+            return []
+
+        plugin.service.store.due_events = due_events
+        plugin.service._watchdog_stop.clear()
+        worker = threading.Thread(target=plugin.service._watchdog_loop)
+        with self.assertLogs(
+            "src.core.plugins.codex_tasks",
+            level="ERROR",
+        ) as captured:
+            worker.start()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertIn("watchdog boom", "\n".join(captured.output))
 
     def test_pinned_protocol_response_shapes_are_fail_closed(self):
         service = self.plugin()[0].service

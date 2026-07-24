@@ -17,6 +17,7 @@ SCHEMA_VERSION = 1
 TITLE_MAX_CHARACTERS = 200
 SUMMARY_MAX_BYTES = 1600
 TODO_ID = re.compile(r"^T(0*[1-9][0-9]*)$")
+RELATIVE_REMINDER = re.compile(r"^(?:in\s+)?(\d+)\s*(?:minutes?|mins?|分钟)\s*(?:later|后)?$", re.I)
 SCOPES = {"pending", "completed", "archived", "all"}
 ACTIONS = {"list", "add", "edit", "complete", "reopen", "remind", "archive"}
 
@@ -51,6 +52,22 @@ def parse_timestamp(value: object, field: str) -> datetime:
     if parsed.tzinfo is None:
         raise TodoError("字段 {} 必须包含时区".format(field))
     return parsed.astimezone(timezone.utc)
+
+
+def parse_reminder_time(value: object, now: datetime) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise TodoError("提醒时间必须是带时区的时间字符串或“5分钟后”")
+    raw = value.strip()
+    relative = RELATIVE_REMINDER.fullmatch(raw)
+    if relative:
+        minutes = int(relative.group(1))
+        if minutes < 1:
+            raise TodoError("提醒延迟至少为 1 分钟")
+        return now.astimezone(timezone.utc) + timedelta(minutes=minutes)
+    parsed = parse_timestamp(raw, "remind_at")
+    if parsed <= now.astimezone(timezone.utc):
+        raise TodoError("提醒时间必须晚于当前时间")
+    return parsed
 
 
 def normalize_title(value: Optional[str]) -> str:
@@ -90,7 +107,7 @@ def validate_item(raw: object, archived: bool) -> Dict[str, Any]:
         raise TodoError("待办项必须是 JSON 对象")
     required = {
         "id", "title", "status", "created_at", "updated_at",
-        "completed_at", "archived_at",
+        "completed_at", "archived_at", "reminder_at", "is_one_off",
     }
     if set(raw) != required:
         raise TodoError("待办项字段不完整或包含未知字段")
@@ -103,12 +120,20 @@ def validate_item(raw: object, archived: bool) -> Dict[str, Any]:
     parse_timestamp(raw.get("updated_at"), todo_id + ".updated_at")
     completed_at = raw.get("completed_at")
     archived_at = raw.get("archived_at")
+    reminder_at = raw.get("reminder_at")
+    is_one_off = raw.get("is_one_off")
+    if not isinstance(is_one_off, bool):
+        raise TodoError("待办 {} 的一次性标识无效".format(todo_id))
+    if reminder_at is not None:
+        parse_timestamp(reminder_at, todo_id + ".reminder_at")
     if status == "pending":
         if completed_at is not None or archived_at is not None:
             raise TodoError("未完成待办 {} 不能包含完成或归档时间".format(todo_id))
         if archived:
             raise TodoError("归档区不能包含未完成待办 {}".format(todo_id))
     else:
+        if reminder_at is not None:
+            raise TodoError("已完成待办 {} 不能包含提醒时间".format(todo_id))
         parse_timestamp(completed_at, todo_id + ".completed_at")
         if archived:
             parse_timestamp(archived_at, todo_id + ".archived_at")
@@ -122,6 +147,8 @@ def validate_item(raw: object, archived: bool) -> Dict[str, Any]:
         "updated_at": raw["updated_at"],
         "completed_at": completed_at,
         "archived_at": archived_at,
+        "reminder_at": reminder_at,
+        "is_one_off": is_one_off,
     }
 
 
@@ -165,7 +192,7 @@ class SqliteTodoStore:
 
     def _load(self, connection: Any, now: datetime) -> Dict[str, Any]:
         rows = connection.execute(
-            "SELECT todo_number, title, status, created_at, updated_at, completed_at, archived_at "
+            "SELECT todo_number, title, status, created_at, updated_at, completed_at, archived_at, reminder_at, is_one_off "
             "FROM todos WHERE tenant_id=? ORDER BY todo_number",
             (self.tenant_id,),
         ).fetchall()
@@ -181,6 +208,8 @@ class SqliteTodoStore:
                 "updated_at": str(row["updated_at"]),
                 "completed_at": row["completed_at"],
                 "archived_at": row["archived_at"],
+                "reminder_at": row["reminder_at"],
+                "is_one_off": bool(row["is_one_off"]),
             }
             (archived_items if archived else items).append(item)
         highest = max((int(row["todo_number"]) for row in rows), default=0)
@@ -200,17 +229,17 @@ class SqliteTodoStore:
             values.append((
                 self.tenant_id, int(TODO_ID.fullmatch(item["id"]).group(1)), item["title"],
                 item["status"], item["created_at"], item["updated_at"],
-                item["completed_at"], item["archived_at"],
+                item["completed_at"], item["archived_at"], item["reminder_at"], int(item["is_one_off"]),
             ))
         for item in data["archived_items"]:
             values.append((
                 self.tenant_id, int(TODO_ID.fullmatch(item["id"]).group(1)), item["title"],
                 "archived", item["created_at"], item["updated_at"],
-                item["completed_at"], item["archived_at"],
+                item["completed_at"], item["archived_at"], item["reminder_at"], int(item["is_one_off"]),
             ))
         connection.executemany(
             "INSERT INTO todos(tenant_id, todo_number, title, status, created_at, updated_at, "
-            "completed_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "completed_at, archived_at, reminder_at, is_one_off) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             values,
         )
 
@@ -220,18 +249,121 @@ class SqliteTodoStore:
         todo_id: Optional[str] = None,
         title: Optional[str] = None,
         scope: Optional[str] = None,
+        remind_at: Optional[str] = None,
+        update_reminder: bool = False,
+        is_one_off: Optional[bool] = None,
+        update_one_off: bool = False,
         now: Optional[datetime] = None,
     ) -> OperationResult:
         current = now or utc_now()
         with self.database.transaction(immediate=True) as connection:
             data = self._load(connection, current)
             result, changed = apply_action(
-                data, action, todo_id=todo_id, title=title, scope=scope, now=current
+                data, action, todo_id=todo_id, title=title, scope=scope,
+                remind_at=remind_at, update_reminder=update_reminder,
+                is_one_off=is_one_off, update_one_off=update_one_off, now=current,
             )
             if changed:
                 data["updated_at"] = isoformat(current)
                 self._save(connection, data)
+                self._sync_reminder_events(connection, data, current)
             return result
+
+    def _sync_reminder_events(
+        self, connection: Any, data: Dict[str, Any], now: datetime
+    ) -> None:
+        timestamp = isoformat(now)
+        active = set()
+        for item in data["items"]:
+            reminder_at = item["reminder_at"]
+            if item["status"] != "pending" or reminder_at is None:
+                continue
+            number = int(TODO_ID.fullmatch(item["id"]).group(1))
+            active.add(number)
+            connection.execute(
+                "INSERT INTO todo_reminder_events(tenant_id, todo_number, due_at, "
+                "delivery_status, attempt_count, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'pending', 0, ?, ?) "
+                "ON CONFLICT(tenant_id, todo_number) DO UPDATE SET "
+                "due_at=excluded.due_at, delivery_status='pending', attempt_count=0, "
+                "sent_at=NULL, last_error=NULL, updated_at=excluded.updated_at "
+                "WHERE todo_reminder_events.due_at<>excluded.due_at "
+                "OR todo_reminder_events.delivery_status='cancelled'",
+                (self.tenant_id, number, reminder_at, timestamp, timestamp),
+            )
+        statement = (
+            "UPDATE todo_reminder_events SET delivery_status='cancelled', updated_at=? "
+            "WHERE tenant_id=? AND delivery_status IN ('pending', 'sending') "
+        )
+        parameters: Tuple[Any, ...] = (timestamp, self.tenant_id)
+        if active:
+            statement += "AND todo_number NOT IN ({})".format(
+                ",".join("?" for _ in active)
+            )
+            parameters += tuple(sorted(active))
+        connection.execute(statement, parameters)
+
+    def recover_inflight_reminders(self, now: Optional[datetime] = None) -> None:
+        current = now or utc_now()
+        with self.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE todo_reminder_events SET delivery_status='pending', updated_at=? "
+                "WHERE delivery_status='sending'",
+                (isoformat(current),),
+            )
+
+    def claim_due_reminders(
+        self, now: Optional[datetime] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        current = now or utc_now()
+        timestamp = isoformat(current)
+        with self.database.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT event.tenant_id, event.todo_number, todo.title, event.due_at "
+                "FROM todo_reminder_events AS event JOIN todos AS todo "
+                "ON todo.tenant_id=event.tenant_id AND todo.todo_number=event.todo_number "
+                "WHERE event.delivery_status='pending' AND event.due_at<=? "
+                "AND todo.status='pending' AND todo.reminder_at=event.due_at "
+                "ORDER BY event.due_at, event.tenant_id, event.todo_number LIMIT ?",
+                (timestamp, limit),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                updated = connection.execute(
+                    "UPDATE todo_reminder_events SET delivery_status='sending', "
+                    "attempt_count=attempt_count+1, updated_at=? "
+                    "WHERE tenant_id=? AND todo_number=? AND delivery_status='pending'",
+                    (timestamp, row["tenant_id"], row["todo_number"]),
+                ).rowcount
+                if updated:
+                    claimed.append(dict(row))
+            return claimed
+
+    def finish_reminder(
+        self, todo_number: int, delivered: bool, error: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> None:
+        current = now or utc_now()
+        timestamp = isoformat(current)
+        with self.database.transaction(immediate=True) as connection:
+            updated = connection.execute(
+                "UPDATE todo_reminder_events SET delivery_status=?, sent_at=?, "
+                "last_error=?, updated_at=? WHERE tenant_id=? AND todo_number=? "
+                "AND delivery_status='sending'",
+                (
+                    "sent" if delivered else "pending",
+                    timestamp if delivered else None,
+                    None if delivered else (error or "投递失败"),
+                    timestamp, self.tenant_id, todo_number,
+                ),
+            ).rowcount
+            if delivered and updated:
+                connection.execute(
+                    "UPDATE todos SET status='completed', completed_at=?, reminder_at=NULL, "
+                    "updated_at=? WHERE tenant_id=? AND todo_number=? "
+                    "AND status='pending' AND is_one_off=1",
+                    (timestamp, timestamp, self.tenant_id, todo_number),
+                )
 
 
 def _require_absent(name: str, value: Optional[str]) -> None:
@@ -282,7 +414,12 @@ def render_list(data: Dict[str, Any], scope: str) -> str:
         marker = "[ ]" if item["status"] == "pending" else "[x]"
         if item["archived_at"] is not None:
             marker = "[归档]"
-        lines.append("- {} {} {}".format(marker, item["id"], item["title"]))
+        reminder = (
+            "（提醒：{}）".format(item["reminder_at"])
+            if item["reminder_at"] is not None else ""
+        )
+        kind = "（一次性）" if item["is_one_off"] else ""
+        lines.append("- {} {} {}{}{}".format(marker, item["id"], item["title"], kind, reminder))
     header = "【待办列表】{}，共 {} 项。".format(labels[scope], len(items))
     return _render_lines(header, lines) if lines else header
 
@@ -302,7 +439,11 @@ def apply_action(
     todo_id: Optional[str],
     title: Optional[str],
     scope: Optional[str],
+    remind_at: Optional[str],
+    update_reminder: bool,
     now: datetime,
+    is_one_off: Optional[bool] = None,
+    update_one_off: bool = False,
 ) -> Tuple[OperationResult, bool]:
     if action not in ACTIONS:
         raise TodoError("不支持的待办操作：{}".format(action or "<空>"))
@@ -311,6 +452,8 @@ def apply_action(
     if action == "list":
         _require_absent("todo_id", todo_id)
         _require_absent("title", title)
+        _require_absent("remind_at", remind_at)
+        _require_absent("is_one_off", is_one_off)
         selected_scope = scope or "pending"
         if selected_scope not in SCOPES:
             raise TodoError("查询范围仅支持 pending、completed、archived 或 all")
@@ -320,12 +463,19 @@ def apply_action(
         _require_absent("todo_id", todo_id)
         _require_absent("title", title)
         _require_absent("scope", scope)
+        _require_absent("remind_at", remind_at)
+        _require_absent("is_one_off", is_one_off)
         return OperationResult("success", render_reminder(data)), False
 
     if action == "add":
         _require_absent("todo_id", todo_id)
         _require_absent("scope", scope)
+        if is_one_off is not None and not isinstance(is_one_off, bool):
+            raise TodoError("一次性标识必须是布尔值")
         normalized_title = normalize_title(title)
+        parsed_reminder = (
+            isoformat(parse_reminder_time(remind_at, now)) if remind_at is not None else None
+        )
         generated_id = "T{:04d}".format(data["next_id"])
         data["next_id"] += 1
         data["items"].append({
@@ -336,13 +486,19 @@ def apply_action(
             "updated_at": timestamp,
             "completed_at": None,
             "archived_at": None,
+            "reminder_at": parsed_reminder,
+            "is_one_off": bool(is_one_off),
         })
-        return OperationResult("success", "已新增待办：{} {}".format(generated_id, normalized_title)), True
+        kind = "，一次性任务" if is_one_off else ""
+        suffix = "，提醒时间：{}".format(parsed_reminder) if parsed_reminder else ""
+        return OperationResult("success", "已新增待办：{} {}{}{}".format(generated_id, normalized_title, kind, suffix)), True
 
     if action == "archive":
         _require_absent("todo_id", todo_id)
         _require_absent("title", title)
         _require_absent("scope", scope)
+        _require_absent("remind_at", remind_at)
+        _require_absent("is_one_off", is_one_off)
         threshold = now.astimezone(timezone.utc) - timedelta(days=30)
         retained = []
         archived = []
@@ -352,6 +508,7 @@ def apply_action(
                 and parse_timestamp(item["completed_at"], item["id"] + ".completed_at") <= threshold
             ):
                 item["archived_at"] = timestamp
+                item["reminder_at"] = None
                 item["updated_at"] = timestamp
                 archived.append(item)
             else:
@@ -369,6 +526,9 @@ def apply_action(
 
     normalized_id = normalize_todo_id(todo_id)
     _require_absent("scope", scope)
+    if action != "edit":
+        _require_absent("remind_at", remind_at)
+        _require_absent("is_one_off", is_one_off)
     active = _find(data["items"], normalized_id)
     archived_item = _find(data["archived_items"], normalized_id)
     item = active or archived_item
@@ -376,12 +536,38 @@ def apply_action(
         raise TodoError("未找到待办：{}".format(normalized_id))
 
     if action == "edit":
-        normalized_title = normalize_title(title)
-        if item["title"] == normalized_title:
-            return OperationResult("skipped", "待办 {} 的内容没有变化。".format(normalized_id)), False
-        item["title"] = normalized_title
+        if title is None and not update_reminder and not update_one_off:
+            raise TodoError("编辑待办时必须提供内容、提醒时间或一次性标识")
+        changed = False
+        if title is not None:
+            normalized_title = normalize_title(title)
+            if item["title"] != normalized_title:
+                item["title"] = normalized_title
+                changed = True
+        if update_reminder:
+            if item["status"] != "pending" and remind_at is not None:
+                raise TodoError("已完成待办不能设置提醒时间")
+            parsed_reminder = (
+                isoformat(parse_reminder_time(remind_at, now)) if remind_at is not None else None
+            )
+            if item["reminder_at"] != parsed_reminder:
+                item["reminder_at"] = parsed_reminder
+                changed = True
+        if update_one_off:
+            if not isinstance(is_one_off, bool):
+                raise TodoError("一次性标识必须是布尔值")
+            if item["is_one_off"] != is_one_off:
+                item["is_one_off"] = is_one_off
+                changed = True
+        if not changed:
+            return OperationResult("skipped", "待办 {} 的内容、提醒和类型没有变化。".format(normalized_id)), False
         item["updated_at"] = timestamp
-        return OperationResult("success", "已更新待办：{} {}".format(normalized_id, normalized_title)), True
+        suffix = (
+            "，提醒时间：{}".format(item["reminder_at"])
+            if item["reminder_at"] is not None else "，已清除提醒"
+        )
+        kind = "，一次性任务" if item["is_one_off"] else ""
+        return OperationResult("success", "已更新待办：{} {}{}{}".format(normalized_id, item["title"], kind, suffix)), True
 
     _require_absent("title", title)
     if action == "complete":
@@ -390,6 +576,7 @@ def apply_action(
             return OperationResult("skipped", "待办 {} 已经完成{}。".format(normalized_id, location)), False
         item["status"] = "completed"
         item["completed_at"] = timestamp
+        item["reminder_at"] = None
         item["updated_at"] = timestamp
         return OperationResult("success", "已完成待办：{} {}".format(normalized_id, item["title"])), True
 
@@ -412,11 +599,17 @@ def execute_action(
     todo_id: Optional[str] = None,
     title: Optional[str] = None,
     scope: Optional[str] = None,
+    remind_at: Optional[str] = None,
+    update_reminder: bool = False,
+    is_one_off: Optional[bool] = None,
+    update_one_off: bool = False,
     now: Optional[datetime] = None,
 ) -> OperationResult:
     """Convenience wrapper for direct (non-plugin) invocation, e.g. scheduler."""
     return SqliteTodoStore(database_path, tenant_id).execute(
-        action, todo_id=todo_id, title=title, scope=scope, now=now
+        action, todo_id=todo_id, title=title, scope=scope, remind_at=remind_at,
+        update_reminder=update_reminder, is_one_off=is_one_off,
+        update_one_off=update_one_off, now=now,
     )
 
 
@@ -458,6 +651,14 @@ class TodoPlugin:
                         "type": "string",
                         "enum": sorted(SCOPES),
                         "description": "list 查询范围，默认 pending",
+                    },
+                    "remind_at": {
+                        "type": ["string", "null"],
+                        "description": "add/edit 的一次性提醒时间；使用带时区 ISO 时间，或“5分钟后”。edit 传 null 清除提醒。",
+                    },
+                    "is_one_off": {
+                        "type": "boolean",
+                        "description": "add/edit 时标记为一次性任务；到期提醒成功送达后自动完成，不再出现在待办提醒中。",
                     },
                 },
                 ["action"],
@@ -508,9 +709,19 @@ class TodoPlugin:
         scope = arguments.get("scope")
         if scope is not None and (not isinstance(scope, str) or scope not in SCOPES):
             raise PluginError("scope 仅支持 pending、completed、archived 或 all")
+        remind_at = arguments.get("remind_at")
+        update_reminder = "remind_at" in arguments
+        if remind_at is not None and not isinstance(remind_at, str):
+            raise PluginError("remind_at 必须是字符串或 null")
+        is_one_off = arguments.get("is_one_off")
+        update_one_off = "is_one_off" in arguments
+        if is_one_off is not None and not isinstance(is_one_off, bool):
+            raise PluginError("is_one_off 必须是布尔值")
         try:
             result = SqliteTodoStore(self._database_path, tenant_id).execute(
-                action, todo_id=todo_id, title=title, scope=scope
+                action, todo_id=todo_id, title=title, scope=scope,
+                remind_at=remind_at, update_reminder=update_reminder,
+                is_one_off=is_one_off, update_one_off=update_one_off,
             )
         except TodoError as exc:
             raise PluginError(str(exc)) from exc
@@ -523,11 +734,37 @@ class TodoPlugin:
         todo_id: Optional[str] = None,
         title: Optional[str] = None,
         scope: Optional[str] = None,
+        remind_at: Optional[str] = None,
+        update_reminder: bool = False,
+        is_one_off: Optional[bool] = None,
+        update_one_off: bool = False,
         now: Optional[datetime] = None,
     ) -> OperationResult:
         """Direct invocation for scheduler or internal use (no plugin protocol)."""
         return SqliteTodoStore(self._database_path, tenant_id).execute(
-            action, todo_id=todo_id, title=title, scope=scope, now=now
+            action, todo_id=todo_id, title=title, scope=scope, remind_at=remind_at,
+            update_reminder=update_reminder, is_one_off=is_one_off,
+            update_one_off=update_one_off, now=now,
+        )
+
+    def recover_inflight_reminders(self, now: Optional[datetime] = None) -> None:
+        SqliteTodoStore(self._database_path, "").recover_inflight_reminders(now)
+
+    def claim_due_reminders(
+        self, now: Optional[datetime] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        return SqliteTodoStore(self._database_path, "").claim_due_reminders(now, limit)
+
+    def finish_reminder(
+        self,
+        tenant_id: str,
+        todo_number: int,
+        delivered: bool,
+        error: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> None:
+        SqliteTodoStore(self._database_path, tenant_id).finish_reminder(
+            todo_number, delivered, error, now
         )
 
     def preview(self, tool_name: str, arguments: Dict[str, Any], tenant: Any) -> str:

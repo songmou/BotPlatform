@@ -103,6 +103,21 @@ class TodoPluginTests(unittest.TestCase):
         )
         self.assertIn("已清空", reminded["summary"])
 
+    def test_relative_reminder_can_be_set_and_cleared(self) -> None:
+        created = self.plugin.execute(
+            "todo_manage",
+            {"action": "add", "title": "五分钟提醒", "remind_at": "5分钟后"},
+            self.tenant,
+        )
+        self.assertIn("提醒时间", created["summary"])
+        listed = self.plugin.execute("todo_manage", {"action": "list"}, self.tenant)
+        self.assertIn("提醒：", listed["summary"])
+        cleared = self.plugin.execute(
+            "todo_manage", {"action": "edit", "todo_id": "T0001", "remind_at": None},
+            self.tenant,
+        )
+        self.assertIn("已清除提醒", cleared["summary"])
+
     def test_invalid_action_raises_plugin_error(self) -> None:
         with self.assertRaises(PluginError):
             self.plugin.execute(

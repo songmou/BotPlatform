@@ -10,6 +10,8 @@ from pathlib import Path
 from src.core.config.loader import ScheduledTask, TaskAction, TaskCondition
 from src.core.integrations.ilink import Credentials, ILinkError
 from src.core.integrations.images import ImageSourceError
+from src.core.plugins.base import PluginContext
+from src.core.plugins.todo import TodoPlugin
 from src.core.services.notification import TenantRecipientStore
 from src.core.services.scheduler import SchedulerService
 from src.core.storage.tenants import ScheduleStore, TenantRegistry
@@ -149,6 +151,23 @@ class FakePlugin:
         return self.result
 
 
+class FakeMemoryService:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def recover_dirty(self):
+        self.calls.append("recover")
+        return {"rebuilt": 1, "failed": 0}
+
+    def run_daily_maintenance(self):
+        self.calls.append("daily")
+        return {"tenants": 1, "created": 0, "failed": 0}
+
+    def run_weekly_compaction(self):
+        self.calls.append("weekly")
+        return {"tenants": 1, "failed": 0}
+
+
 def script_task():
     return ScheduledTask(
         id="script",
@@ -203,7 +222,7 @@ class SchedulerServiceTests(unittest.TestCase):
 
     def service(
         self, tasks, factory=None, scheduler=None, image_loader=None, script_service=None,
-        plugins=None,
+        plugins=None, memory_service=None,
     ):
         for task in tasks:
             self.schedules.set_enabled(self.tenant.tenant_id, task.id, True)
@@ -224,6 +243,7 @@ class SchedulerServiceTests(unittest.TestCase):
             tenant_registry=self.registry,
             schedule_store=self.schedules,
             plugins=plugins,
+            memory_service=memory_service,
         )
 
     def test_recipient_is_atomic_private_and_reloadable(self) -> None:
@@ -281,6 +301,21 @@ class SchedulerServiceTests(unittest.TestCase):
         service.shutdown()
         self.assertTrue(scheduler.stopped)
 
+    def test_start_registers_internal_soul_maintenance(self) -> None:
+        scheduler = FakeScheduler()
+        memory = FakeMemoryService()
+        service = self.service(
+            [fixed_task(enabled=False)],
+            scheduler=scheduler,
+            memory_service=memory,
+        )
+        service.start()
+        self.assertEqual(memory.calls, ["recover"])
+        self.assertEqual(
+            [job[1]["id"] for job in scheduler.jobs],
+            ["soul_daily_maintenance", "soul_weekly_compaction"],
+        )
+
     def test_script_schedule_runs_without_recipient_and_submits_parameters(self) -> None:
         scripts = FakeScriptService()
         task = script_task()
@@ -320,6 +355,27 @@ class SchedulerServiceTests(unittest.TestCase):
         service = self.service([task], plugins=[])
         self.assertFalse(service.run_task(task))
         self.assertEqual(self.logs[-1][1], "失败")
+
+    def test_due_todo_reminder_is_delivered_once_and_retries_without_recipient(self) -> None:
+        plugin = TodoPlugin(
+            {}, PluginContext(Path(self.temp.name), self.registry)
+        )
+        plugin.execute_for_tenant(
+            self.tenant.tenant_id, "add", title="到期事项",
+            remind_at="2026-07-16T08:01:00+00:00",
+            now=datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc),
+        )
+        service = self.service([fixed_task()], plugins=[plugin])
+        self.now = datetime(2026, 7, 16, 8, 1, tzinfo=timezone.utc)
+        self.assertFalse(service.run_due_todo_reminders())
+        self.assertEqual(self.logs[-1][1], "失败")
+
+        self.store.update(self.tenant, "context")
+        self.assertTrue(service.run_due_todo_reminders())
+        self.assertEqual(
+            self.clients[-1].sent[-1], ("user@im.wechat", "context", "【待办提醒】T0001 到期事项")
+        )
+        self.assertFalse(service.run_due_todo_reminders())
 
     def test_one_logical_task_can_register_two_cron_triggers(self) -> None:
         scheduler = FakeScheduler()

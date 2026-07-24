@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from src.core.plugins.base import PlatformPlugin, PluginError
 from src.core.services.agent import AgentService
@@ -16,10 +17,12 @@ from src.core.infrastructure.logging import log_scheduled_task
 from src.core.integrations.ilink import Credentials, ILinkClient
 from src.core.integrations.images import ImageSource, ImageSourceLoader
 from src.core.services.notification import (
+    NotificationRecipientError,
     NotificationService,
     Recipient,
     TenantRecipientStore,
 )
+from src.core.services.memory import MemoryService
 from src.core.services.script import ScriptService
 from src.core.storage.tenants import ScheduleStore, TenantContext, TenantRegistry
 
@@ -43,6 +46,7 @@ class SchedulerService:
         tenant_registry: TenantRegistry = None,
         schedule_store: ScheduleStore = None,
         plugins: Optional[List[PlatformPlugin]] = None,
+        memory_service: Optional[MemoryService] = None,
     ) -> None:
         self.credentials = credentials
         self.tasks = tasks or []
@@ -63,6 +67,7 @@ class SchedulerService:
         self.script_service = script_service
         self.tenant_registry = tenant_registry
         self.schedule_store = schedule_store
+        self.memory_service = memory_service
         self._plugins: Dict[str, PlatformPlugin] = {
             plugin.id: plugin for plugin in (plugins or [])
         }
@@ -101,6 +106,47 @@ class SchedulerService:
                     max_instances=1,
                     misfire_grace_time=1,
                 )
+        todo = self._plugins.get("todo")
+        if todo is not None and hasattr(todo, "claim_due_reminders"):
+            recover = getattr(todo, "recover_inflight_reminders", None)
+            if recover is not None:
+                recover(self.now_provider())
+            self.scheduler.add_job(
+                self.run_due_todo_reminders,
+                trigger=IntervalTrigger(seconds=30, timezone=self.timezone_name),
+                id="todo_due_reminders",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=30,
+            )
+        if self.memory_service is not None:
+            self.memory_service.recover_dirty()
+            self.scheduler.add_job(
+                self.memory_service.run_daily_maintenance,
+                trigger=CronTrigger(
+                    hour=3, minute=10, timezone=self.timezone_name
+                ),
+                id="soul_daily_maintenance",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=3600,
+            )
+            self.scheduler.add_job(
+                self.memory_service.run_weekly_compaction,
+                trigger=CronTrigger(
+                    day_of_week="sun",
+                    hour=3,
+                    minute=30,
+                    timezone=self.timezone_name,
+                ),
+                id="soul_weekly_compaction",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=3600,
+            )
         self.scheduler.start()
         self._started = True
 
@@ -141,6 +187,35 @@ class SchedulerService:
                 any_success = True
         if not tenants:
             self.logger(task.id, "跳过", "没有用户订阅此任务", None)
+        return any_success
+
+    def run_due_todo_reminders(self) -> bool:
+        """Deliver due one-off todo reminders claimed atomically by the plugin."""
+        todo = self._plugins.get("todo")
+        if todo is None:
+            return False
+        claim = getattr(todo, "claim_due_reminders", None)
+        finish = getattr(todo, "finish_reminder", None)
+        if claim is None or finish is None:
+            return False
+        any_success = False
+        for event in claim(self.now_provider()):
+            tenant_id = str(event["tenant_id"])
+            number = int(event["todo_number"])
+            try:
+                recipient = self.recipient_store.load(tenant_id)
+                if recipient is None:
+                    raise NotificationRecipientError("用户尚无有效收件地址")
+                message = "【待办提醒】{} {}".format(
+                    "T{:04d}".format(number), event["title"]
+                )
+                self.notification_service.send_text_to(recipient, message)
+                finish(tenant_id, number, True, now=self.now_provider())
+                self.logger("todo_due_reminders", "成功", message, tenant_id)
+                any_success = True
+            except Exception as exc:
+                finish(tenant_id, number, False, str(exc), now=self.now_provider())
+                self.logger("todo_due_reminders", "失败", str(exc), tenant_id)
         return any_success
 
     def _run_task_for_tenant(
