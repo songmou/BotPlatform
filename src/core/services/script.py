@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.core.config.loader import ScriptDefinition, validate_script_parameters
+from src.core.config.loader import (
+    ScriptDefinition,
+    load_project_config,
+    validate_script_parameters,
+)
 from src.core.integrations.keychain import KeychainReference, KeychainService
 from src.core.integrations.ilink import Credentials
 from src.core.integrations.images import ImageSource, ImageSourceError, ImageSourceLoader
@@ -387,6 +391,20 @@ class ScriptService:
             )
         if run.script_id == "autogen_monitor":
             environment["AUTOGEN_ENV_FILE"] = str(outputs_root / "autogen.env")
+            config_directory = self.project_root / "config"
+            if config_directory.is_dir():
+                project_config = load_project_config(config_directory)
+                profile_id = os.getenv("MODEL_PROFILE") or project_config.app.active_model
+                profile = project_config.models[profile_id]
+                environment["ILINKBOT_PROJECT_CONFIG"] = str(config_directory)
+                environment["AUTOGEN_MODEL_PROFILE"] = profile.id
+                if profile.api_key_env:
+                    api_key = os.getenv(profile.api_key_env)
+                    if api_key:
+                        # The isolated child must use the same active model as
+                        # the main process; this is the only model credential
+                        # it receives and it is never logged or persisted.
+                        environment[profile.api_key_env] = api_key
         return environment
 
     def _execute(self, definition: ScriptDefinition, run: ScriptRun) -> None:

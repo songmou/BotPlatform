@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only CTS EHR attendance and pending-approval monitor."""
+"""Read-only CTS EHR attendance and pending-approval background job."""
 
 from __future__ import annotations
 

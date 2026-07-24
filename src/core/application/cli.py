@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Optional, Sequence, TextIO
 
 from src.core.application.bot import load_credentials
 from src.core.application.bootstrap import run_bot
+from src.core.config.loader import load_project_config
 from src.core.infrastructure.diagnostics import check_configuration, print_report
 from src.core.infrastructure.instance_lock import AlreadyRunning, SingleInstanceLock
 from src.core.integrations.images import ImageSource
 from src.core.paths import CONFIG_DIR, CREDENTIALS_PATH, DATA_DIR, INSTANCE_LOCK_PATH
+from src.core.plugins.codex_tasks import CodexHookIngestor, CodexTasksConfig
 from src.core.services.notification import (
     NotificationError,
     NotificationService,
@@ -48,9 +51,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "check-config",
         help="检查环境和配置，不启动机器人",
     )
+    hook_parser = subparsers.add_parser(
+        "codex-hook",
+        help=argparse.SUPPRESS,
+    )
+    hook_parser.add_argument(
+        "--stdin",
+        action="store_true",
+        required=True,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
-    if args.command == "notify" and args.logout:
-        parser.error("--logout 不能与 notify 同时使用")
+    if args.command is not None and args.logout:
+        parser.error("--logout 不能与子命令同时使用")
     if args.command == "notify" and not any(
         (args.message is not None, args.stdin, args.image, args.image_url)
     ):
@@ -128,10 +141,56 @@ def run_notify_command(
     return 0
 
 
+def run_codex_hook_command(
+    args: argparse.Namespace,
+    input_stream: Optional[TextIO] = None,
+    output_stream: Optional[TextIO] = None,
+    error_stream: Optional[TextIO] = None,
+) -> int:
+    """Ingest a lifecycle hook without taking the bot's single-instance lock."""
+
+    input_stream = input_stream or sys.stdin
+    output_stream = output_stream or sys.stdout
+    error_stream = error_stream or sys.stderr
+    payload: object = {}
+    try:
+        payload = json.loads(input_stream.read())
+        if not isinstance(payload, dict):
+            raise ValueError("hook 输入必须是 JSON 对象")
+        project_config = load_project_config(CONFIG_DIR)
+        plugin_config = project_config.plugins.get("codex_tasks")
+        if plugin_config is None or not plugin_config.enabled:
+            raise ValueError("codex_tasks 插件未启用")
+        registry = TenantRegistry(DATA_DIR)
+        config = CodexTasksConfig.from_mapping(
+            plugin_config.settings,
+            CONFIG_DIR.parent,
+        )
+        CodexHookIngestor(config, registry).ingest(payload)
+    except Exception as exc:
+        safe_error = str(exc).strip().splitlines()[0] or type(exc).__name__
+        print(
+            "Codex hook 采集失败：{}".format(safe_error[:1000]),
+            file=error_stream,
+        )
+
+    event_name = (
+        str(payload.get("hook_event_name") or "")
+        if isinstance(payload, dict)
+        else ""
+    )
+    response = {"continue": True} if event_name in {"UserPromptSubmit", "Stop"} else {}
+    print(json.dumps(response, ensure_ascii=False), file=output_stream)
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     if args.command == "notify":
         return run_notify_command(args)
+
+    if args.command == "codex-hook":
+        return run_codex_hook_command(args)
 
     if args.command == "check-config":
         report = check_configuration(CONFIG_DIR)

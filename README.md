@@ -2,9 +2,9 @@
 
 BotPlatform 是一个运行在自己电脑上的微信 AI 机器人。它通过微信 iLink 接收私聊消息，默认调用 DeepSeek V4 Flash，并提供多租户会话、可审批的本机工具、知识库、长期记忆、待办、定时任务以及可选插件。
 
-当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化、Codex 开发任务和个人业务脚本。向量检索保持关闭，不需要安装 `bge-m3`。
+当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化、Codex 开发任务和个人后台任务。向量检索保持关闭，不需要安装 `bge-m3`。
 
-核心代码位于 `src/` 包：`application/` 负责入口和消息编排，`services/` 承载业务服务，`storage/` 管理 SQLite 与租户数据，`integrations/` 对接微信、图片和向量能力，`infrastructure/` 提供诊断、日志与单实例运行支持。模型、工具和插件分别位于同名子包中。根目录 `main.py` 仅作为兼容启动入口，也可以使用 `python -m src` 启动。
+核心代码位于 `src/` 包：`application/` 负责入口和消息编排，`services/` 承载业务服务，`storage/` 管理 SQLite 与租户数据，`integrations/` 对接微信、图片和向量能力，`infrastructure/` 提供诊断、日志与单实例运行支持。模型、工具和插件分别位于同名子包中，可独立执行的后台任务集中在 `src/core/jobs/`。根目录 `main.py` 仅作为兼容启动入口，也可以使用 `python -m src` 启动。
 
 ## 5 分钟快速开始
 
@@ -172,6 +172,8 @@ ollama pull bge-m3
 /memory                        查看长期记忆
 /memory confirm|forget <编号>  确认或停用记忆
 /memory clear                  二次确认后停用全部记忆
+/soul                          查看当前长期用户画像
+/soul rebuild                  从有效记忆重建 SOUL.md
 /integration setup <ctsehr|autogen>  安全配置业务集成
 /integration status [编号]     查看集成状态
 /integration delete <编号>     删除集成凭据
@@ -213,13 +215,15 @@ ollama pull bge-m3
 3. 将得到的租户编号加入 `admin_tenant_ids`；
 4. 按需配置允许的项目路径并重启。
 
-管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。BotPlatform 创建的任务会在排队、开始运行、等待交互和终态发送去重通知；外部 Codex 任务每 5 秒轮询一次，启动时不会补发旧任务。
+管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。BotPlatform 创建的任务会在排队、开始运行、等待交互和终态发送去重通知。外部 Codex 生命周期由用户级 `~/.codex/hooks.json` 采集；本机安装模板为 [`config/codex-hooks.json`](config/codex-hooks.json)，安装或修改后需在 Codex 中运行 `/hooks` 并确认信任。外部任务的审批与回答仍须回原 Codex 界面处理，微信只发送提醒。
+
+`codex_tasks.external_project_scope` 设为 `all` 时会监控所有本机项目，但 `projects` 仍是微信可创建或继续任务的独立执行白名单。外部任务在同一 turn 内每个生命周期阶段只通知一次，连续审批会合并，完成事件仍保留。iLink 上下文失效后，通知会持久停在 `waiting_recipient`；用户再次私聊机器人刷新上下文后，积压通知会按原顺序自动重投。
 
 ## 定时任务与待办
 
 当前本地时间表启用文生图（08:00、14:00）、OA 考勤（08:50、18:00）、待办提醒（09:00、18:00）、每月 1 日 09:05 归档，以及每 10 分钟执行的离线窗口检查。普通早安和晚间总结保持关闭；各用户是否接收仍由已有订阅决定。
 
-脚本注册位于 [`config/scripts.json`](config/scripts.json)：`autogen_monitor` 负责文生图，`ctsehr_check` 负责 OA 考勤与待审批，`todo_manager` 负责待办。业务账号与密码通过 `/integration` 配置，密码只保存在权限为 `0600` 的受限凭据文件中，不进入日志、聊天历史或模型上下文。
+后台任务实现位于 [`src/core/jobs/`](src/core/jobs/)，注册信息位于 [`config/scripts.json`](config/scripts.json)：`autogen_monitor` 负责带参考图的连载文生图，`ctsehr_check` 负责 OA 考勤与待审批。AutoGen 使用与主进程相同的默认语言模型生成中文故事提示词，并固定用上一场的第 1 张候选图续写下一场；目标网站未提供参考图上传控件时会停止，不会降级为随机文生图。传入 `reset_story=true` 可在本次成功后开始新的随机故事。它们由脚本服务以独立子进程运行；待办则由 `src/core/plugins/todo.py` 插件提供，不属于后台任务注册表。业务账号与密码通过 `/integration` 配置，密码只保存在权限为 `0600` 的受限凭据文件中，不进入日志、聊天历史或模型上下文。
 
 机器人停机期间不会补跑普通任务。主动通知还依赖用户最近一次私聊留下的微信上下文；失效时请再次私聊机器人。
 
@@ -237,7 +241,8 @@ ollama pull bge-m3
 ## 数据、安全与多租户
 
 - `data/system/botplatform.sqlite3` 保存租户、对话、设置、订阅、知识、记忆、待办和审计；
-- `data/users/<tenant_uuid>/` 保存每个租户隔离的 workspace 和脚本产物；
+- `data/users/<tenant_uuid>/` 保存每个租户隔离的 `SOUL.md`、workspace 和后台任务产物；
+- `SOUL.md` 是由 SQLite 有效记忆自动生成的紧凑画像，禁止手工编辑；每日扫描遗漏记忆，每周使用当前系统默认模型尝试压缩；
 - 登录凭据和模型 Key 位于 `data/system/`，不进入 SQLite；
 - `data/`、虚拟环境、缓存、日志和系统文件已加入 `.gitignore`；
 - macOS/Linux 上敏感文件使用 `0600`，数据目录使用 `0700`；
@@ -254,7 +259,8 @@ config/
 ├── embeddings.json 可选 Ollama embedding
 ├── tools.json       工具目录、限制和命令白名单
 ├── plugins.json     浏览器与 Codex 插件
-├── scripts.json     固定脚本注册表
+├── codex-hooks.json 用户级 Codex 生命周期 Hook 安装模板
+├── scripts.json     后台任务注册表（实现位于 src/core/jobs）
 ├── schedules.json   定时任务
 └── agents/          Agent 角色与提示词
 ```

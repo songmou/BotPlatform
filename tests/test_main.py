@@ -25,6 +25,7 @@ from src.core.application import (
     load_credentials,
     parse_args,
     run_notify_command,
+    run_codex_hook_command,
     save_credentials,
 )
 from src.core.modeling import (
@@ -550,6 +551,32 @@ class MainBotTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             notify.assert_called_once()
+
+    def test_malformed_codex_hook_is_non_blocking_and_bypasses_lock(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        result = run_codex_hook_command(
+            Namespace(stdin=True),
+            input_stream=StringIO("{not-json"),
+            output_stream=stdout,
+            error_stream=stderr,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {})
+        self.assertIn("采集失败", stderr.getvalue())
+
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "bot.lock"
+            with SingleInstanceLock(lock_path):
+                with patch.object(main_module, "INSTANCE_LOCK_PATH", lock_path):
+                    with patch.object(
+                        main_module,
+                        "run_codex_hook_command",
+                        return_value=0,
+                    ) as hook:
+                        result = main_module.main(["codex-hook", "--stdin"])
+        self.assertEqual(result, 0)
+        hook.assert_called_once()
 
 
 if __name__ == "__main__":

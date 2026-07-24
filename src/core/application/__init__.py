@@ -9,7 +9,12 @@ from src.core.application.bot import (
     save_credentials,
 )
 from src.core.application.bootstrap import run_bot
-from src.core.application.cli import main, parse_args, run_notify_command
+from src.core.application.cli import (
+    main,
+    parse_args,
+    run_codex_hook_command,
+    run_notify_command,
+)
 
 __all__ = [
     "WeChatBot",
@@ -20,6 +25,7 @@ __all__ = [
     "parse_args",
     "print_login_status",
     "run_bot",
+    "run_codex_hook_command",
     "run_notify_command",
     "save_credentials",
 ]

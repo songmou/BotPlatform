@@ -1,8 +1,8 @@
 {
   "oa": {
     "base_url": "https://ehr.chowtaiseng.com/ZDSHRS",
-    "timeout_seconds": 30,
-    "retries": 3
+    "retries": 3,
+    "timeout_seconds": 30
   },
   "attendance": {
     "clock_in_before": "09:00",

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import logging
 import re
 import threading
 import uuid
@@ -13,7 +15,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from src.core.services.notification import NotificationError
+from src.core.services.notification import (
+    NotificationError,
+    NotificationRecipientStaleError,
+)
 
 from .base import PluginContext, PluginError, PluginToolDefinition
 
@@ -41,6 +46,10 @@ APPROVAL_METHODS = {
 }
 USER_INPUT_METHOD = "item/tool/requestUserInput"
 PROJECT_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+HOOK_EVENTS = frozenset(
+    {"UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop"}
+)
+LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -123,6 +132,7 @@ class CodexTasksConfig:
     notify_on_completion: bool
     monitor_external_tasks: bool
     monitor_tenant_id: str
+    external_project_scope: str
     external_poll_interval_seconds: int
     interaction_ttl_seconds: int
     notify_events: frozenset[str]
@@ -149,6 +159,9 @@ class CodexTasksConfig:
             notify_on_completion=bool(settings.get("notify_on_completion", True)),
             monitor_external_tasks=bool(settings.get("monitor_external_tasks", True)),
             monitor_tenant_id=monitor_tenant_id,
+            external_project_scope=str(
+                settings.get("external_project_scope", "configured")
+            ),
             external_poll_interval_seconds=int(
                 settings.get("external_poll_interval_seconds", 15)
             ),
@@ -166,7 +179,7 @@ class CodexTaskStore:
     TASK_COLUMNS = (
         "thread_id, tenant_id, project_id, title, status, phase, origin, created_at, "
         "started_at, finished_at, updated_at, last_seen_at, result_excerpt, error, "
-        "notification_status"
+        "notification_status, source_cwd"
     )
 
     def reconcile_interrupted(
@@ -238,7 +251,7 @@ class CodexTaskStore:
                     (
                         tenant_id,
                         project_id,
-                        title,
+                        title or "未命名 Codex 任务",
                         created_at,
                         created_at,
                         created_at,
@@ -297,8 +310,8 @@ class CodexTaskStore:
                 connection.execute(
                     "INSERT INTO codex_task_runs("
                     "thread_id, tenant_id, project_id, title, status, phase, origin, "
-                    "created_at, updated_at, last_seen_at, notification_status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'external', ?, ?, ?, 'disabled')",
+                    "created_at, updated_at, last_seen_at, notification_status, source_cwd) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'external', ?, ?, ?, 'disabled', ?)",
                     (
                         thread_id,
                         tenant_id,
@@ -309,6 +322,7 @@ class CodexTaskStore:
                         str(task.get("created_at") or now),
                         str(task.get("updated_at") or now),
                         now,
+                        str(task.get("source_cwd") or "") or None,
                     ),
                 )
                 previous_phase = None
@@ -316,7 +330,8 @@ class CodexTaskStore:
                 previous_phase = str(previous["phase"])
                 connection.execute(
                     "UPDATE codex_task_runs SET project_id=?, title=?, status=?, phase=?, "
-                    "updated_at=?, last_seen_at=? WHERE thread_id=? AND origin='external'",
+                    "updated_at=?, last_seen_at=?, source_cwd=COALESCE(?, source_cwd) "
+                    "WHERE thread_id=? AND origin='external'",
                     (
                         str(task.get("project_id", "")),
                         str(task.get("title", "未命名 Codex 任务")),
@@ -324,10 +339,112 @@ class CodexTaskStore:
                         phase,
                         str(task.get("updated_at") or now),
                         now,
+                        str(task.get("source_cwd") or "") or None,
                         thread_id,
                     ),
                 )
         return self.get(thread_id) or {}, previous_phase
+
+    def upsert_external_hook(
+        self,
+        *,
+        thread_id: str,
+        tenant_id: str,
+        project_id: str,
+        source_cwd: str,
+        title: str,
+        status: str,
+        phase: str,
+        result_excerpt: str = "",
+    ) -> Tuple[Dict[str, Any], Optional[str], bool]:
+        """Persist one external hook transition, including terminal-to-running turns."""
+
+        now = _utc_now()
+        with self.registry.database.transaction(immediate=True) as connection:
+            previous = connection.execute(
+                "SELECT origin, phase FROM codex_task_runs WHERE thread_id=?",
+                (thread_id,),
+            ).fetchone()
+            if previous is not None and previous["origin"] == "botplatform":
+                row = connection.execute(
+                    "SELECT {} FROM codex_task_runs WHERE thread_id=?".format(
+                        self.TASK_COLUMNS
+                    ),
+                    (thread_id,),
+                ).fetchone()
+                return (dict(row) if row is not None else {}), str(previous["phase"]), False
+
+            started_at = now if status == "running" else None
+            finished_at = now if status in TERMINAL_STATUSES else None
+            notification_status = (
+                "pending" if status in TERMINAL_STATUSES else "disabled"
+            )
+            if previous is None:
+                connection.execute(
+                    "INSERT INTO codex_task_runs("
+                    "thread_id, tenant_id, project_id, title, status, phase, origin, "
+                    "created_at, started_at, finished_at, updated_at, last_seen_at, "
+                    "result_excerpt, notification_status, source_cwd) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'external', ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        thread_id,
+                        tenant_id,
+                        project_id,
+                        title or "未命名 Codex 任务",
+                        status,
+                        phase,
+                        now,
+                        started_at,
+                        finished_at,
+                        now,
+                        now,
+                        result_excerpt or None,
+                        notification_status,
+                        source_cwd,
+                    ),
+                )
+                previous_phase = None
+            else:
+                previous_phase = str(previous["phase"])
+                connection.execute(
+                    "UPDATE codex_task_runs SET tenant_id=?, project_id=?, source_cwd=?, "
+                    "title=CASE WHEN ?<>'' THEN ? ELSE title END, status=?, phase=?, "
+                    "started_at=CASE WHEN ?='running' THEN COALESCE(started_at, ?) "
+                    "ELSE started_at END, "
+                    "finished_at=CASE WHEN ? IN ('completed','failed','interrupted') "
+                    "THEN ? ELSE NULL END, "
+                    "result_excerpt=CASE WHEN ?='running' THEN NULL "
+                    "WHEN ?<>'' THEN ? ELSE result_excerpt END, "
+                    "notification_status=?, updated_at=?, last_seen_at=? "
+                    "WHERE thread_id=? AND origin='external'",
+                    (
+                        tenant_id,
+                        project_id,
+                        source_cwd,
+                        title,
+                        title,
+                        status,
+                        phase,
+                        status,
+                        now,
+                        status,
+                        now,
+                        status,
+                        result_excerpt,
+                        result_excerpt or None,
+                        notification_status,
+                        now,
+                        now,
+                        thread_id,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT {} FROM codex_task_runs WHERE thread_id=?".format(
+                    self.TASK_COLUMNS
+                ),
+                (thread_id,),
+            ).fetchone()
+        return (dict(row) if row is not None else {}), previous_phase, True
 
     def requeue(self, thread_id: str, notify: bool) -> None:
         now = _utc_now()
@@ -613,6 +730,88 @@ class CodexTaskStore:
                     ),
                 )
 
+    def wait_event_for_recipient(self, event_id: int, error: str) -> None:
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE codex_task_events SET delivery_status='waiting_recipient', "
+                "attempt_count=attempt_count+1, next_attempt_at=NULL, last_error=? "
+                "WHERE event_id=?",
+                (error[:1000] or None, event_id),
+            )
+
+    def requeue_waiting_recipient(self, tenant_id: str) -> int:
+        with self.registry.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE codex_task_events SET delivery_status='pending', "
+                "next_attempt_at=NULL WHERE tenant_id=? "
+                "AND delivery_status='waiting_recipient'",
+                (tenant_id,),
+            )
+            connection.execute(
+                "UPDATE codex_task_runs SET notification_status='pending' "
+                "WHERE tenant_id=? AND thread_id IN ("
+                "SELECT thread_id FROM codex_task_events "
+                "WHERE tenant_id=? AND delivery_status='pending' "
+                "AND event_type IN ('completed','failed','interrupted'))",
+                (tenant_id, tenant_id),
+            )
+            return int(cursor.rowcount)
+
+    def collapse_pending_legacy_hook_events(self, tenant_id: Optional[str] = None) -> int:
+        """Disable old per-tool hook duplicates before they reach WeChat.
+
+        New hook notifications use a phase-level key. This one-time-compatible
+        cleanup handles events written by the earlier per-tool key format.
+        """
+
+        parameters: List[Any] = []
+        condition = ""
+        if tenant_id:
+            condition = " AND tenant_id=?"
+            parameters.append(tenant_id)
+        with self.registry.database.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT event_id, thread_id, event_type, event_key FROM "
+                "codex_task_events WHERE delivery_status IN "
+                "('pending', 'retry', 'waiting_recipient') "
+                "AND event_key LIKE 'hook:%'{} ORDER BY event_id".format(condition),
+                tuple(parameters),
+            ).fetchall()
+            seen: set[Tuple[str, str, str, str]] = set()
+            duplicate_ids: List[int] = []
+            for row in rows:
+                parts = str(row["event_key"]).split(":")
+                if len(parts) < 5:
+                    continue
+                group = (
+                    str(row["thread_id"]),
+                    parts[1],
+                    parts[2],
+                    str(row["event_type"]),
+                )
+                if group in seen:
+                    duplicate_ids.append(int(row["event_id"]))
+                else:
+                    seen.add(group)
+            for event_id in duplicate_ids:
+                connection.execute(
+                    "UPDATE codex_task_events SET delivery_status='disabled', "
+                    "next_attempt_at=NULL, last_error='已合并重复 Hook 通知' "
+                    "WHERE event_id=?",
+                    (event_id,),
+                )
+        return len(duplicate_ids)
+
+    def latest_event(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT event_type, delivery_status, attempt_count, last_error, "
+                "created_at, sent_at FROM codex_task_events WHERE thread_id=? "
+                "ORDER BY event_id DESC LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def due_events(self, limit: int = 20) -> List[Dict[str, Any]]:
         now = _utc_now()
         with self.registry.database.read() as connection:
@@ -623,11 +822,189 @@ class CodexTaskStore:
                 "AND NOT EXISTS (SELECT 1 FROM codex_task_events AS earlier "
                 "WHERE earlier.thread_id=event.thread_id "
                 "AND earlier.event_id<event.event_id "
-                "AND earlier.delivery_status IN ('pending', 'sending', 'retry')) "
+                "AND earlier.delivery_status IN ("
+                "'pending', 'sending', 'retry', 'waiting_recipient')) "
                 "ORDER BY event.event_id LIMIT ?",
                 (now, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+
+class CodexHookInputError(ValueError):
+    """Raised for malformed or out-of-scope Codex hook input."""
+
+
+class CodexHookIngestor:
+    """Validate Codex lifecycle hook input and persist notification events."""
+
+    def __init__(self, config: CodexTasksConfig, tenant_registry: Any) -> None:
+        self.config = config
+        self.store = CodexTaskStore(tenant_registry)
+
+    @staticmethod
+    def _required_text(payload: Mapping[str, Any], key: str, maximum: int = 1000) -> str:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise CodexHookInputError("{} 必须是非空字符串".format(key))
+        return value.strip()[:maximum]
+
+    @staticmethod
+    def _short_hash(value: str, length: int = 16) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+    def _project_for_cwd(self, raw_cwd: str) -> Tuple[str, str]:
+        cwd_path = Path(raw_cwd).expanduser()
+        if not cwd_path.is_absolute():
+            raise CodexHookInputError("cwd 必须是绝对路径")
+        cwd = cwd_path.resolve(strict=False)
+        matches = [
+            project
+            for project in self.config.projects.values()
+            if cwd == project.path or project.path in cwd.parents
+        ]
+        if matches:
+            project = max(matches, key=lambda item: len(str(item.path)))
+            return project.id, str(cwd)
+        if self.config.external_project_scope != "all":
+            raise CodexHookInputError("cwd 不在外部监控范围内")
+        return "external-{}".format(self._short_hash(str(cwd), 12)), str(cwd)
+
+    @staticmethod
+    def _tool_summary(tool_name: str, tool_input: Any) -> str:
+        value = tool_input if isinstance(tool_input, Mapping) else {}
+        if tool_name == "request_user_input":
+            questions = list(value.get("questions") or [])
+            lines = [
+                str(_value(question, "question", "") or "").strip()[:300]
+                for question in questions
+            ]
+            return "\n".join(line for line in lines if line) or "Codex 需要补充信息"
+        for key in ("description", "reason", "command"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                return text.strip()[:800]
+        return "Codex 请求使用工具：{}".format(tool_name or "未知工具")
+
+    @staticmethod
+    def _phase_for_event(
+        event_name: str, tool_name: str
+    ) -> Tuple[str, str]:
+        if event_name == "UserPromptSubmit":
+            return "running", "running"
+        if event_name == "PermissionRequest":
+            return "running", "waiting_approval"
+        if event_name == "PreToolUse" and tool_name == "request_user_input":
+            return "running", "waiting_input"
+        if event_name == "PostToolUse" and tool_name == "request_user_input":
+            return "running", "running"
+        if event_name == "Stop":
+            return "completed", "completed"
+        raise CodexHookInputError("不支持的 hook 事件或工具")
+
+    def _notification_key(self, session_id: str, turn_id: str, phase: str) -> str:
+        """One user-facing notification per lifecycle phase in each turn."""
+
+        return "hook-phase:{}:{}:{}".format(
+            self._short_hash(session_id),
+            self._short_hash(turn_id),
+            phase,
+        )
+
+    @staticmethod
+    def _message(
+        task: Mapping[str, Any],
+        phase: str,
+        detail: str,
+    ) -> str:
+        labels = {
+            "running": "开始执行",
+            "waiting_approval": "等待审批",
+            "waiting_input": "等待回答",
+            "completed": "已完成",
+        }
+        suffix = (
+            "\n该任务由其他 Codex 客户端发起，请回原 Codex 界面处理；"
+            "微信不能代为批准。"
+            if phase == "waiting_approval"
+            else "\n该任务由其他 Codex 客户端发起，请回原 Codex 界面回答。"
+            if phase == "waiting_input"
+            else ""
+        )
+        detail_line = "\n{}".format(detail[:1200]) if detail else ""
+        return "Codex 外部任务{}：{}\n项目：{}\n任务编号：{}{}{}".format(
+            labels.get(phase, phase),
+            task.get("title") or "未命名 Codex 任务",
+            task.get("project_id"),
+            task.get("thread_id"),
+            detail_line,
+            suffix,
+        )
+
+    def ingest(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise CodexHookInputError("hook 输入必须是 JSON 对象")
+        event_name = self._required_text(payload, "hook_event_name", 80)
+        if event_name not in HOOK_EVENTS:
+            raise CodexHookInputError("不支持的 hook_event_name")
+        session_id = self._required_text(payload, "session_id", 200)
+        turn_id = self._required_text(payload, "turn_id", 200)
+        project_id, source_cwd = self._project_for_cwd(
+            self._required_text(payload, "cwd", 4096)
+        )
+        if not self.config.monitor_tenant_id:
+            raise CodexHookInputError("未配置外部任务通知租户")
+        tool_name = str(payload.get("tool_name") or "").strip()
+        status, phase = self._phase_for_event(event_name, tool_name)
+
+        prompt = str(payload.get("prompt") or "").strip()
+        final_message = str(payload.get("last_assistant_message") or "").strip()
+        title = (
+            prompt.splitlines()[0][:200]
+            if prompt
+            else source_cwd.rstrip("/").rsplit("/", 1)[-1][:200]
+        )
+        detail = ""
+        if event_name in {"PermissionRequest", "PreToolUse"}:
+            detail = self._tool_summary(tool_name, payload.get("tool_input"))
+        elif event_name == "Stop":
+            detail = final_message[:1200]
+
+        if event_name not in {"UserPromptSubmit", "Stop"}:
+            stop_key = self._notification_key(session_id, turn_id, "completed")
+            with self.store.registry.database.read() as connection:
+                stopped = connection.execute(
+                    "SELECT 1 FROM codex_task_events WHERE event_key=?",
+                    (stop_key,),
+                ).fetchone()
+            if stopped is not None:
+                return {"accepted": True, "ignored": "turn_already_stopped"}
+
+        task, _previous_phase, accepted = self.store.upsert_external_hook(
+            thread_id=session_id,
+            tenant_id=self.config.monitor_tenant_id,
+            project_id=project_id,
+            source_cwd=source_cwd,
+            title=title if event_name == "UserPromptSubmit" else "",
+            status=status,
+            phase=phase,
+            result_excerpt=final_message[:6000] if event_name == "Stop" else "",
+        )
+        if not accepted:
+            return {"accepted": True, "ignored": "botplatform_owned"}
+        event = self.store.enqueue_event(
+            self._notification_key(session_id, turn_id, phase),
+            session_id,
+            self.config.monitor_tenant_id,
+            phase,
+            self._message(task, phase, detail),
+            enabled=phase in self.config.notify_events,
+        )
+        return {
+            "accepted": True,
+            "thread_id": session_id,
+            "event_id": event.get("event_id"),
+            "delivery_status": event.get("delivery_status"),
+        }
 
 
 @dataclass
@@ -699,6 +1076,7 @@ class CodexTaskService:
         self.store.reconcile_interrupted(
             config.notify_on_completion and "interrupted" in config.notify_events
         )
+        self.store.collapse_pending_legacy_hook_events()
         self._client_factory = client_factory
         self._client: Any = None
         self._client_lock = threading.RLock()
@@ -765,6 +1143,17 @@ class CodexTaskService:
     @staticmethod
     def _safe_error(exc: Exception) -> str:
         message = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+        message = re.sub(
+            r"(?i)(authorization\s*:\s*bearer\s+)\S+",
+            r"\1<redacted>",
+            message,
+        )
+        message = re.sub(
+            r"(?i)((?:context[_-]?token|api[_-]?key|access[_-]?token|token)"
+            r"\s*[=:]\s*)[^,\s&]+",
+            r"\1<redacted>",
+            message,
+        )
         return message[:1000]
 
     @staticmethod
@@ -1193,24 +1582,65 @@ class CodexTaskService:
                 service.send_text_to_tenant(
                     str(claimed["tenant_id"]), str(claimed["message"])
                 )
+            except NotificationRecipientStaleError as exc:
+                attempt = int(claimed.get("attempt_count", 0))
+                safe_error = self._safe_error(exc)
+                if attempt < 2:
+                    self.store.finish_event_delivery(
+                        event_id,
+                        False,
+                        safe_error,
+                        self.RETRY_DELAYS[attempt],
+                    )
+                    delivery_status = "retry"
+                else:
+                    self.store.wait_event_for_recipient(event_id, safe_error)
+                    delivery_status = "waiting_recipient"
+                LOGGER.warning(
+                    "Codex 通知等待收件人刷新 thread=%s event=%s status=%s error=%s",
+                    claimed["thread_id"],
+                    claimed["event_type"],
+                    delivery_status,
+                    safe_error,
+                )
             except (NotificationError, OSError, ValueError) as exc:
                 attempt = int(claimed.get("attempt_count", 0))
                 safe_error = self._safe_error(exc)
                 delay = self.RETRY_DELAYS[attempt] if attempt < len(self.RETRY_DELAYS) else None
-                if delay is None and "prepare failed" in safe_error.lower():
-                    # A stale/rate-limited WeChat prepare window often becomes
-                    # usable again after the user next interacts with the bot.
-                    # Keep this event durable instead of discarding it.
-                    delay = self.RETRY_DELAYS[-1]
                 self.store.finish_event_delivery(
                     event_id, False, safe_error, delay
+                )
+                LOGGER.warning(
+                    "Codex 通知投递失败 thread=%s event=%s status=%s error=%s",
+                    claimed["thread_id"],
+                    claimed["event_type"],
+                    "retry" if delay is not None else "failed",
+                    safe_error,
                 )
                 if delay is None and claimed["event_type"] in TERMINAL_STATUSES:
                     self.store.set_notification(str(claimed["thread_id"]), "failed")
             else:
                 self.store.finish_event_delivery(event_id, True)
+                LOGGER.info(
+                    "Codex 通知已投递 thread=%s event=%s status=sent",
+                    claimed["thread_id"],
+                    claimed["event_type"],
+                )
                 if claimed["event_type"] in TERMINAL_STATUSES:
                     self.store.set_notification(str(claimed["thread_id"]), "sent")
+
+    def on_recipient_refreshed(self, tenant_id: str) -> int:
+        """Wake all durable notifications after an inbound WeChat message."""
+
+        self.store.collapse_pending_legacy_hook_events(tenant_id)
+        count = self.store.requeue_waiting_recipient(tenant_id)
+        if count:
+            LOGGER.info(
+                "Codex 通知已重新排队 tenant=%s count=%s",
+                tenant_id,
+                count,
+            )
+        return count
 
     def _watchdog_loop(self) -> None:
         next_external_check = datetime.now(timezone.utc)
@@ -1224,8 +1654,11 @@ class CodexTaskService:
                     next_external_check = now + timedelta(
                         seconds=self.config.external_poll_interval_seconds
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                LOGGER.exception(
+                    "Codex watchdog 异常，线程将继续运行：%s",
+                    self._safe_error(exc),
+                )
             self._watchdog_stop.wait(1.0)
 
     def _external_transition_message(
@@ -1262,6 +1695,11 @@ class CodexTaskService:
             task_id = str(task["task_id"])
             existing = self.store.get(task_id)
             if existing is not None and existing.get("origin") == "botplatform":
+                continue
+            # App-server state is process-local. Polling therefore supplies
+            # discoverable metadata only; hooks own lifecycle transitions.
+            # A reported systemError is the sole terminal fallback.
+            if task.get("phase") != "failed":
                 continue
             stored, previous_phase = self.store.upsert_external(
                 task, self.config.monitor_tenant_id
@@ -1325,6 +1763,7 @@ class CodexTaskService:
                     "created_at": _value(thread, "created_at", _value(thread, "createdAt")),
                     "updated_at": _value(thread, "updated_at", _value(thread, "updatedAt")),
                     "origin": "external",
+                    "source_cwd": str(project.path),
                 }
         return list(results.values())
 
@@ -1341,8 +1780,8 @@ class CodexTaskService:
         if normalized == "systemerror":
             return "failed", "failed"
         if normalized in {"idle", "notloaded"}:
-            return "completed", "completed"
-        return "completed", "completed"
+            return "unknown", "unknown"
+        return "unknown", "unknown"
 
     @classmethod
     def _external_status(cls, status: str) -> str:
@@ -1374,6 +1813,7 @@ class CodexTaskService:
             "result": task.get("result_excerpt"),
             "error": task.get("error"),
             "origin": task.get("origin", "botplatform"),
+            "source_cwd": task.get("source_cwd"),
         }
 
     def _summary_with_pending(self, task: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1395,6 +1835,16 @@ class CodexTaskService:
                 "summary": self._request_summary(
                     str(interaction.get("method") or pending["method"]), payload
                 ),
+            }
+        latest_event = self.store.latest_event(task_id) if task_id else None
+        if latest_event:
+            summary["notification"] = {
+                "event_type": latest_event["event_type"],
+                "status": latest_event["delivery_status"],
+                "attempt_count": latest_event["attempt_count"],
+                "last_error": latest_event["last_error"],
+                "created_at": latest_event["created_at"],
+                "sent_at": latest_event["sent_at"],
             }
         return summary
 
@@ -1729,6 +2179,7 @@ class CodexTasksPlugin:
             "notify_on_completion",
             "monitor_external_tasks",
             "monitor_tenant_id",
+            "external_project_scope",
             "external_poll_interval_seconds",
             "interaction_ttl_seconds",
             "notify_events",
@@ -1780,6 +2231,11 @@ class CodexTasksPlugin:
             raise ValueError("codex_tasks.monitor_tenant_id 必须属于管理员租户")
         if monitor and len(admins) > 1 and not monitor_tenant:
             raise ValueError("多个管理员启用外部监控时必须设置 monitor_tenant_id")
+        external_scope = settings.get("external_project_scope", "configured")
+        if external_scope not in {"configured", "all"}:
+            raise ValueError(
+                "codex_tasks.external_project_scope 必须是 configured 或 all"
+            )
         poll = settings.get("external_poll_interval_seconds", 15)
         if not isinstance(poll, int) or isinstance(poll, bool) or not 5 <= poll <= 300:
             raise ValueError(
@@ -1918,6 +2374,9 @@ class CodexTasksPlugin:
 
     def close_tenant(self, tenant_id: str) -> None:
         self.service.close_tenant(tenant_id)
+
+    def on_recipient_refreshed(self, tenant_id: str) -> int:
+        return self.service.on_recipient_refreshed(tenant_id)
 
     def close(self) -> None:
         self.service.close()

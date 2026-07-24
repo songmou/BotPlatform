@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.core.integrations.ilink import Credentials, ILinkError, PartialDeliveryError, SessionExpired
+from src.core.integrations.ilink import (
+    Credentials,
+    ILinkAPIError,
+    ILinkError,
+    PartialDeliveryError,
+    SessionExpired,
+)
 from src.core.integrations.images import ImageSource
 from src.core.services.notification import (
     NotificationCredentialsError,
@@ -12,6 +18,7 @@ from src.core.services.notification import (
     NotificationError,
     NotificationPartialDeliveryError,
     NotificationRecipientError,
+    NotificationRecipientStaleError,
     NotificationService,
     TenantRecipientStore,
 )
@@ -136,6 +143,18 @@ class NotificationServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(NotificationCredentialsError, "凭证已失效"):
             service.send_text_to_tenant(self.tenant.tenant_id, "通知")
         self.assertEqual(len(self.clients), 1)
+        self.assertTrue(self.clients[0].closed)
+
+    def test_prepare_failed_preserves_structured_recipient_error(self) -> None:
+        self.store.update(self.tenant, "stale-context")
+        service = self.service(
+            failure=ILinkAPIError(1, 1001, "prepare failed")
+        )
+        with self.assertRaises(NotificationRecipientStaleError) as raised:
+            service.send_text_to_tenant(self.tenant.tenant_id, "通知")
+        self.assertEqual(raised.exception.ret, 1)
+        self.assertEqual(raised.exception.errcode, 1001)
+        self.assertEqual(raised.exception.errmsg, "prepare failed")
         self.assertTrue(self.clients[0].closed)
 
         self.clients = []

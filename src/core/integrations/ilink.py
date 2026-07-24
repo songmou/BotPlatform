@@ -44,6 +44,21 @@ class ILinkError(RuntimeError):
     """Base error raised for iLink protocol failures."""
 
 
+class ILinkAPIError(ILinkError):
+    """A non-zero iLink response with machine-readable error fields."""
+
+    def __init__(self, ret: Any, errcode: Any, errmsg: Any) -> None:
+        self.ret = ret
+        self.errcode = errcode
+        self.errmsg = str(errmsg or "").strip()
+        detail = self.errmsg or str(errcode if errcode is not None else ret)
+        super().__init__("微信接口返回错误：{}".format(detail))
+
+    @property
+    def recipient_context_expired(self) -> bool:
+        return self.errmsg.lower() == "prepare failed"
+
+
 class ILinkTimeout(ILinkError):
     """Raised when an iLink request reaches its client-side timeout."""
 
@@ -314,8 +329,10 @@ class ILinkClient:
         if data.get("errcode") == -14:
             raise SessionExpired("微信登录凭证已失效")
         if data.get("ret", 0) != 0:
-            raise ILinkError(
-                "微信接口返回错误：{}".format(data.get("errmsg") or data.get("errcode") or data.get("ret"))
+            raise ILinkAPIError(
+                data.get("ret"),
+                data.get("errcode"),
+                data.get("errmsg"),
             )
         return data
 

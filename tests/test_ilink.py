@@ -14,6 +14,7 @@ from Crypto.Util.Padding import pad, unpad
 from src.core.integrations.ilink import (
     CANCEL_TYPING_STATUS,
     Credentials,
+    ILinkAPIError,
     ILinkClient,
     PartialDeliveryError,
     SessionExpired,
@@ -206,6 +207,25 @@ class ILinkClientTests(unittest.TestCase):
         client = ILinkClient(credentials=credentials, client=http)
         with self.assertRaises(SessionExpired):
             client.get_updates("")
+
+    def test_nonzero_response_preserves_structured_error_fields(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"ret": 1, "errcode": 1001, "errmsg": "prepare failed"},
+            )
+
+        credentials = Credentials("token", "https://gateway.test", "bot", "owner")
+        client = ILinkClient(
+            credentials=credentials,
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        with self.assertRaises(ILinkAPIError) as raised:
+            client.send_text("user", "stale-context", "message")
+        self.assertEqual(raised.exception.ret, 1)
+        self.assertEqual(raised.exception.errcode, 1001)
+        self.assertEqual(raised.exception.errmsg, "prepare failed")
+        self.assertTrue(raised.exception.recipient_context_expired)
 
     def test_long_poll_timeout_is_a_normal_empty_update(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

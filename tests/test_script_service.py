@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.core.config.loader import ScriptDefinition, ScriptParameter
 from src.core.integrations.ilink import Credentials
@@ -219,6 +220,60 @@ class ScriptServiceTests(unittest.TestCase):
         self.assertEqual(environment["ILINKBOT_INTEGRATION_ACCOUNT"], "account-value")
         self.assertEqual(environment["ILINKBOT_KEYCHAIN_SERVICE"], reference.service)
         self.assertNotIn("never-in-environment", environment.values())
+
+    def test_autogen_inherits_the_main_default_language_model_credentials(self) -> None:
+        integration_store = IntegrationStore(self.registry)
+        keychain = KeychainService(storage_path=self.root / "credentials.json")
+        reference = keychain.reference(self.tenant.tenant_id, "autogen")
+        keychain.set_secret(reference, "site-password")
+        integration_store.set(
+            self.tenant.tenant_id,
+            "autogen",
+            {
+                "account": "account-value",
+                "keychain_service": reference.service,
+                "keychain_account": reference.account,
+            },
+        )
+        definition = ScriptDefinition(
+            id="autogen_monitor",
+            name="AutoGen",
+            description="test",
+            entrypoint=str(self.entrypoint),
+            timeout_seconds=5,
+            requires_approval=False,
+        )
+        project_root = Path(__file__).resolve().parents[1]
+        service = ScriptService(
+            {"autogen_monitor": definition},
+            Credentials("token", "https://gateway", "bot", "owner"),
+            self.store,
+            project_root,
+            self.registry,
+            integration_store,
+            keychain_service=keychain,
+            notification_service=self.notifications,
+        )
+        self.addCleanup(service.shutdown)
+        run = ScriptRun(
+            run_id="autogen_monitor-20260720T120000-12345678",
+            script_id="autogen_monitor",
+            script_name="AutoGen",
+            trigger="verification",
+            parameters={},
+            status="running",
+            summary="",
+            tenant_id=self.tenant.tenant_id,
+        )
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "cloud-key", "MODEL_PROFILE": "deepseek_cloud"},
+            clear=False,
+        ):
+            environment = service._environment(run, self.root / "result.json")
+        self.assertEqual(environment["AUTOGEN_MODEL_PROFILE"], "deepseek_cloud")
+        self.assertEqual(environment["DEEPSEEK_API_KEY"], "cloud-key")
+        self.assertIn("ILINKBOT_PROJECT_CONFIG", environment)
 
     def test_integration_script_is_rejected_before_queue_when_credentials_are_missing(self) -> None:
         definition = ScriptDefinition(

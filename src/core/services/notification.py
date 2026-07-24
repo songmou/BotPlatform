@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional
 
 from src.core.integrations.ilink import (
     Credentials,
+    ILinkAPIError,
     ILinkClient,
     ILinkError,
     PartialDeliveryError,
@@ -31,6 +32,16 @@ class NotificationCredentialsError(NotificationError):
 
 class NotificationRecipientError(NotificationError):
     """Raised when no valid recent WeChat recipient is available."""
+
+
+class NotificationRecipientStaleError(NotificationRecipientError):
+    """Raised when iLink requires a fresh recipient context token."""
+
+    def __init__(self, message: str, api_error: ILinkAPIError) -> None:
+        self.ret = api_error.ret
+        self.errcode = api_error.errcode
+        self.errmsg = api_error.errmsg
+        super().__init__(message)
 
 
 class NotificationDeliveryError(NotificationError):
@@ -262,6 +273,13 @@ class NotificationService:
             raise NotificationCredentialsError(
                 "微信登录凭证已失效，请重新启动机器人扫码登录"
             ) from exc
+        except ILinkAPIError as exc:
+            if exc.recipient_context_expired:
+                raise NotificationRecipientStaleError(
+                    "微信收件上下文已失效，等待用户再次私聊机器人",
+                    exc,
+                ) from exc
+            raise NotificationDeliveryError("微信通知发送失败：{}".format(exc)) from exc
         except ILinkError as exc:
             raise NotificationDeliveryError("微信通知发送失败：{}".format(exc)) from exc
         finally:
@@ -300,6 +318,13 @@ class NotificationService:
             raise NotificationCredentialsError(
                 "微信登录凭证已失效，请重新启动机器人扫码登录"
             ) from exc
+        except ILinkAPIError as exc:
+            if exc.recipient_context_expired:
+                raise NotificationRecipientStaleError(
+                    "微信收件上下文已失效，等待用户再次私聊机器人",
+                    exc,
+                ) from exc
+            raise NotificationDeliveryError("微信图片发送失败：{}".format(exc)) from exc
         except ILinkError as exc:
             raise NotificationDeliveryError("微信图片发送失败：{}".format(exc)) from exc
         finally:

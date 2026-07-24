@@ -11,14 +11,16 @@ from src.core.infrastructure.diagnostics import check_configuration
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
-SOURCE_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SOURCE_JOBS = Path(__file__).resolve().parents[1] / "src" / "core" / "jobs"
 
 
 class PreflightTests(unittest.TestCase):
     def copy_project_config(self, directory: str) -> Path:
         config = Path(directory) / "config"
         shutil.copytree(SOURCE_CONFIG, config)
-        shutil.copytree(SOURCE_SCRIPTS, Path(directory) / "scripts")
+        jobs_target = Path(directory) / "src" / "core" / "jobs"
+        jobs_target.parent.mkdir(parents=True)
+        shutil.copytree(SOURCE_JOBS, jobs_target)
         return config
 
     def test_missing_required_key_is_aggregated_and_optional_features_warn(self):

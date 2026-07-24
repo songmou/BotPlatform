@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility notice for the retired standalone Keychain setup."""
+"""Compatibility notice for the retired standalone job Keychain setup."""
 
 from __future__ import annotations
 

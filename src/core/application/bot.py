@@ -291,6 +291,20 @@ class WeChatBot:
         subject: Any = tenant or user_id
         if tenant is not None and self.recipient_store is not None:
             self.recipient_store.update(tenant, context_token)
+            if self.codex_tasks_plugin is not None:
+                try:
+                    refresher = getattr(
+                        self.codex_tasks_plugin,
+                        "on_recipient_refreshed",
+                        None,
+                    )
+                    if callable(refresher):
+                        refresher(tenant.tenant_id)
+                except Exception as exc:
+                    print(
+                        "恢复 Codex 微信通知失败：{}".format(exc),
+                        file=sys.stderr,
+                    )
         if self._record_recipient:
             try:
                 self._record_recipient(user_id, context_token)
@@ -442,6 +456,33 @@ class WeChatBot:
                 reply = "私人知识库：{} 个来源，{} 个分块；已完成 {}，待向量化 {}。".format(
                     len(sources), chunks, ready, pending
                 )
+            self._reply(user_id, context_token, reply, tenant)
+            self._log("微信输出", user_id, reply)
+            return
+
+        if not image_item and (
+            lowered_text == "/soul" or lowered_text.startswith("/soul ")
+        ):
+            if tenant is None or self.memory_service is None:
+                reply = "当前未启用长期用户画像。"
+            elif lowered_text not in {"/soul", "/soul rebuild"}:
+                reply = "格式错误，请使用 /soul 或 /soul rebuild。"
+            else:
+                try:
+                    profile = self.memory_service.get_soul(
+                        tenant.tenant_id,
+                        force_rebuild=lowered_text == "/soul rebuild",
+                    )
+                    reply = (
+                        "长期用户画像（修订 {}，更新时间 {}）：\n{}"
+                    ).format(
+                        profile["revision"],
+                        profile.get("updated_at") or "未知",
+                        str(profile["content"]).strip(),
+                    )
+                except Exception as exc:
+                    print("读取长期用户画像失败：{}".format(exc), file=sys.stderr)
+                    reply = "长期用户画像暂时不可用，正常聊天不受影响。"
             self._reply(user_id, context_token, reply, tenant)
             self._log("微信输出", user_id, reply)
             return
