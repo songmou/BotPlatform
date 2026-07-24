@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 
 
 SCHEMA_V1 = r"""
@@ -439,7 +439,7 @@ CREATE INDEX IF NOT EXISTS ix_soul_profiles_dirty
 """
 
 
-SCHEMA_V6 = r"""
+SCHEMA_V10 = r"""
 CREATE TABLE IF NOT EXISTS tool_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -589,14 +589,14 @@ class Database:
                         "INSERT INTO schema_migrations(version, applied_at) "
                         "VALUES (9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
-                    current = 5
-                if current < 6:
-                    connection.executescript(SCHEMA_V6)
+                    current = 9
+                if current < 10:
+                    connection.executescript(SCHEMA_V10)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) "
-                        "VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                        "VALUES (10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
-                    current = 6
+                    current = 10
             except sqlite3.Error as exc:
                 raise DatabaseError("无法初始化 SQLite 数据库：{}".format(exc)) from exc
             finally:
