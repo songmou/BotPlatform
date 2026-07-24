@@ -20,7 +20,9 @@ from src.core.infrastructure.logging import (
     log_tool_call,
 )
 from src.core.integrations.embeddings import EmbeddingClient
-from src.core.integrations.ilink import ILinkClient, ILinkError, SessionExpired
+from src.core.integrations.ilink import ILinkError
+from src.core.bots.adapters.ilink import ILinkAdapter
+from src.core.bots.base import SessionExpiredError
 from src.core.modeling import ModelError, ModelRouter
 from src.core.modeling.factory import create_model_client
 from src.core.paths import CONFIG_DIR, CREDENTIALS_PATH, DATA_DIR, PROJECT_ROOT
@@ -149,13 +151,13 @@ def run_bot(args, project_config=None) -> int:
                 delete_credentials()
                 credentials = None
 
-            ilink = ILinkClient(credentials=credentials)
+            adapter = ILinkAdapter(credentials=credentials)
             scheduler: Optional[SchedulerService] = None
             script_service: Optional[ScriptService] = None
             tool_runtime: Optional[ToolRuntime] = None
             try:
                 if credentials is None:
-                    credentials = ilink.login(display_qr_code, status_changed=print_login_status)
+                    credentials = adapter.login(display_qr_code, status_changed=print_login_status)
                     save_credentials(credentials)
                     print("微信凭证已保存到 {}。".format(CREDENTIALS_PATH))
                 else:
@@ -182,6 +184,13 @@ def run_bot(args, project_config=None) -> int:
                     (plugin for plugin in platform_plugins if plugin.id == "codex_tasks"),
                     None,
                 )
+                mcp_manager = None
+                if project_config.tools.enabled and project_config.mcp_servers:
+                    from src.core.tooling.mcp_client import McpClientManager
+
+                    mcp_manager = McpClientManager()
+                    mcp_manager.start()
+                    mcp_manager.reload(project_config.mcp_servers)
                 tool_runtime = (
                     ToolRuntime(
                         project_config.tools,
@@ -191,6 +200,7 @@ def run_bot(args, project_config=None) -> int:
                         tenant_registry=tenant_registry,
                         knowledge_service=knowledge_service,
                         plugins=platform_plugins,
+                        mcp_manager=mcp_manager,
                     )
                     if project_config.tools.enabled
                     else None
@@ -213,6 +223,7 @@ def run_bot(args, project_config=None) -> int:
                     settings_store=settings_store,
                     knowledge_service=knowledge_service,
                     memory_service=memory_service,
+                    skills=project_config.skills,
                 )
                 scheduler = SchedulerService(
                     credentials=credentials,
@@ -234,7 +245,7 @@ def run_bot(args, project_config=None) -> int:
                     )
                 )
                 WeChatBot(
-                    ilink,
+                    adapter,
                     agent_service,
                     tenant_registry=tenant_registry,
                     recipient_store=recipient_store,
@@ -249,7 +260,7 @@ def run_bot(args, project_config=None) -> int:
                     codex_tasks_plugin=codex_tasks_plugin,
                     integration_service=integration_service,
                 ).run()
-            except SessionExpired:
+            except SessionExpiredError:
                 print("微信登录已失效，将重新扫码。", file=sys.stderr)
                 delete_credentials()
                 continue
@@ -260,7 +271,7 @@ def run_bot(args, project_config=None) -> int:
                     script_service.shutdown()
                 if tool_runtime:
                     tool_runtime.close()
-                ilink.close()
+                adapter.close()
     except KeyboardInterrupt:
         print("\n机器人已停止。")
         return 0

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from src.modeling import (
+from src.core.modeling import (
     CanonicalMessage,
     ModelCapabilities,
     ModelIdentity,
@@ -41,7 +41,7 @@ class FakeClient:
 
 
 def _make_config():
-    from src.config.loader import (
+    from src.core.config.loader import (
         AgentPreset,
         AppConfig,
         Capability,

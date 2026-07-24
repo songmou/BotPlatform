@@ -29,6 +29,7 @@ from src.core.storage.tenants import TenantContext, TenantRegistry
 if TYPE_CHECKING:
     from src.core.services.script import ScriptService
     from src.core.services.knowledge import KnowledgeService
+    from src.core.tooling.mcp_client import McpClientManager
 
 
 APPROVAL_TOOLS = {
@@ -266,6 +267,9 @@ class ToolRuntime:
         tenant_registry: Optional[TenantRegistry] = None,
         knowledge_service: Optional["KnowledgeService"] = None,
         plugins: Optional[Iterable[PlatformPlugin]] = None,
+        tool_audit_store: Optional[Any] = None,
+        tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
+        mcp_manager: Optional["McpClientManager"] = None,
     ) -> None:
         self.base_config = config
         self.config = config
@@ -289,6 +293,27 @@ class ToolRuntime:
         self.command_runner = CommandRunner(
             config, self.resolve_path, sandbox_available=sandbox_available
         )
+        self.tool_audit_store = tool_audit_store
+        self._tool_states: Dict[str, Dict[str, Any]] = tool_states or {}
+        self.mcp_manager = mcp_manager
+
+    def is_tool_enabled(self, name: str) -> bool:
+        state = self._tool_states.get(name)
+        if state is not None:
+            return state.get("enabled", True)
+        return True
+
+    def get_tool_state(self, name: str) -> Dict[str, Any]:
+        state = self._tool_states.get(name, {})
+        return {
+            "enabled": state.get("enabled", True),
+            "require_approval": state.get(
+                "require_approval", name in APPROVAL_TOOLS
+            ),
+        }
+
+    def reload_tool_states(self, states: Dict[str, Dict[str, Any]]) -> None:
+        self._tool_states = states
 
     def bind_tenant(self, tenant: TenantContext) -> None:
         """Fail-closed binding of all filesystem and script tools to one tenant."""
@@ -321,9 +346,13 @@ class ToolRuntime:
         return self.tenant
 
     def is_available(self, name: str) -> bool:
+        if not self.is_tool_enabled(name):
+            return False
         plugin = self._plugin_tools.get(name)
         if plugin is not None:
             return plugin.is_available(name)
+        if self.mcp_manager is not None and self.mcp_manager.has_tool(name):
+            return self.mcp_manager.is_available(name)
         if name not in TOOL_DEFINITIONS:
             return False
         if name == "run_command":
@@ -340,6 +369,10 @@ class ToolRuntime:
             return definition
         plugin = self._plugin_tools.get(name)
         if plugin is None:
+            if self.mcp_manager is not None:
+                mcp_definition = self.mcp_manager.tool_schema(name)
+                if mcp_definition is not None:
+                    return mcp_definition
             return None
         plugin_definition = plugin.tool_definitions.get(name)
         if plugin_definition is None:
@@ -389,6 +422,9 @@ class ToolRuntime:
             if not isinstance(arguments, dict):
                 return True
             return self.script_service.requires_approval(arguments.get("script_id"))
+        state = self._tool_states.get(name)
+        if state is not None and "require_approval" in state:
+            return state["require_approval"]
         return name in APPROVAL_TOOLS
 
     def script_approval_groups(self) -> tuple[List[str], List[str]]:
@@ -560,6 +596,8 @@ class ToolRuntime:
         arguments: Dict[str, Any],
         audit_context: Optional[ToolAuditContext] = None,
     ) -> ToolResult:
+        if not self.is_tool_enabled(name):
+            return ToolResult(False, error="工具已被禁用")
         try:
             self._require_tenant()
         except ToolError as exc:
@@ -567,11 +605,14 @@ class ToolRuntime:
         started = time.monotonic()
         status = "失败"
         output_size = 0
+        error_msg = ""
         try:
             self._validate_arguments(name, arguments)
             plugin = self._plugin_tools.get(name)
             if plugin is not None:
                 data = plugin.execute(name, arguments, self.tenant)
+            elif self.mcp_manager is not None and self.mcp_manager.has_tool(name):
+                data = self.mcp_manager.call_tool(name, arguments)
             else:
                 handler = getattr(self, "_tool_{}".format(name), None)
                 if name not in TOOL_DEFINITIONS or not handler:
@@ -581,16 +622,38 @@ class ToolRuntime:
             output_size = len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             return ToolResult(True, data=data)
         except (ToolError, PluginError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            return ToolResult(False, error=str(exc))
+            error_msg = str(exc)
+            return ToolResult(False, error=error_msg)
         finally:
+            duration = time.monotonic() - started
             if self.audit_logger:
                 self.audit_logger(
                     audit_context or ToolAuditContext(),
                     name,
                     status,
-                    time.monotonic() - started,
+                    duration,
                     output_size,
                 )
+            if self.tool_audit_store is not None:
+                try:
+                    import hashlib
+                    args_hash = hashlib.sha256(
+                        json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()
+                    ).hexdigest()[:16]
+                    ctx = audit_context or ToolAuditContext()
+                    self.tool_audit_store.record(
+                        tenant_id=self.tenant.tenant_id if self.tenant else None,
+                        session_id=ctx.session_id,
+                        agent_id=ctx.agent_id,
+                        tool_name=name,
+                        status=status,
+                        duration_ms=int(duration * 1000),
+                        output_bytes=output_size,
+                        args_hash=args_hash,
+                        error=error_msg or None,
+                    )
+                except Exception:
+                    pass
 
     def close_tenant(self, tenant_id: str) -> None:
         for plugin in self.plugins:
@@ -602,6 +665,25 @@ class ToolRuntime:
                 plugin.close()
             except Exception:
                 pass
+        if self.mcp_manager is not None:
+            try:
+                self.mcp_manager.close()
+            except Exception:
+                pass
+
+    def reload_plugins(self, plugins: Iterable[PlatformPlugin]) -> None:
+        for plugin in reversed(self.plugins):
+            try:
+                plugin.close()
+            except Exception:
+                pass
+        self.plugins = list(plugins)
+        self._plugin_tools = {}
+        for plugin in self.plugins:
+            for tool_name in plugin.tool_definitions:
+                if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+                    raise ValueError("平台插件工具名称重复：{}".format(tool_name))
+                self._plugin_tools[tool_name] = plugin
 
     def _tool_list_allowed_roots(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {

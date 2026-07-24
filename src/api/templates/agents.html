@@ -16,7 +16,7 @@
 
 <!-- Modal -->
 <div id="agent-modal" class="modal-overlay" style="display:none">
-    <div class="modal">
+    <div class="modal modal-xl">
         <div class="modal-header">
             <h3 id="modal-title">新建智能体</h3>
             <button id="modal-close" class="modal-close-btn">&times;</button>
@@ -71,6 +71,28 @@
             <div class="form-group">
                 <label for="agent-prompt">系统提示词</label>
                 <textarea id="agent-prompt" rows="6" placeholder="定义智能体的行为和规则..."></textarea>
+            </div>
+            <div class="form-group">
+                <label>工具与能力</label>
+                <div class="tool-picker">
+                    <details class="tool-group" open>
+                        <summary>内置工具 <span id="tools-builtin-count" class="tool-count"></span></summary>
+                        <div id="tools-builtin" class="tool-checkboxes"></div>
+                    </details>
+                    <details class="tool-group">
+                        <summary>插件工具 <span id="tools-plugin-count" class="tool-count"></span></summary>
+                        <div id="tools-plugin" class="tool-plugin-groups"></div>
+                    </details>
+                    <details class="tool-group">
+                        <summary>Skill 技能 <span id="tools-skill-count" class="tool-count"></span></summary>
+                        <div id="tools-skill" class="tool-checkboxes"></div>
+                    </details>
+                    <details class="tool-group">
+                        <summary>MCP 服务 <span id="tools-mcp-count" class="tool-count"></span></summary>
+                        <div id="tools-mcp" class="tool-checkboxes"></div>
+                    </details>
+                </div>
+                <small>勾选该智能体可使用的工具、技能与 MCP 服务</small>
             </div>
             <div class="modal-footer">
                 <button type="button" id="modal-cancel" class="btn-secondary">取消</button>

@@ -9,8 +9,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 from src.api.deps import get_config
 from src.api.schemas import AgentCreate, AgentOut, AgentUpdate
-from src.config.loader import AgentPreset, Capability
-from src.paths import CONFIG_DIR
+from src.core.config.loader import AgentPreset, Capability
+from src.core.paths import CONFIG_DIR
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -26,6 +26,8 @@ def _to_out(agent) -> AgentOut:
         system_prompt=agent.system_prompt,
         capabilities=[{"name": c.name, "description": c.description} for c in agent.capabilities],
         tools=agent.tools,
+        skills=list(agent.skills),
+        mcp_servers=list(agent.mcp_servers),
         model=agent.model,
         greeting=agent.greeting,
         greeting_hints=list(agent.greeting_hints),
@@ -43,6 +45,8 @@ def _agent_to_dict(agent) -> dict:
         "system_prompt": agent.system_prompt,
         "capabilities": [{"name": c.name, "description": c.description} for c in agent.capabilities],
         "tools": agent.tools,
+        "skills": list(agent.skills),
+        "mcp_servers": list(agent.mcp_servers),
     }
     if agent.model:
         data["model"] = agent.model
@@ -119,6 +123,8 @@ def create_agent(body: AgentCreate, request: Request):
         system_prompt=body.system_prompt,
         capabilities=[Capability(name=c.name, description=c.description) for c in body.capabilities],
         tools=body.tools,
+        skills=body.skills,
+        mcp_servers=body.mcp_servers,
         model=body.model or None,
         greeting=body.greeting or None,
         greeting_hints=body.greeting_hints or [],
@@ -149,6 +155,8 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
             else existing.capabilities
         ),
         tools=body.tools if body.tools is not None else existing.tools,
+        skills=body.skills if body.skills is not None else existing.skills,
+        mcp_servers=body.mcp_servers if body.mcp_servers is not None else existing.mcp_servers,
         model=(body.model or None) if body.model is not None else existing.model,
         greeting=(body.greeting or None) if body.greeting is not None else existing.greeting,
         greeting_hints=body.greeting_hints if body.greeting_hints is not None else existing.greeting_hints,

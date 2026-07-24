@@ -27,11 +27,11 @@ from src.core.storage.tenants import ScheduleStore, TenantContext, TenantRegistr
 class SchedulerService:
     def __init__(
         self,
-        credentials: Credentials,
-        tasks: List[ScheduledTask],
-        timezone_name: str,
-        agent_service: AgentService,
-        recipient_store: TenantRecipientStore,
+        credentials: Optional[Credentials] = None,
+        tasks: Optional[List[ScheduledTask]] = None,
+        timezone_name: str = "UTC",
+        agent_service: Optional[AgentService] = None,
+        recipient_store: Optional[TenantRecipientStore] = None,
         client_factory: Callable[[Credentials], ILinkClient] = lambda credentials: ILinkClient(
             credentials=credentials
         ),
@@ -45,7 +45,7 @@ class SchedulerService:
         plugins: Optional[List[PlatformPlugin]] = None,
     ) -> None:
         self.credentials = credentials
-        self.tasks = tasks
+        self.tasks = tasks or []
         self.timezone_name = timezone_name
         self.agent_service = agent_service
         self.recipient_store = recipient_store
@@ -68,12 +68,15 @@ class SchedulerService:
         }
         if self.tenant_registry is None or self.schedule_store is None:
             raise ValueError("多用户调度器需要租户注册表和订阅存储")
-        self.notification_service = NotificationService(
-            credentials_loader=lambda: self.credentials,
-            recipient_store=self.recipient_store,
-            client_factory=self.client_factory,
-            image_loader=image_loader,
-        )
+        if credentials is not None and recipient_store is not None:
+            self.notification_service = NotificationService(
+                credentials_loader=lambda: self.credentials,
+                recipient_store=self.recipient_store,
+                client_factory=self.client_factory,
+                image_loader=image_loader,
+            )
+        else:
+            self.notification_service = None
         self._started = False
 
     @property
@@ -106,6 +109,29 @@ class SchedulerService:
             return
         self.scheduler.shutdown(wait=True)
         self._started = False
+
+    def reload_tasks(self, tasks: List[ScheduledTask]) -> None:
+        self.tasks = tasks
+        if not self._started:
+            return
+        self.scheduler.remove_all_jobs()
+        for task in self.tasks:
+            if not task.enabled:
+                continue
+            crons = task.crons or [task.cron]
+            for index, cron in enumerate(crons):
+                trigger = CronTrigger.from_crontab(cron, timezone=self.timezone_name)
+                job_id = task.id if len(crons) == 1 else "{}#{}".format(task.id, index + 1)
+                self.scheduler.add_job(
+                    self.run_task,
+                    trigger=trigger,
+                    args=[task],
+                    id=job_id,
+                    replace_existing=True,
+                    coalesce=False,
+                    max_instances=1,
+                    misfire_grace_time=1,
+                )
 
     def run_task(self, task: ScheduledTask) -> bool:
         tenants = self.schedule_store.enabled_tenants(task.id)
@@ -150,9 +176,9 @@ class SchedulerService:
                 return False
             if task.condition is not None:
                 return self._run_conditional_task(
-                    task, recipient, tenant_id=tenant.tenant_id
+                    task, recipient, tenant_id=tenant.tenant_id, tenant=tenant
                 )
-            result, detail = self._deliver_action(task, recipient=recipient)
+            result, detail = self._deliver_action(task, recipient=recipient, tenant=tenant)
             self.logger(task.id, "成功", detail, tenant.tenant_id)
             return True
         except Exception as exc:
@@ -189,14 +215,23 @@ class SchedulerService:
         )
         return True
 
-    def _message_for_task(self, task: ScheduledTask) -> str:
+    def _message_for_task(self, task: ScheduledTask, tenant: Optional[TenantContext] = None) -> str:
         if task.action.type == "text":
             return task.action.content or ""
-        return self.agent_service.generate(
-            task.action.agent_id or "", task.action.prompt or ""
+        if tenant is None or self.agent_service is None:
+            return self.agent_service.generate(
+                task.action.agent_id or "", task.action.prompt or ""
+            ) if self.agent_service else ""
+        outcome = self.agent_service.chat(
+            tenant,
+            task.action.prompt or "",
+            agent_id=task.action.agent_id or None,
         )
+        if hasattr(outcome, "approval_id"):
+            return "定时任务触发了一个需要确认的操作，请在对话中回复确认或取消：\n\n" + outcome.text
+        return outcome.text
 
-    def _deliver_action(self, task: ScheduledTask, recipient: Recipient):
+    def _deliver_action(self, task: ScheduledTask, recipient: Recipient, tenant: Optional[TenantContext] = None):
         if task.action.type == "image":
             source = (
                 ImageSource.local(Path(task.action.image_path or ""))
@@ -212,7 +247,7 @@ class SchedulerService:
             detail = "[图片]{}".format(" " + caption if caption else "")
             return result, detail
 
-        message = self._message_for_task(task)
+        message = self._message_for_task(task, tenant)
         result = self.notification_service.send_text_to(recipient, message)
         return result, message
 
@@ -221,6 +256,7 @@ class SchedulerService:
         task: ScheduledTask,
         recipient: Recipient,
         tenant_id: str,
+        tenant: Optional[TenantContext] = None,
     ) -> bool:
         condition = task.condition
         if condition is None or condition.type != "inactivity_once":
@@ -264,6 +300,6 @@ class SchedulerService:
             )
             return False
 
-        result, detail = self._deliver_action(task, recipient=recipient)
+        result, detail = self._deliver_action(task, recipient=recipient, tenant=tenant)
         self.logger(task.id, "成功", detail, result.recipient_user_id)
         return True

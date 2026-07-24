@@ -148,6 +148,8 @@ class AgentPreset:
     capabilities: List[Capability]
     image_prompt: Optional[str] = None
     tools: List[str] = field(default_factory=list)
+    skills: List[str] = field(default_factory=list)
+    mcp_servers: List[str] = field(default_factory=list)
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: List[str] = field(default_factory=list)
@@ -251,6 +253,8 @@ class ProjectConfig:
     scripts: Dict[str, ScriptDefinition]
     schedules: List[ScheduledTask]
     embedding: EmbeddingProfile
+    skills: List[Dict[str, Any]] = field(default_factory=list)
+    mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def active_agent(self) -> AgentPreset:
@@ -666,8 +670,8 @@ def _load_agent(path: Path) -> AgentPreset:
     data = _load_json(path)
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
-        "capabilities", "tools", "model", "greeting", "greeting_hints",
-        "temperature", "max_tokens",
+        "capabilities", "tools", "skills", "mcp_servers", "model", "greeting",
+        "greeting_hints", "temperature", "max_tokens",
     }, path)
     capabilities_data = data.get("capabilities")
     if not isinstance(capabilities_data, list) or not capabilities_data:
@@ -704,6 +708,30 @@ def _load_agent(path: Path) -> AgentPreset:
             raise _error(path, "tools", "不能包含重复工具：{}".format(name))
         tools.append(name)
 
+    raw_skills = data.get("skills", [])
+    if not isinstance(raw_skills, list):
+        raise _error(path, "skills", "必须是数组")
+    skills: List[str] = []
+    for index, skill_id in enumerate(raw_skills):
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise _error(path, "skills[{}]".format(index), "必须是非空字符串")
+        skill_id = skill_id.strip()
+        if skill_id in skills:
+            raise _error(path, "skills", "不能包含重复技能：{}".format(skill_id))
+        skills.append(skill_id)
+
+    raw_mcp_servers = data.get("mcp_servers", [])
+    if not isinstance(raw_mcp_servers, list):
+        raise _error(path, "mcp_servers", "必须是数组")
+    mcp_servers: List[str] = []
+    for index, server_id in enumerate(raw_mcp_servers):
+        if not isinstance(server_id, str) or not server_id.strip():
+            raise _error(path, "mcp_servers[{}]".format(index), "必须是非空字符串")
+        server_id = server_id.strip()
+        if server_id in mcp_servers:
+            raise _error(path, "mcp_servers", "不能包含重复服务：{}".format(server_id))
+        mcp_servers.append(server_id)
+
     raw_greeting_hints = data.get("greeting_hints", [])
     if not isinstance(raw_greeting_hints, list):
         raise _error(path, "greeting_hints", "必须是数组")
@@ -735,6 +763,8 @@ def _load_agent(path: Path) -> AgentPreset:
         image_prompt=_optional_string(data, "image_prompt", path),
         capabilities=capabilities,
         tools=tools,
+        skills=skills,
+        mcp_servers=mcp_servers,
         model=_optional_string(data, "model", path),
         greeting=_optional_string(data, "greeting", path),
         greeting_hints=greeting_hints,
@@ -1183,6 +1213,26 @@ def _load_schedules(
     return tasks
 
 
+def _load_skills(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = _load_json(path)
+    skills = data.get("skills", [])
+    if not isinstance(skills, list):
+        raise _error(path, "skills", "必须是数组")
+    return skills
+
+
+def _load_mcp_servers(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = _load_json(path)
+    servers = data.get("servers", [])
+    if not isinstance(servers, list):
+        raise _error(path, "servers", "必须是数组")
+    return servers
+
+
 def load_project_config(config_dir: Path) -> ProjectConfig:
     config_dir = config_dir.resolve()
     app = _load_app(config_dir / "app.json")
@@ -1191,7 +1241,11 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
     tools = _load_tools(config_dir / "tools.json")
     plugins = _load_plugins(config_dir / "plugins.json")
     agents = _load_agents(config_dir / "agents")
+    skills = _load_skills(config_dir / "skills.json")
+    mcp_servers = _load_mcp_servers(config_dir / "mcp_servers.json")
     configured_plugin_tools = plugin_tool_names(plugins)
+    skill_ids = {s.get("id") for s in skills if isinstance(s, dict)}
+    server_ids = {s.get("id") for s in mcp_servers if isinstance(s, dict)}
     for agent in agents.values():
         unknown = sorted(
             set(agent.tools) - BUILTIN_TOOL_NAMES - configured_plugin_tools
@@ -1200,6 +1254,20 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
             raise ConfigError(
                 "Agent {} 引用了未知工具：{}".format(
                     agent.id, "、".join(unknown)
+                )
+            )
+        unknown_skills = sorted(set(agent.skills) - skill_ids)
+        if unknown_skills:
+            raise ConfigError(
+                "Agent {} 引用了未知技能：{}".format(
+                    agent.id, "、".join(unknown_skills)
+                )
+            )
+        unknown_servers = sorted(set(agent.mcp_servers) - server_ids)
+        if unknown_servers:
+            raise ConfigError(
+                "Agent {} 引用了未知 MCP 服务：{}".format(
+                    agent.id, "、".join(unknown_servers)
                 )
             )
     if app.default_agent not in agents:
@@ -1251,4 +1319,6 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
         scripts=scripts,
         schedules=schedules,
         embedding=embedding,
+        skills=skills,
+        mcp_servers=mcp_servers,
     )

@@ -15,10 +15,10 @@ from src.api.schemas import (
     ModelSwitchRequest,
     ModelUpdate,
 )
-from src.config.loader import ModelProfile
-from src.modeling import ModelCapabilities
-from src.modeling.factory import create_model_client
-from src.paths import CONFIG_DIR
+from src.core.config.loader import ModelProfile
+from src.core.modeling import ModelCapabilities
+from src.core.modeling.factory import create_model_client
+from src.core.paths import CONFIG_DIR
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 

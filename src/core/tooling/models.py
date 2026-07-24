@@ -48,6 +48,8 @@ class ToolAuditContext:
     provider: str = "-"
     profile_id: str = "-"
     model: str = "-"
+    session_id: str = ""
+    agent_id: str = ""
 
 
 @dataclass(frozen=True)

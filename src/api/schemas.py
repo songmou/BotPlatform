@@ -83,6 +83,8 @@ class AgentOut(BaseModel):
     system_prompt: str
     capabilities: List[Dict[str, str]]
     tools: List[str]
+    skills: List[str] = []
+    mcp_servers: List[str] = []
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: List[str] = []
@@ -103,6 +105,8 @@ class AgentCreate(BaseModel):
     system_prompt: str = ""
     capabilities: List[AgentCapabilityIn] = []
     tools: List[str] = []
+    skills: List[str] = []
+    mcp_servers: List[str] = []
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: List[str] = []
@@ -117,6 +121,8 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = None
     capabilities: Optional[List[AgentCapabilityIn]] = None
     tools: Optional[List[str]] = None
+    skills: Optional[List[str]] = None
+    mcp_servers: Optional[List[str]] = None
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: Optional[List[str]] = None
@@ -139,3 +145,152 @@ class ChatHistoryItem(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     messages: List[ChatHistoryItem]
+
+
+# ---- Schedule Task schemas ----
+
+class TaskActionOut(BaseModel):
+    type: str
+    content: Optional[str] = None
+    agent_id: Optional[str] = None
+    prompt: Optional[str] = None
+    image_path: Optional[str] = None
+    image_url: Optional[str] = None
+    caption: Optional[str] = None
+    script_id: Optional[str] = None
+    plugin_id: Optional[str] = None
+    tool_name: Optional[str] = None
+
+
+class TaskConditionOut(BaseModel):
+    type: str
+    after_hours: float
+    before_hours: float
+
+
+class ScheduleTaskOut(BaseModel):
+    id: str
+    enabled: bool
+    cron: Optional[str] = None
+    crons: List[str] = []
+    target: str
+    action: TaskActionOut
+    condition: Optional[TaskConditionOut] = None
+
+
+class ScheduleTaskCreate(BaseModel):
+    id: str
+    enabled: bool = True
+    cron: Optional[str] = None
+    crons: List[str] = []
+    target: str = "last_active_user"
+    action: Dict[str, Any]
+    condition: Optional[Dict[str, Any]] = None
+
+
+class ScheduleTaskUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    cron: Optional[str] = None
+    crons: Optional[List[str]] = None
+    target: Optional[str] = None
+    action: Optional[Dict[str, Any]] = None
+    condition: Optional[Dict[str, Any]] = None
+
+
+# ---- Plugin schemas ----
+
+class PluginToolOut(BaseModel):
+    name: str
+    description: str
+    requires_approval: bool = False
+    parameters: Dict[str, Any] = {}
+
+
+class PluginOut(BaseModel):
+    id: str
+    enabled: bool
+    tool_count: int
+    tools: List[PluginToolOut] = []
+    settings: Dict[str, Any] = {}
+
+
+class PluginUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    settings: Optional[Dict[str, Any]] = None
+
+
+class ToolStateUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    require_approval: Optional[bool] = None
+
+
+class ToolAuditOut(BaseModel):
+    id: int
+    ts: str
+    tenant_id: Optional[str] = None
+    session_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    tool_name: str
+    status: str
+    duration_ms: int
+    output_bytes: int
+    args_hash: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SkillOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    prompt: str
+    enabled: bool
+
+
+class SkillCreate(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    prompt: str
+    enabled: bool = True
+
+
+class SkillUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    prompt: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class McpServerOut(BaseModel):
+    id: str
+    name: str
+    transport: str
+    command: Optional[str] = None
+    args: List[str] = []
+    env: Dict[str, str] = {}
+    url: Optional[str] = None
+    headers: Dict[str, str] = {}
+    enabled: bool
+
+
+class McpServerCreate(BaseModel):
+    id: str
+    name: str
+    transport: str = "stdio"
+    command: Optional[str] = None
+    args: List[str] = []
+    env: Dict[str, str] = {}
+    url: Optional[str] = None
+    headers: Dict[str, str] = {}
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    name: Optional[str] = None
+    transport: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    env: Optional[Dict[str, str]] = None
+    url: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+    enabled: Optional[bool] = None

@@ -13,6 +13,7 @@ from src.core.integrations.images import ImageSourceError
 from src.core.services.notification import TenantRecipientStore
 from src.core.services.scheduler import SchedulerService
 from src.core.storage.tenants import ScheduleStore, TenantRegistry
+from src.core.tooling.models import FinalAnswer
 
 
 class FakeAgentService:
@@ -22,6 +23,10 @@ class FakeAgentService:
     def generate(self, agent_id, prompt):
         self.calls.append((agent_id, prompt))
         return "AI 定时内容"
+
+    def chat(self, user_id, question, image_bytes=None, agent_id=None):
+        self.calls.append((agent_id or "default", question))
+        return FinalAnswer(text="AI 定时内容")
 
 
 class FakeILink:

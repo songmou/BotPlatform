@@ -204,6 +204,51 @@ class ConfigLoaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "agent_id.*missing"):
                 load_project_config(config_dir)
 
+    def test_agent_skills_and_mcp_servers_load(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "skills.json", {
+                "skills": [
+                    {"id": "greeting_skill", "name": "问候", "prompt": "保持礼貌。", "enabled": True}
+                ]
+            })
+            self.save_json(config_dir / "mcp_servers.json", {
+                "servers": [
+                    {"id": "echo", "name": "Echo", "transport": "stdio", "command": "echo", "enabled": True}
+                ]
+            })
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["skills"] = ["greeting_skill"]
+            agent_data["mcp_servers"] = ["echo"]
+            self.save_json(agent_path, agent_data)
+
+            config = load_project_config(config_dir)
+            self.assertEqual(config.agents["general"].skills, ["greeting_skill"])
+            self.assertEqual(config.agents["general"].mcp_servers, ["echo"])
+            self.assertEqual(config.skills[0]["id"], "greeting_skill")
+            self.assertEqual(config.mcp_servers[0]["id"], "echo")
+
+    def test_unknown_skill_reference_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["skills"] = ["missing_skill"]
+            self.save_json(agent_path, agent_data)
+            with self.assertRaisesRegex(ConfigError, "未知技能.*missing_skill"):
+                load_project_config(config_dir)
+
+    def test_unknown_mcp_server_reference_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["mcp_servers"] = ["missing_server"]
+            self.save_json(agent_path, agent_data)
+            with self.assertRaisesRegex(ConfigError, "未知 MCP 服务.*missing_server"):
+                load_project_config(config_dir)
+
     def test_image_schedule_supports_local_path_url_and_optional_caption(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)

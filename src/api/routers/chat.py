@@ -27,8 +27,9 @@ from src.api.sse import (
     sse_tool_result,
     streaming_response,
 )
-from src.modeling.contracts import CanonicalMessage, GenerationOptions, ModelError, ModelRequest
-from src.paths import SYSTEM_DATA_DIR
+from src.core.modeling.contracts import CanonicalMessage, GenerationOptions, ModelError, ModelRequest
+from src.core.paths import SYSTEM_DATA_DIR
+from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -138,8 +139,8 @@ def _make_plan(user_message: str, agents: list, model_router) -> Optional[List[d
     return valid or None
 
 
-def _run_agent(agent, subtask: str, history: list, model_router) -> str:
-    messages = [CanonicalMessage("system", agent.system_prompt)]
+def _run_agent(agent, subtask: str, history: list, model_router, skills: list) -> str:
+    messages = [CanonicalMessage("system", build_system_prompt(agent, skills))]
     messages.extend(history)
     messages.append(CanonicalMessage("user", subtask))
     agent_model = getattr(agent, "model", None)
@@ -159,6 +160,7 @@ def _orchestrate(
     store,
     tenant_id: str,
     conv_id: str,
+    skills: list,
 ) -> Generator[str, None, None]:
     agents_by_id = {a.id: a for a in agents}
     try:
@@ -182,7 +184,7 @@ def _orchestrate(
             for idx, item in enumerate(plan):
                 agent = agents_by_id[item["agent_id"]]
                 future = executor.submit(
-                    _run_agent, agent, item["subtask"], history, model_router
+                    _run_agent, agent, item["subtask"], history, model_router, skills
                 )
                 future_to_idx[future] = idx
 
@@ -307,7 +309,7 @@ def chat(body: ChatRequest, request: Request):
         if not agents:
             agents = [config.active_agent]
         return streaming_response(
-            _orchestrate(body.message, agents, history, model_router, store, tenant_id, conv_id)
+            _orchestrate(body.message, agents, history, model_router, store, tenant_id, conv_id, config.skills)
         )
 
     agent = config.agents.get(body.agent_id or config.app.default_agent)
@@ -317,10 +319,10 @@ def chat(body: ChatRequest, request: Request):
     if body.regenerate:
         if history and history[-1].role == "assistant":
             history = history[:-1]
-        messages = [CanonicalMessage(role="system", content=agent.system_prompt)]
+        messages = [CanonicalMessage(role="system", content=build_system_prompt(agent, config.skills))]
         messages.extend(history)
     else:
-        messages = [CanonicalMessage(role="system", content=agent.system_prompt)]
+        messages = [CanonicalMessage(role="system", content=build_system_prompt(agent, config.skills))]
         messages.extend(history)
         messages.append(CanonicalMessage(role="user", content=body.message))
 
@@ -353,7 +355,7 @@ def chat(body: ChatRequest, request: Request):
     )
 
     tool_runtime = getattr(request.app.state, "tool_runtime", None)
-    agent_tools = getattr(agent, "tools", [])
+    agent_tools = resolve_tool_names(agent, tool_runtime)
     tool_schemas = []
     if tool_runtime and agent_tools:
         try:

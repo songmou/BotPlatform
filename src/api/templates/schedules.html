@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}定时任务 - BotPlatform{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>定时任务</h2>
+                <p class="page-desc">管理 cron 定时任务，支持文本/智能体/脚本/插件动作</p>
+            </div>
+            <button id="create-schedule-btn" class="btn-primary">+ 新建任务</button>
+        </div>
+    </div>
+    <div id="schedule-status" class="status-card"></div>
+    <div id="schedule-list" class="card-grid"></div>
+</div>
+
+<!-- Modal -->
+<div id="schedule-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="schedule-modal-title">新建任务</h3>
+            <button id="schedule-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="schedule-form" class="modal-body">
+            <div class="form-group" id="schedule-id-group">
+                <label for="schedule-id">任务 ID</label>
+                <input type="text" id="schedule-id" placeholder="如 morning_reminder" required pattern="^[a-z][a-z0-9_]{0,63}$">
+                <small>小写字母开头，可含数字和下划线</small>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label"><input type="checkbox" id="schedule-enabled" checked> 启用</label>
+            </div>
+            <div class="form-group">
+                <label for="schedule-crons">Cron 表达式</label>
+                <input type="text" id="schedule-crons" placeholder="每行一个，如 0 9 * * *">
+                <small>5 字段格式（分 时 日 月 周），多个用换行分隔。每行一个 cron。</small>
+            </div>
+            <div class="form-group">
+                <label for="schedule-target">目标</label>
+                <select id="schedule-target">
+                    <option value="last_active_user">最近活跃用户</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="schedule-action-type">动作类型</label>
+                <select id="schedule-action-type">
+                    <option value="text">文本消息</option>
+                    <option value="agent_prompt">智能体生成</option>
+                    <option value="script">脚本执行</option>
+                    <option value="plugin">插件调用</option>
+                </select>
+            </div>
+            <div class="form-group" id="action-text-group">
+                <label for="action-content">文本内容</label>
+                <textarea id="action-content" rows="3" placeholder="定时发送的文本内容"></textarea>
+            </div>
+            <div class="form-group" id="action-agent-group" style="display:none">
+                <label for="action-agent-id">智能体 ID</label>
+                <input type="text" id="action-agent-id" placeholder="如 general">
+                <label for="action-prompt" style="margin-top:8px">提示词</label>
+                <textarea id="action-prompt" rows="3" placeholder="指导智能体生成内容的 prompt"></textarea>
+            </div>
+            <div class="form-group" id="action-script-group" style="display:none">
+                <label for="action-script-id">脚本 ID</label>
+                <input type="text" id="action-script-id" placeholder="如 autogen_monitor">
+            </div>
+            <div class="form-group" id="action-plugin-group" style="display:none">
+                <label for="action-plugin-id">插件 ID</label>
+                <input type="text" id="action-plugin-id" placeholder="如 todo">
+                <label for="action-tool-name" style="margin-top:8px">工具名称</label>
+                <input type="text" id="action-tool-name" placeholder="如 todo_manage">
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label"><input type="checkbox" id="schedule-condition-enabled"> 启用条件触发（不活跃时触发）</label>
+            </div>
+            <div class="form-row" id="condition-fields" style="display:none">
+                <div class="form-group">
+                    <label for="condition-after">不活跃多少小时后触发</label>
+                    <input type="number" id="condition-after" value="20" min="0" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label for="condition-before">多少小时前触发</label>
+                    <input type="number" id="condition-before" value="24" min="0" step="0.5">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="schedule-modal-cancel" class="btn-secondary">取消</button>
+                <button type="submit" class="btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>initSchedules();</script>
+{% endblock %}

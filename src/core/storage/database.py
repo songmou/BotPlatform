@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 
 SCHEMA_V1 = r"""
@@ -345,6 +345,25 @@ CREATE INDEX ix_codex_events_delivery
 """
 
 
+SCHEMA_V6 = r"""
+CREATE TABLE IF NOT EXISTS tool_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    tenant_id TEXT,
+    session_id TEXT,
+    agent_id TEXT,
+    tool_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    output_bytes INTEGER NOT NULL DEFAULT 0,
+    args_hash TEXT,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tool_audit_ts ON tool_audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_tool_audit_tool ON tool_audit_log(tool_name);
+"""
+
+
 class DatabaseError(RuntimeError):
     pass
 
@@ -448,6 +467,14 @@ class Database:
                         "INSERT INTO schema_migrations(version, applied_at) "
                         "VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
+                    current = 5
+                if current < 6:
+                    connection.executescript(SCHEMA_V6)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 6
             except sqlite3.Error as exc:
                 raise DatabaseError("无法初始化 SQLite 数据库：{}".format(exc)) from exc
             finally:

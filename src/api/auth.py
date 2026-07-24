@@ -9,7 +9,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.paths import SYSTEM_DATA_DIR
+from src.core.paths import SYSTEM_DATA_DIR
 
 TOKEN_FILE = SYSTEM_DATA_DIR / "web_token"
 COOKIE_NAME = "web_token"

@@ -45,3 +45,21 @@ def page_models(request: Request):
 def page_agents(request: Request):
     templates = request.app.state.templates
     return templates.TemplateResponse(name="agents.html", request=request, context={"active": "agents"})
+
+
+@router.get("/schedules", response_class=HTMLResponse)
+def page_schedules(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(name="schedules.html", request=request, context={"active": "schedules"})
+
+
+@router.get("/tools", response_class=HTMLResponse)
+def page_tools(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(name="tools.html", request=request, context={"active": "tools"})
+
+
+@router.get("/plugins", response_class=HTMLResponse)
+def page_plugins(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(name="plugins.html", request=request, context={"active": "plugins"})

@@ -14,12 +14,9 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from src.core.infrastructure.logging import log_interaction
 from src.core.integrations.ilink import (
     Credentials,
-    ILinkClient,
     ILinkError,
-    SessionExpired,
-    extract_text_and_image,
-    is_private_user_message,
 )
+from src.core.bots.base import BotAdapter, BotAdapterError, InboundMessage, SessionExpiredError
 from src.core.integrations.images import ImageSource
 from src.core.modeling import ModelError
 from src.core.paths import CREDENTIALS_PATH
@@ -113,7 +110,7 @@ def print_login_status(status: str) -> None:
 class WeChatBot:
     def __init__(
         self,
-        ilink: ILinkClient,
+        adapter: BotAdapter,
         agent_service: AgentService,
         interaction_logger: Callable[[str, str, str], None] = log_interaction,
         recipient_recorder: Optional[Callable[[str, str], None]] = None,
@@ -129,7 +126,7 @@ class WeChatBot:
         codex_tasks_plugin: Optional[Any] = None,
         integration_service: Optional[IntegrationService] = None,
     ) -> None:
-        self.ilink = ilink
+        self.adapter = adapter
         self.agent_service = agent_service
         self._log = interaction_logger
         self._record_recipient = recipient_recorder
@@ -156,10 +153,10 @@ class WeChatBot:
     def _resolve_tenant(self, user_id: str) -> Optional[TenantContext]:
         if self.tenant_registry is None:
             return None
-        credentials = self.ilink.credentials
-        if credentials is None:
-            raise ILinkError("微信登录凭证不可用")
-        return self.tenant_registry.resolve(credentials.bot_id, user_id)
+        identity = self.adapter.identity
+        if not identity.bot_id:
+            raise BotAdapterError("机器人登录凭证不可用")
+        return self.tenant_registry.resolve(identity.bot_id, user_id)
 
     def _append_transcript(
         self,
@@ -181,7 +178,7 @@ class WeChatBot:
         tenant: Optional[TenantContext] = None,
         record: bool = True,
     ) -> None:
-        self.ilink.send_text(user_id, context_token, text)
+        self.adapter.send_text(user_id, context_token, text)
         if record:
             self._append_transcript(tenant, "assistant", text)
 
@@ -193,8 +190,8 @@ class WeChatBot:
         return "思考过程：\n{}\n\n回答：\n{}".format(thinking, outcome.text)
 
     @staticmethod
-    def _typing_error(exc: ILinkError) -> None:
-        print("微信正在输入状态更新失败：{}".format(exc), file=sys.stderr)
+    def _typing_error(exc: Exception) -> None:
+        print("正在输入状态更新失败：{}".format(exc), file=sys.stderr)
 
     def _cancel_approval_timer(self, user_id: Any) -> None:
         key = self._subject_key(user_id)
@@ -230,10 +227,10 @@ class WeChatBot:
                 ):
                     return
                 try:
-                    self.ilink.send_text(
+                    self.adapter.send_text(
                         user_id, context_token, APPROVAL_TIMEOUT_TEXT
                     )
-                except ILinkError as exc:
+                except BotAdapterError as exc:
                     print(
                         "发送确认超时通知失败：{}".format(exc),
                         file=sys.stderr,
@@ -281,12 +278,9 @@ class WeChatBot:
         self._reply(user_id, context_token, reply, tenant)
         self._log("微信输出", user_id, reply)
 
-    def handle_message(self, message: Dict[str, Any]) -> None:
-        if not is_private_user_message(message):
-            return
-
-        user_id = str(message["from_user_id"])
-        context_token = str(message["context_token"])
+    def handle_message(self, msg: InboundMessage) -> None:
+        user_id = msg.user_id
+        context_token = msg.reply_token
         tenant = self._resolve_tenant(user_id)
         subject: Any = tenant or user_id
         if tenant is not None and self.recipient_store is not None:
@@ -296,7 +290,8 @@ class WeChatBot:
                 self._record_recipient(user_id, context_token)
             except OSError as exc:
                 print("保存最近微信用户失败：{}".format(exc), file=sys.stderr)
-        text, image_item = extract_text_and_image(message)
+        text = msg.text
+        image_item = msg.image_ref
 
         normalized_text = text.strip()
         lowered_text = normalized_text.lower()
@@ -352,7 +347,7 @@ class WeChatBot:
                 reply = "格式错误，请使用 /approve <编号> 或 /deny <编号>。"
             else:
                 try:
-                    with self.ilink.typing(
+                    with self.adapter.typing(
                         user_id, context_token, on_error=self._typing_error
                     ):
                         outcome = self.agent_service.resolve_approval(
@@ -381,7 +376,7 @@ class WeChatBot:
         ):
             self._log("微信输入", user_id, text)
             try:
-                with self.ilink.typing(
+                with self.adapter.typing(
                     user_id, context_token, on_error=self._typing_error
                 ):
                     outcome = self.agent_service.resolve_pending_approval(
@@ -650,18 +645,18 @@ class WeChatBot:
         self._log("微信输入", user_id, input_log)
         image_bytes: Optional[bytes] = None
         try:
-            with self.ilink.typing(
+            with self.adapter.typing(
                 user_id, context_token, on_error=self._typing_error
             ):
                 if image_item:
-                    image_bytes = self.ilink.download_image(image_item)
+                    image_bytes = self.adapter.download_image(image_item)
                 outcome = self.agent_service.chat(
                     subject, question, image_bytes=image_bytes
                 )
             answer = self._outcome_text(outcome)
-        except SessionExpired:
+        except SessionExpiredError:
             raise
-        except (ILinkError, ModelError) as exc:
+        except (BotAdapterError, ModelError) as exc:
             print("处理用户消息失败：{}".format(exc), file=sys.stderr)
             error_reply = "处理消息失败：{}。请稍后重试。".format(exc)
             self._reply(
@@ -682,20 +677,18 @@ class WeChatBot:
         print("机器人已启动，正在等待微信消息。按 Ctrl+C 退出。")
         while True:
             try:
-                updates = self.ilink.get_updates(cursor)
-            except SessionExpired:
+                cursor, messages = self.adapter.get_updates(cursor)
+            except SessionExpiredError:
                 raise
-            except ILinkError as exc:
+            except BotAdapterError as exc:
                 print("接收微信消息失败：{}；2 秒后重试。".format(exc), file=sys.stderr)
                 time.sleep(2.0)
                 continue
 
-            if updates.get("get_updates_buf"):
-                cursor = str(updates["get_updates_buf"])
-            for message in updates.get("msgs") or []:
+            for msg in messages:
                 try:
-                    self.handle_message(message)
-                except SessionExpired:
+                    self.handle_message(msg)
+                except SessionExpiredError:
                     raise
-                except ILinkError as exc:
+                except BotAdapterError as exc:
                     print("回复微信消息失败：{}".format(exc), file=sys.stderr)
