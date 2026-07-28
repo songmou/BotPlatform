@@ -6,7 +6,7 @@ import sys
 from typing import Optional
 
 from src.core.application.bot import (
-    WeChatBot,
+    MessageBot,
     delete_credentials,
     display_qr_code,
     load_credentials,
@@ -21,15 +21,32 @@ from src.core.infrastructure.logging import (
 )
 from src.core.integrations.embeddings import EmbeddingClient
 from src.core.integrations.ilink import ILinkClient, ILinkError, SessionExpired
+from src.core.messaging import (
+    AuthenticationExpired,
+    ChannelAddressStore,
+    ChannelManager,
+    MessageInboxStore,
+    MessageRouter,
+)
+from src.core.messaging.adapters import WeChatILinkAdapter
 from src.core.modeling import ModelError, ModelRouter
 from src.core.modeling.factory import create_model_client
-from src.core.paths import CONFIG_DIR, DATA_DIR, PROJECT_ROOT
+from src.core.paths import (
+    CONFIG_DIR,
+    DATA_DIR,
+    PROJECT_ROOT,
+    channel_credentials_path,
+)
 from src.core.plugins import PluginContext, build_plugins
 from src.core.services.agent import AgentService
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService, ModelMemoryExtractor
-from src.core.services.notification import NotificationService, TenantRecipientStore
+from src.core.services.notification import (
+    NotificationDispatcher,
+    NotificationService,
+    TenantRecipientStore,
+)
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
 from src.core.storage.tenants import (
@@ -57,10 +74,7 @@ def run_bot(args, project_config=None) -> int:
         print("租户数据加载失败：{}".format(exc), file=sys.stderr)
         return 1
     recipient_store = TenantRecipientStore(tenant_registry)
-    notification_service = NotificationService(
-        credentials_loader=load_credentials,
-        recipient_store=recipient_store,
-    )
+    address_store = ChannelAddressStore(tenant_registry)
     conversation_store = ConversationStore(
         tenant_registry, project_config.app.history_rounds * 2
     )
@@ -131,33 +145,75 @@ def run_bot(args, project_config=None) -> int:
             )
         )
         while True:
-            try:
-                credentials = load_credentials()
-            except ILinkError as exc:
-                print(str(exc), file=sys.stderr)
-                print("将删除无效凭证并重新扫码。")
-                delete_credentials()
-                credentials = None
-
-            ilink = ILinkClient(credentials=credentials)
+            adapters = []
+            ilink_clients = []
             scheduler: Optional[SchedulerService] = None
             script_service: Optional[ScriptService] = None
             tool_runtime: Optional[ToolRuntime] = None
+            notification_dispatcher: Optional[NotificationDispatcher] = None
+            channel_manager: Optional[ChannelManager] = None
             try:
-                if credentials is None:
-                    credentials = ilink.login(display_qr_code, status_changed=print_login_status)
-                    save_credentials(credentials)
-                    print("微信凭证已保存到 {}。".format(CREDENTIALS_PATH))
-                else:
-                    print("已加载保存的微信凭证，bot_id={}。".format(credentials.bot_id))
+                for channel_config in project_config.channels.values():
+                    if not channel_config.enabled:
+                        continue
+                    credential_path = channel_credentials_path(channel_config.id)
+                    try:
+                        credentials = load_credentials(credential_path)
+                    except ILinkError as exc:
+                        print(str(exc), file=sys.stderr)
+                        print(
+                            "将清除渠道 {} 的无效凭证并重新登录。".format(
+                                channel_config.id
+                            )
+                        )
+                        delete_credentials(credential_path)
+                        credentials = None
+                    ilink = ILinkClient(credentials=credentials)
+                    ilink_clients.append(ilink)
+                    if credentials is None:
+                        print("正在登录消息渠道 {}。".format(channel_config.id))
+                        credentials = ilink.login(
+                            display_qr_code,
+                            status_changed=print_login_status,
+                        )
+                        save_credentials(credentials, credential_path)
+                        print(
+                            "渠道 {} 的凭证已保存到 {}。".format(
+                                channel_config.id,
+                                credential_path,
+                            )
+                        )
+                    else:
+                        print(
+                            "已加载渠道 {} 的凭证，bot_id={}。".format(
+                                channel_config.id,
+                                credentials.bot_id,
+                            )
+                        )
+                    adapters.append(
+                        WeChatILinkAdapter(
+                            ilink,
+                            channel_id=channel_config.id,
+                        )
+                    )
 
+                message_router = MessageRouter(adapters)
+                notification_service = NotificationService(
+                    credentials_loader=None,
+                    recipient_store=recipient_store,
+                    message_router=message_router,
+                    address_store=address_store,
+                )
+                notification_dispatcher = NotificationDispatcher(notification_service)
+                notification_dispatcher.start()
                 script_service = ScriptService(
                     project_config.scripts,
-                    credentials,
+                    None,
                     recipient_store,
                     PROJECT_ROOT,
                     tenant_registry,
                     integration_store,
+                    notification_service=notification_service,
                     keychain_service=integration_service.keychain,
                 )
                 platform_plugins = build_plugins(
@@ -166,6 +222,7 @@ def run_bot(args, project_config=None) -> int:
                         project_root=PROJECT_ROOT,
                         tenant_registry=tenant_registry,
                         notification_service=notification_service,
+                        timezone=project_config.app.timezone,
                     ),
                 ) if project_config.tools.enabled else []
                 codex_tasks_plugin = next(
@@ -205,7 +262,7 @@ def run_bot(args, project_config=None) -> int:
                     memory_service=memory_service,
                 )
                 scheduler = SchedulerService(
-                    credentials=credentials,
+                    credentials=None,
                     tasks=project_config.schedules,
                     timezone_name=project_config.app.timezone,
                     agent_service=agent_service,
@@ -215,6 +272,7 @@ def run_bot(args, project_config=None) -> int:
                     schedule_store=schedule_store,
                     plugins=platform_plugins,
                     memory_service=memory_service,
+                    notification_service=notification_service,
                 )
                 scheduler.start()
                 print(
@@ -224,8 +282,8 @@ def run_bot(args, project_config=None) -> int:
                         project_config.app.timezone,
                     )
                 )
-                WeChatBot(
-                    ilink,
+                message_bot = MessageBot(
+                    None,
                     agent_service,
                     tenant_registry=tenant_registry,
                     recipient_store=recipient_store,
@@ -239,19 +297,44 @@ def run_bot(args, project_config=None) -> int:
                     memory_service=memory_service,
                     codex_tasks_plugin=codex_tasks_plugin,
                     integration_service=integration_service,
-                ).run()
-            except SessionExpired:
-                print("微信登录已失效，将重新扫码。", file=sys.stderr)
-                delete_credentials()
+                    notification_dispatcher=notification_dispatcher,
+                    message_router=message_router,
+                    address_store=address_store,
+                )
+                channel_manager = ChannelManager(
+                    adapters,
+                    MessageInboxStore(tenant_registry),
+                    message_bot.handle_inbound,
+                )
+                print(
+                    "消息服务已启动：渠道={}，正在等待私聊消息。按 Ctrl+C 退出。".format(
+                        "、".join(adapter.channel_id for adapter in adapters)
+                    )
+                )
+                channel_manager.run()
+            except (SessionExpired, AuthenticationExpired):
+                print("消息渠道登录已失效，将重新登录。", file=sys.stderr)
+                if channel_manager is not None:
+                    for status in channel_manager.statuses():
+                        if status.state == "authentication_required":
+                            delete_credentials(
+                                channel_credentials_path(status.channel_id)
+                            )
                 continue
             finally:
+                if channel_manager:
+                    channel_manager.shutdown()
                 if scheduler:
                     scheduler.shutdown()
                 if script_service:
                     script_service.shutdown()
                 if tool_runtime:
                     tool_runtime.close()
-                ilink.close()
+                if notification_dispatcher:
+                    notification_dispatcher.shutdown()
+                if channel_manager is None:
+                    for client in ilink_clients:
+                        client.close()
     except KeyboardInterrupt:
         print("\n机器人已停止。")
         return 0

@@ -469,12 +469,18 @@ class ILinkClient:
             except ILinkError as exc:
                 report(exc)
 
-    def send_text(self, to_user_id: str, context_token: str, text: str) -> None:
+    def send_text(
+        self,
+        to_user_id: str,
+        context_token: str,
+        text: str,
+        client_id: Optional[str] = None,
+    ) -> None:
         payload = {
             "msg": {
                 "from_user_id": "",
                 "to_user_id": to_user_id,
-                "client_id": str(uuid.uuid4()),
+                "client_id": client_id or str(uuid.uuid4()),
                 "message_type": BOT_MESSAGE_TYPE,
                 "message_state": FINISH_MESSAGE_STATE,
                 "item_list": [
@@ -491,6 +497,7 @@ class ILinkClient:
         context_token: str,
         image_bytes: bytes,
         caption: str = "",
+        client_id: Optional[str] = None,
     ) -> None:
         if not image_bytes:
             raise ILinkError("待发送图片为空")
@@ -544,14 +551,23 @@ class ILinkClient:
         normalized_caption = caption if isinstance(caption, str) else ""
         caption_sent = False
         if normalized_caption.strip():
-            self.send_text(to_user_id, context_token, normalized_caption)
+            self.send_text(
+                to_user_id,
+                context_token,
+                normalized_caption,
+                client_id=(
+                    "{}:caption".format(client_id)
+                    if client_id
+                    else None
+                ),
+            )
             caption_sent = True
 
         payload = {
             "msg": {
                 "from_user_id": "",
                 "to_user_id": to_user_id,
-                "client_id": str(uuid.uuid4()),
+                "client_id": client_id or str(uuid.uuid4()),
                 "message_type": BOT_MESSAGE_TYPE,
                 "message_state": FINISH_MESSAGE_STATE,
                 "item_list": [

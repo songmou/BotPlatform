@@ -11,6 +11,7 @@ from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import src.core.application.cli as main_module
@@ -24,6 +25,7 @@ from src.core.application import (
     WeChatBot,
     load_credentials,
     parse_args,
+    run_channel_command,
     run_notify_command,
     run_codex_hook_command,
     save_credentials,
@@ -99,15 +101,24 @@ class FakeOllama:
 
 
 class FakeNotificationService:
-    def __init__(self) -> None:
+    def __init__(self, status="sent") -> None:
         self.messages = []
         self.images = []
+        self.status = status
 
     def send_text_to_tenant(self, tenant_id, message):
         self.messages.append((tenant_id, message))
 
     def send_image_to_tenant(self, tenant_id, source, caption=""):
         self.images.append((tenant_id, source, caption))
+
+    def enqueue_text_to_tenant(self, tenant_id, message, **_kwargs):
+        self.messages.append((tenant_id, message))
+        return SimpleNamespace(status=self.status)
+
+    def enqueue_image_to_tenant(self, tenant_id, source, caption="", **_kwargs):
+        self.images.append((tenant_id, source, caption))
+        return SimpleNamespace(status=self.status)
 
 
 class ManualTimer:
@@ -435,6 +446,16 @@ class MainBotTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(service.messages[-1], ("tenant-a", "  第一行\n第二行\n"))
 
+        queued = FakeNotificationService(status="queued")
+        queued_output = StringIO()
+        result = run_notify_command(
+            Namespace(message="离线通知", stdin=False, user="tenant-a"),
+            output_stream=queued_output,
+            service=queued,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("已保存，等待补发", queued_output.getvalue())
+
     def test_notify_cli_rejects_empty_input_and_invalid_argument_combinations(self) -> None:
         service = FakeNotificationService()
         stderr = StringIO()
@@ -467,6 +488,17 @@ class MainBotTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(both_images.exception.code, 2)
+
+    def test_channel_cli_lists_and_reports_configured_channel(self) -> None:
+        args = parse_args(["channel", "status"])
+        self.assertEqual(args.action, "status")
+        output = StringIO()
+        result = run_channel_command(
+            Namespace(action="list", channel_id=None),
+            output_stream=output,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("wechat-main\twechat_ilink\t启用", output.getvalue())
 
     def test_notify_cli_supports_local_or_remote_image_with_optional_caption(self) -> None:
         service = FakeNotificationService()

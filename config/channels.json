@@ -1,0 +1,10 @@
+{
+  "channels": [
+    {
+      "id": "wechat-main",
+      "type": "wechat_ilink",
+      "enabled": true,
+      "settings": {}
+    }
+  ]
+}

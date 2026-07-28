@@ -9,6 +9,8 @@ from pathlib import Path
 
 from src.core.services.agent import AgentService
 from src.core.config.loader import load_project_config
+from src.core.plugins.base import PluginContext
+from src.core.plugins.todo import TodoPlugin
 from src.core.modeling import (
     CanonicalMessage,
     CanonicalToolCall,
@@ -120,6 +122,34 @@ class ToolAgentLoopTests(unittest.TestCase):
         )
         return service, ollama
 
+    def todo_service(self, responses):
+        registry = TenantRegistry(Path(self.temp.name) / "todo-data")
+        tenant = registry.resolve("bot", "todo-user")
+        todo = TodoPlugin(
+            {},
+            context=PluginContext(
+                self.root,
+                registry,
+                timezone="Asia/Shanghai",
+            ),
+        )
+        runtime = ToolRuntime(
+            self.runtime.base_config,
+            "Asia/Shanghai",
+            trash_directory=Path(self.temp.name) / "trash",
+            sandbox_available=True,
+            tenant_registry=registry,
+            plugins=[todo],
+        )
+        ollama = FakeToolOllama(responses)
+        service = AgentService(
+            ollama,
+            self.config.app,
+            self.config.agents,
+            tool_runtime=runtime,
+        )
+        return service, ollama, tenant, todo
+
     def test_safe_tool_result_is_returned_to_model(self) -> None:
         (self.root / "actual.txt").write_text("真实文件", encoding="utf-8")
         service, ollama = self.service(
@@ -136,6 +166,111 @@ class ToolAgentLoopTests(unittest.TestCase):
         self.assertIn("actual.txt", second_messages[-1].content)
         self.assertEqual(second_messages[-1].tool_call_id, "call-1")
         self.assertEqual(len(service.histories["user"]), 2)
+
+    def test_plain_todo_query_bypasses_model_and_ignores_stale_history(self) -> None:
+        service, ollama, tenant, todo = self.todo_service(
+            [CanonicalMessage("assistant", "旧的四项未完成")]
+        )
+        todo.execute(
+            "todo_manage",
+            {"action": "add", "title": "数据库中的唯一待办"},
+            tenant,
+        )
+        service.histories[tenant.tenant_id] = [
+            CanonicalMessage("user", "待办？"),
+            CanonicalMessage("assistant", "T0004、T0005、T0006 都未完成"),
+        ]
+
+        outcome = service.chat(tenant, "待办？")
+
+        self.assertEqual(ollama.calls, [])
+        self.assertIn("数据库中的唯一待办", outcome.text)
+        self.assertNotIn("T0004", outcome.text)
+        self.assertIn("查询时间：", outcome.text)
+
+    def test_plain_todo_queries_route_scopes_without_model(self) -> None:
+        service, ollama, tenant, todo = self.todo_service([])
+        todo.execute(
+            "todo_manage", {"action": "add", "title": "已完成事项"}, tenant
+        )
+        todo.execute(
+            "todo_manage",
+            {"action": "complete", "todo_id": "T0001"},
+            tenant,
+        )
+
+        completed = service.chat(tenant, "已完成的待办？")
+
+        self.assertEqual(ollama.calls, [])
+        self.assertIn("近期已完成", completed.text)
+        self.assertIn("已完成事项", completed.text)
+
+    def test_todo_tool_result_is_returned_without_model_rewrite(self) -> None:
+        service, ollama, tenant, _todo = self.todo_service(
+            [
+                tool_call(
+                    "todo_manage",
+                    {"action": "add", "title": "不要让模型改写"},
+                ),
+                CanonicalMessage("assistant", "错误的二次改写"),
+            ]
+        )
+
+        outcome = service.chat(tenant, "新增待办：不要让模型改写")
+
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertIn("已新增待办", outcome.text)
+        self.assertIn("不要让模型改写", outcome.text)
+        self.assertNotIn("错误的二次改写", outcome.text)
+
+    def test_multiple_direct_todo_results_are_joined_in_call_order(self) -> None:
+        calls = CanonicalMessage(
+            "assistant",
+            tool_calls=[
+                CanonicalToolCall(
+                    "call-1", "todo_manage", {"action": "add", "title": "第一项"}
+                ),
+                CanonicalToolCall(
+                    "call-2", "todo_manage", {"action": "add", "title": "第二项"}
+                ),
+            ],
+        )
+        service, ollama, tenant, _todo = self.todo_service([calls])
+
+        outcome = service.chat(tenant, "新增第一项和第二项待办")
+
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertLess(outcome.text.index("第一项"), outcome.text.index("第二项"))
+        self.assertIn("\n\n", outcome.text)
+
+    def test_mixed_tool_batch_still_uses_model_for_final_answer(self) -> None:
+        calls = CanonicalMessage(
+            "assistant",
+            tool_calls=[
+                CanonicalToolCall(
+                    "call-1", "todo_manage", {"action": "list", "scope": "pending"}
+                ),
+                CanonicalToolCall("call-2", "get_current_time", {}),
+            ],
+        )
+        service, ollama, tenant, _todo = self.todo_service(
+            [calls, CanonicalMessage("assistant", "组合后的最终回答")]
+        )
+
+        outcome = service.chat(tenant, "查看待办并告诉我现在几点")
+
+        self.assertEqual(len(ollama.calls), 2)
+        self.assertEqual(outcome.text, "组合后的最终回答")
+
+    def test_compound_todo_discussion_is_not_directly_routed(self) -> None:
+        service, ollama, tenant, _todo = self.todo_service(
+            [CanonicalMessage("assistant", "这是概念说明")]
+        )
+
+        outcome = service.chat(tenant, "待办和 Codex 开发任务有什么区别？")
+
+        self.assertEqual(len(ollama.calls), 1)
+        self.assertEqual(outcome.text, "这是概念说明")
 
     def test_todo_script_runs_and_returns_result_without_approval(self) -> None:
         scripts = AutoScriptService()

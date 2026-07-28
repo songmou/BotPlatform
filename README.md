@@ -1,6 +1,6 @@
-# BotPlatform：微信 iLink 多模型机器人
+# BotPlatform：可扩展消息渠道的多模型机器人
 
-BotPlatform 是一个运行在自己电脑上的微信 AI 机器人。它通过微信 iLink 接收私聊消息，默认调用 DeepSeek V4 Flash，并提供多租户会话、可审批的本机工具、知识库、长期记忆、待办、定时任务以及可选插件。
+BotPlatform 是一个运行在自己电脑上的多渠道 AI 机器人。当前内置微信 iLink 适配器，统一消息层已经把平台协议与会话、模型、工具、通知和租户数据解耦，可继续接入飞书、钉钉、企业微信和 QQ。默认调用 DeepSeek V4 Flash，并提供多租户会话、可审批的本机工具、知识库、长期记忆、待办、定时任务以及可选插件。
 
 当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化、Codex 开发任务和个人后台任务。向量检索保持关闭，不需要安装 `bge-m3`。
 
@@ -84,6 +84,17 @@ Windows：
 ```
 
 首次启动会显示微信二维码。扫码并在手机确认后，登录凭据保存在 `data/system/credentials.json`；后续启动会直接复用。现在向机器人发送一条私聊文字即可开始使用。
+
+消息渠道配置位于 [`config/channels.json`](config/channels.json)。每个启用渠道拥有独立接收线程，消息会先进入持久化 inbox，再由核心串行处理；当前首期只响应私聊。可使用以下命令管理渠道：
+
+```bash
+./start.sh channel list
+./start.sh channel status
+./start.sh channel login wechat-main
+./start.sh channel logout wechat-main
+```
+
+`notify --user <租户编号>` 默认发送到用户最后活跃的绑定渠道，也可以通过 `--channel <渠道编号>` 指定渠道。
 
 ## 默认模型与切换
 
@@ -215,7 +226,7 @@ ollama pull bge-m3
 3. 将得到的租户编号加入 `admin_tenant_ids`；
 4. 按需配置允许的项目路径并重启。
 
-管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。BotPlatform 创建的任务会在排队、开始运行、等待交互和终态发送去重通知。外部 Codex 生命周期由用户级 `~/.codex/hooks.json` 采集；本机安装模板为 [`config/codex-hooks.json`](config/codex-hooks.json)，安装或修改后需在 Codex 中运行 `/hooks` 并确认信任。外部任务的审批与回答仍须回原 Codex 界面处理，微信只发送提醒。
+管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。默认仅当 BotPlatform 创建的任务需要用户输入时发送微信通知，用于在方案生成后选择方向；排队、执行、终态和权限审批均不推送。外部 Codex 生命周期由用户级 `~/.codex/hooks.json` 采集；本机安装模板为 [`config/codex-hooks.json`](config/codex-hooks.json)，安装或修改后需在 Codex 中运行 `/hooks` 并确认信任。外部任务的等待输入和审批没有可回传的实时通道，因此不会推送到微信；仍须回原 Codex 界面处理。
 
 `codex_tasks.external_project_scope` 设为 `all` 时会监控所有本机项目，但 `projects` 仍是微信可创建或继续任务的独立执行白名单。外部任务在同一 turn 内每个生命周期阶段只通知一次，连续审批会合并，完成事件仍保留。iLink 上下文失效后，通知会持久停在 `waiting_recipient`；用户再次私聊机器人刷新上下文后，积压通知会按原顺序自动重投。
 
@@ -225,7 +236,7 @@ ollama pull bge-m3
 
 后台任务实现位于 [`src/core/jobs/`](src/core/jobs/)，注册信息位于 [`config/scripts.json`](config/scripts.json)：`autogen_monitor` 负责带参考图的连载文生图，`ctsehr_check` 负责 OA 考勤与待审批。AutoGen 使用与主进程相同的默认语言模型生成中文故事提示词，并固定用上一场的第 1 张候选图续写下一场；目标网站未提供参考图上传控件时会停止，不会降级为随机文生图。传入 `reset_story=true` 可在本次成功后开始新的随机故事。它们由脚本服务以独立子进程运行；待办则由 `src/core/plugins/todo.py` 插件提供，不属于后台任务注册表。业务账号与密码通过 `/integration` 配置，密码只保存在权限为 `0600` 的受限凭据文件中，不进入日志、聊天历史或模型上下文。
 
-机器人停机期间不会补跑普通任务。主动通知还依赖用户最近一次私聊留下的微信上下文；失效时请再次私聊机器人。
+机器人停机期间不会补跑尚未触发的普通任务；已经生成的主动通知会先持久化到 SQLite Outbox，并在机器人恢复后按用户、按原顺序补发。网络、凭证或微信服务临时异常会持续退避重试；微信上下文失效时通知会等待用户再次私聊刷新上下文。图片会在入队时复制到租户私有缓存，送达后自动删除。投递语义为至少一次：若微信已经接收、进程却在记录成功前异常退出，极端情况下可能重复一条。
 
 ## CLI 主动通知
 
@@ -236,7 +247,7 @@ ollama pull bge-m3
 ./start.sh notify --user <租户编号> --image ./report.png
 ```
 
-也可通过 `--stdin` 输入多行文本，或用 `--image-url` 发送远程图片。`notify` 不占用主机器人单实例锁。
+也可通过 `--stdin` 输入多行文本，或用 `--image-url` 发送远程图片。`notify` 不占用主机器人单实例锁；能够即时投递时显示“已发送”，暂时无法投递但已经安全落盘时显示“已保存，等待补发”并返回成功。
 
 ## 数据、安全与多租户
 

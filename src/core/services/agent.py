@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Union
+from zoneinfo import ZoneInfo
 
 from src.core.config.loader import AgentPreset, AppConfig
 from src.core.modeling import (
@@ -113,6 +115,34 @@ class AgentService:
             self.tool_runtime and preset.tools and model.capabilities.tools
         )
 
+    def _current_time_context(self) -> str:
+        """Build an authoritative, per-request local time snapshot for the model."""
+        timezone_name = self.app_config.timezone
+        now = datetime.now(ZoneInfo(timezone_name))
+        weekdays = (
+            "星期一",
+            "星期二",
+            "星期三",
+            "星期四",
+            "星期五",
+            "星期六",
+            "星期日",
+        )
+        return (
+            "本轮请求时间（由应用提供，作为权威时间基准）：{iso}；"
+            "时区：{timezone_name}；本地日期：{date}；本地时间：{time}；{weekday}。"
+            "凡涉及“现在”“今天”“明天”“是否到时间”等相对时间，必须以此为准，"
+            "不得根据训练数据、对话历史或自行推测时间。"
+            "如果本轮经过较长时间的工具执行且需要更高实时精度，可调用 "
+            "get_current_time 工具重新获取。"
+        ).format(
+            iso=now.isoformat(timespec="seconds"),
+            timezone_name=timezone_name,
+            date=now.date().isoformat(),
+            time=now.strftime("%H:%M:%S"),
+            weekday=weekdays[now.weekday()],
+        )
+
     def _messages_for(
         self,
         preset: AgentPreset,
@@ -122,7 +152,10 @@ class AgentService:
         include_tool_context: bool = True,
         subject_key: Optional[str] = None,
     ) -> List[CanonicalMessage]:
-        messages = [CanonicalMessage("system", preset.system_prompt)]
+        messages = [
+            CanonicalMessage("system", preset.system_prompt),
+            CanonicalMessage("system", self._current_time_context()),
+        ]
         soul_ids: List[str] = []
         if subject_key and self.memory_service is not None:
             try:
@@ -197,6 +230,79 @@ class AgentService:
         messages.extend(history)
         messages.append(CanonicalMessage("user", question))
         return messages
+
+    @staticmethod
+    def _direct_todo_scope(question: str) -> Optional[str]:
+        normalized = re.sub(r"[\s，。！？?!：:]+", "", question).lower()
+        normalized = re.sub(r"[呢吗吧]+$", "", normalized)
+        scopes = {
+            "pending": {
+                "待办",
+                "待办事项",
+                "待办列表",
+                "待办清单",
+                "我的待办",
+                "我的待办列表",
+                "当前待办",
+                "当前待办列表",
+                "查看待办",
+                "查看我的待办",
+                "列出待办",
+                "显示待办",
+                "未完成待办",
+                "未完成的待办",
+            },
+            "completed": {
+                "已完成待办",
+                "已完成的待办",
+                "查看已完成待办",
+            },
+            "archived": {
+                "已归档待办",
+                "已归档的待办",
+                "查看已归档待办",
+            },
+            "all": {
+                "全部待办",
+                "所有待办",
+                "全部待办列表",
+                "查看全部待办",
+            },
+        }
+        for scope, phrases in scopes.items():
+            if normalized in phrases:
+                return scope
+        return None
+
+    def _try_direct_todo_query(
+        self,
+        user_id: Union[str, TenantContext],
+        history: List[CanonicalMessage],
+        question: str,
+        preset: AgentPreset,
+        model: ModelSession,
+        has_image: bool,
+    ) -> Optional[FinalAnswer]:
+        if has_image or self.tool_runtime is None or "todo_manage" not in preset.tools:
+            return None
+        scope = self._direct_todo_scope(question)
+        if scope is None or not self.tool_runtime.is_available("todo_manage"):
+            return None
+        audit_context = ToolAuditContext(
+            user_id=self._subject_key(user_id),
+            provider=model.identity.provider,
+            profile_id=model.identity.profile_id,
+            model=model.identity.configured_model,
+        )
+        result = self.tool_runtime.execute(
+            "todo_manage",
+            {"action": "list", "scope": scope},
+            audit_context,
+        )
+        answer = self.tool_runtime.direct_response_text("todo_manage", result)
+        if answer is None:
+            answer = "查询待办失败：{}".format(result.error or "工具没有返回有效结果")
+        return self._finish(user_id, history, question, answer)
 
     def _finish(
         self,
@@ -338,6 +444,16 @@ class AgentService:
             self._validate_image(image_bytes, model)
             history = self._history_for(user_id)
             preset = self.active_agent
+            direct_todo = self._try_direct_todo_query(
+                user_id,
+                history,
+                question,
+                preset,
+                model,
+                has_image=bool(image_bytes),
+            )
+            if direct_todo is not None:
+                return direct_todo
             messages = self._messages_for(
                 preset, history, question, model, subject_key=key
             )
@@ -528,6 +644,18 @@ class AgentService:
                 )
                 self._pending[user_id] = pending
                 return self._approval_outcome(pending)
+            direct_answers = [
+                self.tool_runtime.direct_response_text(call.name, call.result)
+                for call in calls
+            ]
+            if direct_answers and all(answer is not None for answer in direct_answers):
+                return self._finish(
+                    user_id,
+                    history,
+                    question,
+                    "\n\n".join(str(answer) for answer in direct_answers),
+                    thinking_parts,
+                )
             messages.extend(self._tool_message(call) for call in calls)
 
         answer = "本次任务达到工具调用轮次上限，请缩小问题范围后重试。"

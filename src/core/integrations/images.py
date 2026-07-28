@@ -1,4 +1,4 @@
-"""Load and validate image bytes for outbound WeChat notifications."""
+"""Load and validate image bytes for outbound channel notifications."""
 
 from __future__ import annotations
 

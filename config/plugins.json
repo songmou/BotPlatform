@@ -32,20 +32,14 @@
         ],
         "default_project": "botplatform",
         "max_concurrent_tasks": 2,
-        "notify_on_completion": true,
+        "notify_on_completion": false,
         "monitor_external_tasks": true,
         "monitor_tenant_id": "f4f767c5-17f8-493e-b9a8-55c912dbe8e5",
         "external_project_scope": "all",
         "external_poll_interval_seconds": 5,
         "interaction_ttl_seconds": 300,
         "notify_events": [
-          "queued",
-          "running",
-          "waiting_approval",
-          "waiting_input",
-          "completed",
-          "failed",
-          "interrupted"
+          "waiting_input"
         ]
       }
     }

@@ -1,4 +1,4 @@
-"""WeChat message handling and credential presentation helpers."""
+"""Channel-neutral message handling and legacy WeChat presentation helpers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -21,6 +22,17 @@ from src.core.integrations.ilink import (
     is_private_user_message,
 )
 from src.core.integrations.images import ImageSource
+from src.core.messaging import (
+    DIRECT,
+    AttachmentRef,
+    ChannelAddressStore,
+    ChannelCapabilities,
+    DeliveryEndpoint,
+    InboundMessage,
+    MessageRouter,
+    MessagingError,
+    OutboundMessage,
+)
 from src.core.modeling import ModelError
 from src.core.paths import CREDENTIALS_PATH
 from src.core.services.agent import AgentService
@@ -29,7 +41,7 @@ from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService
 from src.core.plugins import PluginError
 from src.core.services.script import ScriptService
-from src.core.services.notification import TenantRecipientStore
+from src.core.services.notification import NotificationDispatcher, TenantRecipientStore
 from src.core.tooling import ApprovalRequired, ToolError
 from src.core.storage.tenants import (
     ConversationStore,
@@ -110,10 +122,62 @@ def print_login_status(status: str) -> None:
         print(labels[status])
 
 
-class WeChatBot:
+class _LegacyILinkAdapter:
+    """Compatibility wrapper for callers that still pass an ILink-like client."""
+
+    channel_id = "wechat-main"
+    platform = "wechat_ilink"
+    capabilities = ChannelCapabilities(
+        receive_text=True,
+        receive_image=True,
+        send_text=True,
+        send_image=True,
+        typing=True,
+        proactive=True,
+    )
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    @property
+    def account_id(self) -> str:
+        credentials = getattr(self.client, "credentials", None)
+        return str(getattr(credentials, "bot_id", "") or "legacy-bot")
+
+    def send(self, endpoint: DeliveryEndpoint, message: OutboundMessage) -> None:
+        token = str(endpoint.route_context.get("context_token") or "")
+        if message.image_bytes is not None and hasattr(self.client, "send_image"):
+            self.client.send_image(
+                endpoint.recipient_id,
+                token,
+                message.image_bytes,
+                caption=message.text,
+            )
+        else:
+            self.client.send_text(endpoint.recipient_id, token, message.text)
+
+    @contextmanager
+    def typing(self, endpoint: DeliveryEndpoint):
+        token = str(endpoint.route_context.get("context_token") or "")
+        with self.client.typing(endpoint.recipient_id, token, on_error=None):
+            yield
+
+    def load_attachment(self, attachment: AttachmentRef) -> bytes:
+        return self.client.download_image(dict(attachment.adapter_ref))
+
+    def start(self, _emit, _stop_event) -> None:
+        raise RuntimeError("兼容适配器不负责接收循环")
+
+    def close(self) -> None:
+        closer = getattr(self.client, "close", None)
+        if callable(closer):
+            closer()
+
+
+class MessageBot:
     def __init__(
         self,
-        ilink: ILinkClient,
+        ilink: Optional[ILinkClient],
         agent_service: AgentService,
         interaction_logger: Callable[[str, str, str], None] = log_interaction,
         recipient_recorder: Optional[Callable[[str, str], None]] = None,
@@ -128,8 +192,17 @@ class WeChatBot:
         memory_service: Optional[MemoryService] = None,
         codex_tasks_plugin: Optional[Any] = None,
         integration_service: Optional[IntegrationService] = None,
+        notification_dispatcher: Optional[NotificationDispatcher] = None,
+        message_router: Optional[MessageRouter] = None,
+        address_store: Optional[ChannelAddressStore] = None,
     ) -> None:
         self.ilink = ilink
+        self._legacy_mode = message_router is None
+        self._legacy_adapter = _LegacyILinkAdapter(ilink) if ilink is not None else None
+        self.message_router = message_router or MessageRouter(
+            [self._legacy_adapter] if self._legacy_adapter is not None else []
+        )
+        self.address_store = address_store
         self.agent_service = agent_service
         self._log = interaction_logger
         self._record_recipient = recipient_recorder
@@ -144,6 +217,7 @@ class WeChatBot:
         self.memory_service = memory_service
         self.codex_tasks_plugin = codex_tasks_plugin
         self.integration_service = integration_service
+        self.notification_dispatcher = notification_dispatcher
         self._approval_timer_lock = threading.Lock()
         self._approval_timers: Dict[str, Tuple[str, Any]] = {}
         self._deletion_pending: Dict[str, Tuple[str, datetime]] = {}
@@ -153,13 +227,12 @@ class WeChatBot:
     def _subject_key(subject: Any) -> str:
         return subject.tenant_id if isinstance(subject, TenantContext) else str(subject)
 
-    def _resolve_tenant(self, user_id: str) -> Optional[TenantContext]:
+    def _resolve_tenant(self, message: InboundMessage) -> Optional[TenantContext]:
         if self.tenant_registry is None:
             return None
-        credentials = self.ilink.credentials
-        if credentials is None:
-            raise ILinkError("微信登录凭证不可用")
-        return self.tenant_registry.resolve(credentials.bot_id, user_id)
+        if self.address_store is not None:
+            return self.address_store.resolve(message)
+        return self.tenant_registry.resolve(message.account_id, message.sender_id)
 
     def _append_transcript(
         self,
@@ -175,13 +248,12 @@ class WeChatBot:
 
     def _reply(
         self,
-        user_id: str,
-        context_token: str,
+        endpoint: DeliveryEndpoint,
         text: str,
         tenant: Optional[TenantContext] = None,
         record: bool = True,
     ) -> None:
-        self.ilink.send_text(user_id, context_token, text)
+        self.message_router.send(endpoint, OutboundMessage(text=text))
         if record:
             self._append_transcript(tenant, "assistant", text)
 
@@ -193,8 +265,13 @@ class WeChatBot:
         return "思考过程：\n{}\n\n回答：\n{}".format(thinking, outcome.text)
 
     @staticmethod
-    def _typing_error(exc: ILinkError) -> None:
-        print("微信正在输入状态更新失败：{}".format(exc), file=sys.stderr)
+    def _typing_error(exc: Exception) -> None:
+        print("消息渠道输入状态更新失败：{}".format(exc), file=sys.stderr)
+
+    def _direction(self, action: str, endpoint: DeliveryEndpoint) -> str:
+        if self._legacy_mode and endpoint.platform == "wechat_ilink":
+            return "微信{}".format(action)
+        return "消息{}[{}]".format(action, endpoint.channel_id)
 
     def _cancel_approval_timer(self, user_id: Any) -> None:
         key = self._subject_key(user_id)
@@ -206,8 +283,7 @@ class WeChatBot:
     def _schedule_approval_timeout(
         self,
         subject: Any,
-        user_id: str,
-        context_token: str,
+        endpoint: DeliveryEndpoint,
         outcome: ApprovalRequired,
     ) -> None:
         approval_id = outcome.approval_id
@@ -222,7 +298,7 @@ class WeChatBot:
                 now = datetime.now(timezone.utc)
                 if now < outcome.expires_at:
                     self._schedule_approval_timeout(
-                        subject, user_id, context_token, outcome
+                        subject, endpoint, outcome
                     )
                     return
                 if not self.agent_service.expire_approval(
@@ -230,16 +306,33 @@ class WeChatBot:
                 ):
                     return
                 try:
-                    self.ilink.send_text(
-                        user_id, context_token, APPROVAL_TIMEOUT_TEXT
-                    )
-                except ILinkError as exc:
+                    if (
+                        isinstance(subject, TenantContext)
+                        and self.notification_dispatcher is not None
+                    ):
+                        self.notification_dispatcher.service.enqueue_text_to_tenant(
+                            subject.tenant_id,
+                            APPROVAL_TIMEOUT_TEXT,
+                            source_type="approval_timeout",
+                            source_key=approval_id,
+                        )
+                        self.notification_dispatcher.wake()
+                    else:
+                        self.message_router.send(
+                            endpoint,
+                            OutboundMessage(text=APPROVAL_TIMEOUT_TEXT),
+                        )
+                except Exception as exc:
                     print(
                         "发送确认超时通知失败：{}".format(exc),
                         file=sys.stderr,
                     )
                     return
-                self._log("微信输出", user_id, APPROVAL_TIMEOUT_TEXT)
+                self._log(
+                    self._direction("输出", endpoint),
+                    endpoint.recipient_id,
+                    APPROVAL_TIMEOUT_TEXT,
+                )
             finally:
                 with self._approval_timer_lock:
                     tracked = self._approval_timers.get(key)
@@ -261,36 +354,93 @@ class WeChatBot:
         timer.start()
 
     def _track_approval_outcome(
-        self, subject: Any, user_id: str, context_token: str, outcome: Any
+        self,
+        subject: Any,
+        endpoint: DeliveryEndpoint,
+        outcome: Any,
     ) -> None:
         if isinstance(outcome, ApprovalRequired):
-            self._schedule_approval_timeout(subject, user_id, context_token, outcome)
+            self._schedule_approval_timeout(subject, endpoint, outcome)
         else:
             self._cancel_approval_timer(subject)
 
     def _send_outcome(
         self,
         subject: Any,
-        user_id: str,
-        context_token: str,
+        endpoint: DeliveryEndpoint,
         outcome: Any,
         tenant: Optional[TenantContext] = None,
     ) -> None:
-        self._track_approval_outcome(subject, user_id, context_token, outcome)
+        self._track_approval_outcome(subject, endpoint, outcome)
         reply = self._outcome_text(outcome)
-        self._reply(user_id, context_token, reply, tenant)
-        self._log("微信输出", user_id, reply)
+        self._reply(endpoint, reply, tenant)
+        self._log(
+            self._direction("输出", endpoint),
+            endpoint.recipient_id,
+            reply,
+        )
 
     def handle_message(self, message: Dict[str, Any]) -> None:
+        """One-release compatibility entry point for raw iLink dictionaries."""
         if not is_private_user_message(message):
             return
+        text, image_item = extract_text_and_image(message)
+        inbound = InboundMessage(
+            event_id=str(
+                message.get("message_id")
+                or message.get("msg_id")
+                or message.get("client_id")
+                or "legacy-{}".format(id(message))
+            ),
+            channel_id="wechat-main",
+            platform="wechat_ilink",
+            account_id=(
+                self._legacy_adapter.account_id
+                if self._legacy_adapter is not None
+                else "legacy-bot"
+            ),
+            sender_id=str(message["from_user_id"]),
+            conversation_type=DIRECT,
+            conversation_id=str(message["from_user_id"]),
+            text=text,
+            attachments=(
+                (AttachmentRef("image", dict(image_item)),)
+                if image_item is not None
+                else ()
+            ),
+            reply_context={"context_token": str(message["context_token"])},
+        )
+        self.handle_inbound(inbound)
 
-        user_id = str(message["from_user_id"])
-        context_token = str(message["context_token"])
-        tenant = self._resolve_tenant(user_id)
+    def handle_inbound(self, message: InboundMessage) -> None:
+        if message.conversation_type != DIRECT:
+            return
+
+        user_id = message.sender_id
+        endpoint = message.endpoint
+        tenant = self._resolve_tenant(message)
+        if tenant is not None and self.address_store is not None:
+            endpoint = self.address_store.record_endpoint(tenant, message)
         subject: Any = tenant or user_id
-        if tenant is not None and self.recipient_store is not None:
-            self.recipient_store.update(tenant, context_token)
+        if (
+            tenant is not None
+            and self.recipient_store is not None
+            and self.address_store is None
+        ):
+            self.recipient_store.update(
+                tenant,
+                str(endpoint.route_context.get("context_token") or ""),
+            )
+            if self.notification_dispatcher is not None:
+                try:
+                    self.notification_dispatcher.on_recipient_refreshed(
+                        tenant.tenant_id
+                    )
+                except Exception as exc:
+                    print(
+                        "恢复主动微信通知失败：{}".format(exc),
+                        file=sys.stderr,
+                    )
             if self.codex_tasks_plugin is not None:
                 try:
                     refresher = getattr(
@@ -307,10 +457,14 @@ class WeChatBot:
                     )
         if self._record_recipient:
             try:
-                self._record_recipient(user_id, context_token)
+                self._record_recipient(
+                    user_id,
+                    str(endpoint.route_context.get("context_token") or ""),
+                )
             except OSError as exc:
                 print("保存最近微信用户失败：{}".format(exc), file=sys.stderr)
-        text, image_item = extract_text_and_image(message)
+        text = message.text
+        image_item = message.first_image
 
         normalized_text = text.strip()
         lowered_text = normalized_text.lower()
@@ -323,18 +477,24 @@ class WeChatBot:
                 if lowered_text.startswith("/codex answer ")
                 else text
             )
-            self._log("微信输入", user_id, log_text)
+            self._log(self._direction("输入", endpoint), user_id, log_text)
             if tenant is None or self.codex_tasks_plugin is None:
                 reply = "当前未启用 Codex 任务确认。"
             else:
                 try:
-                    reply = self.codex_tasks_plugin.resolve_wechat_command(
-                        tenant, normalized_text
+                    resolver = getattr(
+                        self.codex_tasks_plugin,
+                        "resolve_channel_command",
+                        None,
+                    ) or getattr(
+                        self.codex_tasks_plugin,
+                        "resolve_wechat_command",
                     )
+                    reply = resolver(tenant, normalized_text)
                 except PluginError as exc:
                     reply = str(exc)
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if (
@@ -344,8 +504,8 @@ class WeChatBot:
         ):
             handled, reply = self.integration_service.consume(tenant, normalized_text)
             if handled:
-                self._reply(user_id, context_token, reply, tenant, record=False)
-                self._log("微信输出", user_id, reply)
+                self._reply(endpoint, reply, tenant, record=False)
+                self._log(self._direction("输出", endpoint), user_id, reply)
                 return
 
         if text or image_item:
@@ -360,15 +520,13 @@ class WeChatBot:
         if not image_item and (
             lowered_text.startswith("/approve") or lowered_text.startswith("/deny")
         ):
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             parts = normalized_text.split()
             if len(parts) != 2 or parts[0].lower() not in {"/approve", "/deny"}:
                 reply = "格式错误，请使用 /approve <编号> 或 /deny <编号>。"
             else:
                 try:
-                    with self.ilink.typing(
-                        user_id, context_token, on_error=self._typing_error
-                    ):
+                    with self.message_router.typing(endpoint):
                         outcome = self.agent_service.resolve_approval(
                             subject,
                             parts[1],
@@ -381,10 +539,10 @@ class WeChatBot:
                     print("继续处理确认操作失败：{}".format(exc), file=sys.stderr)
                     reply = "本机操作已经处理，但模型生成后续回复失败，请重试查询结果。"
                 else:
-                    self._send_outcome(subject, user_id, context_token, outcome, tenant)
+                    self._send_outcome(subject, endpoint, outcome, tenant)
                     return
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         decision_words = APPROVAL_WORDS | DENIAL_WORDS
@@ -393,11 +551,9 @@ class WeChatBot:
             and normalized_text in decision_words
             and self.agent_service.has_pending_approval(subject)
         ):
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             try:
-                with self.ilink.typing(
-                    user_id, context_token, on_error=self._typing_error
-                ):
+                with self.message_router.typing(endpoint):
                     outcome = self.agent_service.resolve_pending_approval(
                         subject,
                         approved=normalized_text in APPROVAL_WORDS,
@@ -409,10 +565,10 @@ class WeChatBot:
                 print("继续处理确认操作失败：{}".format(exc), file=sys.stderr)
                 reply = "本机操作已经处理，但模型生成后续回复失败，请重试查询结果。"
             else:
-                self._send_outcome(subject, user_id, context_token, outcome, tenant)
+                self._send_outcome(subject, endpoint, outcome, tenant)
                 return
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text == "/id":
@@ -421,8 +577,8 @@ class WeChatBot:
                 if tenant is not None
                 else "当前未启用多用户存储。"
             )
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text == "/schedules":
@@ -441,8 +597,8 @@ class WeChatBot:
                     lines.append("- {}：{}".format(task_id, status))
                 lines.append("使用 /schedule on|off <任务编号> 修改。")
                 reply = "\n".join(lines)
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text == "/knowledge":
@@ -456,8 +612,8 @@ class WeChatBot:
                 reply = "私人知识库：{} 个来源，{} 个分块；已完成 {}，待向量化 {}。".format(
                     len(sources), chunks, ready, pending
                 )
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and (
@@ -483,8 +639,8 @@ class WeChatBot:
                 except Exception as exc:
                     print("读取长期用户画像失败：{}".format(exc), file=sys.stderr)
                     reply = "长期用户画像暂时不可用，正常聊天不受影响。"
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and (lowered_text == "/memory" or lowered_text.startswith("/memory ")):
@@ -531,8 +687,8 @@ class WeChatBot:
                         reply = "已停用全部长期记忆，共 {} 项。".format(count)
                 else:
                     reply = "格式错误，请使用 /memory、/memory confirm <编号>、/memory forget <编号> 或 /memory clear。"
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text.startswith("/schedule "):
@@ -549,8 +705,8 @@ class WeChatBot:
                 reply = "已{}定时任务 {}。".format(
                     "开启" if enabled else "关闭", parts[2]
                 )
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and (
@@ -578,8 +734,8 @@ class WeChatBot:
                         )
                 except ValueError as exc:
                     reply = str(exc)
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text == "/delete-data":
@@ -596,8 +752,8 @@ class WeChatBot:
                     "Codex 账号级任务历史仍由 Codex 自身保存，不会随本操作删除。"
                     "如确定，请在 5 分钟内回复 /confirm-delete {}。"
                 ).format(code)
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text.startswith("/confirm-delete"):
@@ -632,31 +788,31 @@ class WeChatBot:
                         "你的全部 BotPlatform 租户数据已经删除；下次私聊将创建新的租户编号。"
                         "Codex 账号级任务历史仍需在 Codex 中单独管理。"
                     )
-                    self._reply(user_id, context_token, reply, None, record=False)
-                    self._log("微信输出", user_id, reply)
+                    self._reply(endpoint, reply, None, record=False)
+                    self._log(self._direction("输出", endpoint), user_id, reply)
                     return
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if not image_item and lowered_text == "/clear":
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             self.agent_service.clear_history(subject)
             self._cancel_approval_timer(subject)
             reply = "对话上下文已清空。"
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
         if not image_item and lowered_text == "/agent":
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             reply = self.agent_service.describe_active()
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
         if not image_item and (
             lowered_text == "/model" or lowered_text.startswith("/model ")
         ):
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             parts = normalized_text.split()
             try:
                 if len(parts) == 1:
@@ -668,55 +824,51 @@ class WeChatBot:
                     reply = "格式错误，请使用 /model 或 /model auto|local|flash|pro。"
             except ModelError as exc:
                 reply = str(exc)
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
         if not image_item and lowered_text == "/tools":
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             reply = self.agent_service.tools_text(subject)
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
         if not image_item and lowered_text == "/help":
-            self._log("微信输入", user_id, text)
+            self._log(self._direction("输入", endpoint), user_id, text)
             reply = self.agent_service.help_text()
-            self._reply(user_id, context_token, reply, tenant)
-            self._log("微信输出", user_id, reply)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
             return
         if not text and not image_item:
             return
 
         question = text or self.agent_service.image_prompt
         input_log = "[图片] {}".format(question) if image_item else question
-        self._log("微信输入", user_id, input_log)
+        self._log(self._direction("输入", endpoint), user_id, input_log)
         image_bytes: Optional[bytes] = None
         try:
-            with self.ilink.typing(
-                user_id, context_token, on_error=self._typing_error
-            ):
+            with self.message_router.typing(endpoint):
                 if image_item:
-                    image_bytes = self.ilink.download_image(image_item)
+                    image_bytes = self.message_router.load_attachment(
+                        message.channel_id,
+                        image_item,
+                    )
                 outcome = self.agent_service.chat(
                     subject, question, image_bytes=image_bytes
                 )
             answer = self._outcome_text(outcome)
         except SessionExpired:
             raise
-        except (ILinkError, ModelError) as exc:
+        except (ILinkError, MessagingError, ModelError) as exc:
             print("处理用户消息失败：{}".format(exc), file=sys.stderr)
             error_reply = "处理消息失败：{}。请稍后重试。".format(exc)
-            self._reply(
-                user_id,
-                context_token,
-                error_reply,
-                tenant,
-            )
-            self._log("微信输出", user_id, error_reply)
+            self._reply(endpoint, error_reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, error_reply)
             return
 
-        self._track_approval_outcome(subject, user_id, context_token, outcome)
-        self._reply(user_id, context_token, answer, tenant)
-        self._log("微信输出", user_id, answer)
+        self._track_approval_outcome(subject, endpoint, outcome)
+        self._reply(endpoint, answer, tenant)
+        self._log(self._direction("输出", endpoint), user_id, answer)
 
     def run(self) -> None:
         cursor = ""
@@ -740,3 +892,7 @@ class WeChatBot:
                     raise
                 except ILinkError as exc:
                     print("回复微信消息失败：{}".format(exc), file=sys.stderr)
+
+
+# Compatibility name retained for one release.
+WeChatBot = MessageBot
