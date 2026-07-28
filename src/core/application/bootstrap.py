@@ -229,6 +229,13 @@ def run_bot(args, project_config=None) -> int:
                     (plugin for plugin in platform_plugins if plugin.id == "codex_tasks"),
                     None,
                 )
+                mcp_manager = None
+                if project_config.tools.enabled and project_config.mcp_servers:
+                    from src.core.tooling.mcp_client import McpClientManager
+
+                    mcp_manager = McpClientManager()
+                    mcp_manager.start()
+                    mcp_manager.reload(project_config.mcp_servers)
                 tool_runtime = (
                     ToolRuntime(
                         project_config.tools,
@@ -238,6 +245,7 @@ def run_bot(args, project_config=None) -> int:
                         tenant_registry=tenant_registry,
                         knowledge_service=knowledge_service,
                         plugins=platform_plugins,
+                        mcp_manager=mcp_manager,
                     )
                     if project_config.tools.enabled
                     else None
@@ -260,6 +268,7 @@ def run_bot(args, project_config=None) -> int:
                     settings_store=settings_store,
                     knowledge_service=knowledge_service,
                     memory_service=memory_service,
+                    skills=project_config.skills,
                 )
                 scheduler = SchedulerService(
                     credentials=None,

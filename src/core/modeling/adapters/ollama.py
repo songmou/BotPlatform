@@ -256,6 +256,71 @@ class OllamaAdapter:
             ) from exc
 
 
+    def complete_stream(self, request: ModelRequest):
+        """Yield text chunks via Ollama streaming. Falls back to complete() on error."""
+        temperature = (
+            self.temperature
+            if request.generation.temperature is None
+            else request.generation.temperature
+        )
+        max_tokens = (
+            self.max_tokens
+            if request.generation.max_tokens is None
+            else request.generation.max_tokens
+        )
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": self._serialize_messages(request),
+            "stream": True,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        try:
+            with self.client.stream(
+                "POST",
+                "{}/api/chat".format(self.base_url),
+                json=payload,
+                timeout=self.timeout_seconds,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    message = chunk.get("message") or {}
+                    content = message.get("content")
+                    if content:
+                        yield content
+                    if chunk.get("done"):
+                        break
+        except httpx.TimeoutException as exc:
+            raise ModelError(
+                "模型档案 {} 调用超时".format(self.identity.profile_id),
+                provider=self.identity.provider,
+                retryable=True,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            raise ModelError(
+                "模型档案 {} 调用失败（HTTP {}）".format(
+                    self.identity.profile_id, status
+                ),
+                provider=self.identity.provider,
+                status_code=status,
+                retryable=status == 429 or status >= 500,
+            ) from exc
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise ModelError(
+                "模型档案 {} 返回无效响应或暂不可用".format(
+                    self.identity.profile_id
+                ),
+                provider=self.identity.provider,
+                retryable=True,
+            ) from exc
+
+
 def _optional_int(value: Any) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 

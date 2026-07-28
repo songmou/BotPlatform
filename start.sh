@@ -62,4 +62,9 @@ if ! "$VENV_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3
   exit 1
 fi
 
+if [ "$1" = "web" ]; then
+  shift
+  exec "$VENV_PYTHON" "$PROJECT_DIR/web.py" "$@"
+fi
+
 exec "$VENV_PYTHON" "$PROJECT_DIR/main.py" "$@"

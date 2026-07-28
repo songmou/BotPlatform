@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - BotPlatform</title>
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem("bp-theme") || "light";
+                document.documentElement.setAttribute("data-theme", theme);
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/css/login.css">
+</head>
+<body>
+    <div class="login-page">
+        <form id="login-form" class="login-card">
+            <h1 class="login-title">BotPlatform</h1>
+            <p class="login-subtitle">管理面板登录</p>
+            <div class="form-group">
+                <label for="login-username">用户名</label>
+                <input type="text" id="login-username" autocomplete="username" required autofocus>
+            </div>
+            <div class="form-group">
+                <label for="login-password">密码</label>
+                <input type="password" id="login-password" autocomplete="current-password" required>
+            </div>
+            <p id="login-error" class="login-error" style="display:none"></p>
+            <button type="submit" class="btn-primary login-btn">登 录</button>
+        </form>
+    </div>
+    <script>
+        document.getElementById("login-form").addEventListener("submit", function (evt) {
+            evt.preventDefault();
+            var errorEl = document.getElementById("login-error");
+            errorEl.style.display = "none";
+            fetch("/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username: document.getElementById("login-username").value.trim(),
+                    password: document.getElementById("login-password").value
+                })
+            }).then(function (r) {
+                if (r.ok) {
+                    var params = new URLSearchParams(window.location.search);
+                    var next = params.get("next") || "/";
+                    if (next.charAt(0) !== "/" || next.charAt(1) === "/") next = "/";
+                    window.location.href = next;
+                    return;
+                }
+                return r.json().then(function (data) {
+                    errorEl.textContent = (data && data.detail) || "登录失败";
+                    errorEl.style.display = "";
+                });
+            }).catch(function () {
+                errorEl.textContent = "网络错误，请重试";
+                errorEl.style.display = "";
+            });
+        });
+    </script>
+</body>
+</html>

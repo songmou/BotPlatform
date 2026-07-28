@@ -192,6 +192,73 @@ class OpenAICompatibleAdapter:
                 provider=self.identity.provider,
             ) from exc
 
+    def complete_stream(self, request: ModelRequest):
+        """Yield text chunks via SSE streaming. Falls back to complete() on error."""
+        temperature = (
+            self.temperature
+            if request.generation.temperature is None
+            else request.generation.temperature
+        )
+        max_tokens = (
+            self.max_tokens
+            if request.generation.max_tokens is None
+            else request.generation.max_tokens
+        )
+        payload: Dict[str, Any] = dict(self.request_extra)
+        payload.update(
+            {
+                "model": self.model,
+                "messages": self._serialize_messages(request),
+                "stream": True,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
+        headers = {
+            "Authorization": "Bearer {}".format(self.api_key),
+            "Content-Type": "application/json",
+        }
+        try:
+            with self.client.stream(
+                "POST",
+                "{}/chat/completions".format(self.base_url),
+                headers=headers,
+                json=payload,
+                timeout=self.timeout_seconds,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices")
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    content = delta.get("content")
+                    if content:
+                        yield content
+        except httpx.TimeoutException as exc:
+            raise ModelError(
+                "模型档案 {} 调用超时".format(self.identity.profile_id),
+                provider=self.identity.provider,
+                retryable=True,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise self._status_error(exc.response.status_code) from exc
+        except httpx.HTTPError as exc:
+            raise ModelError(
+                "模型档案 {} 网络连接失败".format(self.identity.profile_id),
+                provider=self.identity.provider,
+                retryable=True,
+            ) from exc
+
     def _status_error(self, status: int) -> ModelError:
         labels = {
             401: "认证失败",

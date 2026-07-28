@@ -1,0 +1,1 @@
+"""Bot adapter abstraction layer."""

@@ -156,6 +156,13 @@ class AgentPreset:
     capabilities: List[Capability]
     image_prompt: Optional[str] = None
     tools: List[str] = field(default_factory=list)
+    skills: List[str] = field(default_factory=list)
+    mcp_servers: List[str] = field(default_factory=list)
+    model: Optional[str] = None
+    greeting: Optional[str] = None
+    greeting_hints: List[str] = field(default_factory=list)
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -254,6 +261,8 @@ class ProjectConfig:
     scripts: Dict[str, ScriptDefinition]
     schedules: List[ScheduledTask]
     embedding: EmbeddingProfile
+    skills: List[Dict[str, Any]] = field(default_factory=list)
+    mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
     channels: Dict[str, ChannelConfig] = field(default_factory=dict)
 
     @property
@@ -371,31 +380,29 @@ def _load_tools(path: Path) -> ToolConfig:
     tenant_workspace_placeholder = Path("/__ilinkbot_tenant_workspace__")
     roots: List[Path] = []
     for index, raw_root in enumerate(_string_list(data, "allowed_roots", path)):
-        root = (
-            tenant_workspace_placeholder
-            if raw_root == tenant_workspace_marker
-            else Path(raw_root).expanduser()
-        )
+        if raw_root == tenant_workspace_marker:
+            roots.append(tenant_workspace_placeholder)
+            continue
+        root = Path(raw_root).expanduser()
         if not root.is_absolute():
             raise _error(path, "allowed_roots[{}]".format(index), "必须是绝对路径")
         root = root.resolve()
-        if root != tenant_workspace_placeholder and not root.is_dir():
+        if not root.is_dir():
             raise _error(path, "allowed_roots[{}]".format(index), "目录不存在：{}".format(root))
         if root in roots:
             raise _error(path, "allowed_roots", "解析后存在重复目录：{}".format(root))
         roots.append(root)
 
     raw_default = _required_string(data, "default_working_directory", path)
-    default_directory = (
-        tenant_workspace_placeholder
-        if raw_default == tenant_workspace_marker
-        else Path(raw_default).expanduser()
-    )
-    if not default_directory.is_absolute():
-        raise _error(path, "default_working_directory", "必须是绝对路径")
-    default_directory = default_directory.resolve()
-    if default_directory != tenant_workspace_placeholder and not default_directory.is_dir():
-        raise _error(path, "default_working_directory", "目录不存在：{}".format(default_directory))
+    if raw_default == tenant_workspace_marker:
+        default_directory = tenant_workspace_placeholder
+    else:
+        default_directory = Path(raw_default).expanduser()
+        if not default_directory.is_absolute():
+            raise _error(path, "default_working_directory", "必须是绝对路径")
+        default_directory = default_directory.resolve()
+        if not default_directory.is_dir():
+            raise _error(path, "default_working_directory", "目录不存在：{}".format(default_directory))
     if not _is_within(default_directory, roots):
         raise _error(path, "default_working_directory", "必须位于 allowed_roots 中")
 
@@ -672,7 +679,8 @@ def _load_agent(path: Path) -> AgentPreset:
     data = _load_json(path)
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
-        "capabilities", "tools",
+        "capabilities", "tools", "skills", "mcp_servers", "model", "greeting",
+        "greeting_hints", "temperature", "max_tokens",
     }, path)
     capabilities_data = data.get("capabilities")
     if not isinstance(capabilities_data, list) or not capabilities_data:
@@ -709,6 +717,52 @@ def _load_agent(path: Path) -> AgentPreset:
             raise _error(path, "tools", "不能包含重复工具：{}".format(name))
         tools.append(name)
 
+    raw_skills = data.get("skills", [])
+    if not isinstance(raw_skills, list):
+        raise _error(path, "skills", "必须是数组")
+    skills: List[str] = []
+    for index, skill_id in enumerate(raw_skills):
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise _error(path, "skills[{}]".format(index), "必须是非空字符串")
+        skill_id = skill_id.strip()
+        if skill_id in skills:
+            raise _error(path, "skills", "不能包含重复技能：{}".format(skill_id))
+        skills.append(skill_id)
+
+    raw_mcp_servers = data.get("mcp_servers", [])
+    if not isinstance(raw_mcp_servers, list):
+        raise _error(path, "mcp_servers", "必须是数组")
+    mcp_servers: List[str] = []
+    for index, server_id in enumerate(raw_mcp_servers):
+        if not isinstance(server_id, str) or not server_id.strip():
+            raise _error(path, "mcp_servers[{}]".format(index), "必须是非空字符串")
+        server_id = server_id.strip()
+        if server_id in mcp_servers:
+            raise _error(path, "mcp_servers", "不能包含重复服务：{}".format(server_id))
+        mcp_servers.append(server_id)
+
+    raw_greeting_hints = data.get("greeting_hints", [])
+    if not isinstance(raw_greeting_hints, list):
+        raise _error(path, "greeting_hints", "必须是数组")
+    greeting_hints: List[str] = []
+    for index, hint in enumerate(raw_greeting_hints):
+        if not isinstance(hint, str) or not hint.strip():
+            raise _error(path, "greeting_hints[{}]".format(index), "必须是非空字符串")
+        greeting_hints.append(hint.strip())
+
+    temperature = data.get("temperature")
+    if temperature is not None:
+        if not isinstance(temperature, (int, float)):
+            raise _error(path, "temperature", "必须是数字")
+        temperature = float(temperature)
+        if temperature < 0 or temperature > 2:
+            raise _error(path, "temperature", "必须在 0-2 之间")
+
+    max_tokens = data.get("max_tokens")
+    if max_tokens is not None:
+        if not isinstance(max_tokens, int) or max_tokens <= 0:
+            raise _error(path, "max_tokens", "必须是正整数")
+
     return AgentPreset(
         id=_required_string(data, "id", path),
         name=_required_string(data, "name", path),
@@ -718,6 +772,13 @@ def _load_agent(path: Path) -> AgentPreset:
         image_prompt=_optional_string(data, "image_prompt", path),
         capabilities=capabilities,
         tools=tools,
+        skills=skills,
+        mcp_servers=mcp_servers,
+        model=_optional_string(data, "model", path),
+        greeting=_optional_string(data, "greeting", path),
+        greeting_hints=greeting_hints,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
@@ -1219,6 +1280,26 @@ def _load_schedules(
     return tasks
 
 
+def _load_skills(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = _load_json(path)
+    skills = data.get("skills", [])
+    if not isinstance(skills, list):
+        raise _error(path, "skills", "必须是数组")
+    return skills
+
+
+def _load_mcp_servers(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = _load_json(path)
+    servers = data.get("servers", [])
+    if not isinstance(servers, list):
+        raise _error(path, "servers", "必须是数组")
+    return servers
+
+
 def load_project_config(config_dir: Path) -> ProjectConfig:
     config_dir = config_dir.resolve()
     app = _load_app(config_dir / "app.json")
@@ -1228,7 +1309,11 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
     plugins = _load_plugins(config_dir / "plugins.json")
     channels = _load_channels(config_dir / "channels.json")
     agents = _load_agents(config_dir / "agents")
+    skills = _load_skills(config_dir / "skills.json")
+    mcp_servers = _load_mcp_servers(config_dir / "mcp_servers.json")
     configured_plugin_tools = plugin_tool_names(plugins)
+    skill_ids = {s.get("id") for s in skills if isinstance(s, dict)}
+    server_ids = {s.get("id") for s in mcp_servers if isinstance(s, dict)}
     for agent in agents.values():
         unknown = sorted(
             set(agent.tools) - BUILTIN_TOOL_NAMES - configured_plugin_tools
@@ -1237,6 +1322,20 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
             raise ConfigError(
                 "Agent {} 引用了未知工具：{}".format(
                     agent.id, "、".join(unknown)
+                )
+            )
+        unknown_skills = sorted(set(agent.skills) - skill_ids)
+        if unknown_skills:
+            raise ConfigError(
+                "Agent {} 引用了未知技能：{}".format(
+                    agent.id, "、".join(unknown_skills)
+                )
+            )
+        unknown_servers = sorted(set(agent.mcp_servers) - server_ids)
+        if unknown_servers:
+            raise ConfigError(
+                "Agent {} 引用了未知 MCP 服务：{}".format(
+                    agent.id, "、".join(unknown_servers)
                 )
             )
     if app.default_agent not in agents:
@@ -1288,5 +1387,7 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
         scripts=scripts,
         schedules=schedules,
         embedding=embedding,
+        skills=skills,
+        mcp_servers=mcp_servers,
         channels=channels,
     )

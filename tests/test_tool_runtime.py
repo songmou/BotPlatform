@@ -20,6 +20,16 @@ class FakeScriptService:
 
     def __init__(self) -> None:
         self.calls = []
+        from types import SimpleNamespace
+
+        self.definitions = {
+            "protected_check": SimpleNamespace(
+                id="protected_check", name="受保护检查", description=""
+            ),
+            "todo_manager": SimpleNamespace(
+                id="todo_manager", name="待办管理", description=""
+            ),
+        }
 
     def list_scripts(self):
         return [

@@ -6,13 +6,17 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
-import fcntl
 import html
 from html.parser import HTMLParser
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 from pathlib import Path
 import re
 import secrets
@@ -1021,8 +1025,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     with lock_path.open("w", encoding="utf-8") as lock_file:
         lock_path.chmod(0o600)
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
             logger.info("已有监控任务在运行，本次跳过")
             write_script_result("skipped", "已有 OA 监控任务在运行，本次检查已跳过。")
             return 0

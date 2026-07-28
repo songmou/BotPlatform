@@ -27,6 +27,7 @@ from src.core.paths import (
     CONFIG_DIR,
     DATA_DIR,
     INSTANCE_LOCK_PATH,
+    SYSTEM_DATA_DIR,
     channel_credentials_path,
 )
 from src.core.plugins.codex_tasks import CodexHookIngestor, CodexTasksConfig
@@ -384,7 +385,26 @@ def run_codex_hook_command(
     return 0
 
 
+def _load_model_env() -> None:
+    """Load API keys from data/system/model.env if present."""
+    import os
+
+    env_file = SYSTEM_DATA_DIR / "model.env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if key and value and not os.environ.get(key):
+                os.environ[key] = value
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    _load_model_env()
     args = parse_args(argv)
     if args.command == "notify":
         return run_notify_command(args)

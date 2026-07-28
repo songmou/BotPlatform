@@ -292,6 +292,36 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("content_hash", soul_columns)
             self.assertIn("last_scanned_event_id", soul_columns)
 
+    def test_v11_creates_admin_tables_with_builtin_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "botplatform.sqlite3"
+            database = Database(path)
+            with database.read() as connection:
+                version = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                roles = {
+                    str(row["code"]): (str(row["permissions"]), int(row["builtin"]))
+                    for row in connection.execute(
+                        "SELECT code, permissions, builtin FROM admin_roles"
+                    ).fetchall()
+                }
+
+            self.assertEqual(version, LATEST_SCHEMA_VERSION)
+            self.assertLessEqual(
+                {"admin_users", "admin_roles", "admin_sessions"}, tables
+            )
+            self.assertEqual(set(roles), {"admin", "editor", "viewer"})
+            self.assertEqual(roles["admin"], ('["*"]', 1))
+            self.assertIn("tenants.read", roles["viewer"][0])
+            self.assertNotIn("tenants.delete", roles["viewer"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

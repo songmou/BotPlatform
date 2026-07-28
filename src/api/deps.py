@@ -1,0 +1,75 @@
+"""Dependency injection for API route handlers."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from fastapi import HTTPException, Request
+
+if TYPE_CHECKING:
+    from src.core.config.loader import ProjectConfig
+    from src.core.modeling.router import ModelRouter
+    from src.core.services.auth import AdminAuthService, AuthPrincipal
+    from src.core.storage.admin_users import AdminRoleStore, AdminUserStore
+    from src.core.storage.tenants import ConversationStore, TenantRegistry
+
+
+def get_config(request: Request) -> "ProjectConfig":
+    return request.app.state.config
+
+
+def get_router(request: Request) -> "ModelRouter":
+    return request.app.state.model_router
+
+
+def get_registry(request: Request) -> "TenantRegistry":
+    return request.app.state.registry
+
+
+def get_conversation_store(request: Request) -> "ConversationStore":
+    return request.app.state.conversation_store
+
+
+def get_tool_runtime(request: Request):
+    return request.app.state.tool_runtime
+
+
+def get_plugin_context(request: Request):
+    return request.app.state.plugin_context
+
+
+def get_scheduler(request: Request):
+    return getattr(request.app.state, "scheduler", None)
+
+
+def get_tool_audit_store(request: Request):
+    return getattr(request.app.state, "tool_audit_store", None)
+
+
+def get_admin_auth(request: Request) -> "AdminAuthService":
+    return request.app.state.admin_auth
+
+
+def get_admin_user_store(request: Request) -> "AdminUserStore":
+    return request.app.state.admin_user_store
+
+
+def get_admin_role_store(request: Request) -> "AdminRoleStore":
+    return request.app.state.admin_role_store
+
+
+def get_principal(request: Request) -> "AuthPrincipal":
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    return principal
+
+
+def require_permission(permission: str):
+    def dependency(request: Request) -> "AuthPrincipal":
+        principal = get_principal(request)
+        if not principal.allows(permission):
+            raise HTTPException(status_code=403, detail="没有权限执行该操作")
+        return principal
+
+    return dependency

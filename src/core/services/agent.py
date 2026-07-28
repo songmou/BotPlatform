@@ -8,10 +8,11 @@ import secrets
 import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
 from src.core.config.loader import AgentPreset, AppConfig
+from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
 from src.core.modeling import (
     CanonicalMessage,
     CanonicalToolCall,
@@ -50,6 +51,7 @@ class AgentService:
         settings_store: Optional[SettingsStore] = None,
         knowledge_service: Optional[KnowledgeService] = None,
         memory_service: Optional[MemoryService] = None,
+        skills: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.model = model
         self.model_router = (
@@ -63,6 +65,7 @@ class AgentService:
         self.settings_store = settings_store
         self.knowledge_service = knowledge_service
         self.memory_service = memory_service
+        self.skills = skills or []
         self.max_history_messages = app_config.history_rounds * 2
         self.histories: Dict[str, List[CanonicalMessage]] = {}
         self._pending: Dict[str, PendingApproval] = {}
@@ -112,7 +115,9 @@ class AgentService:
 
     def _tools_enabled(self, preset: AgentPreset, model: ModelSession) -> bool:
         return bool(
-            self.tool_runtime and preset.tools and model.capabilities.tools
+            self.tool_runtime
+            and (preset.tools or preset.mcp_servers)
+            and model.capabilities.tools
         )
 
     def _current_time_context(self) -> str:
@@ -153,7 +158,7 @@ class AgentService:
         subject_key: Optional[str] = None,
     ) -> List[CanonicalMessage]:
         messages = [
-            CanonicalMessage("system", preset.system_prompt),
+            CanonicalMessage("system", build_system_prompt(preset, self.skills)),
             CanonicalMessage("system", self._current_time_context()),
         ]
         soul_ids: List[str] = []
@@ -430,7 +435,9 @@ class AgentService:
             return status
 
     def chat(
-        self, user_id: Union[str, TenantContext], question: str, image_bytes: Optional[bytes] = None
+        self, user_id: Union[str, TenantContext], question: str,
+        image_bytes: Optional[bytes] = None,
+        agent_id: Optional[str] = None,
     ) -> AgentOutcome:
         key = self._subject_key(user_id)
         self._bind_tool_runtime(user_id)
@@ -443,7 +450,7 @@ class AgentService:
             )
             self._validate_image(image_bytes, model)
             history = self._history_for(user_id)
-            preset = self.active_agent
+            preset = self.agents[agent_id] if agent_id else self.active_agent
             direct_todo = self._try_direct_todo_query(
                 user_id,
                 history,
@@ -481,7 +488,7 @@ class AgentService:
                 history=history,
                 messages=messages,
                 image_bytes=image_bytes,
-                tool_names=list(preset.tools),
+                tool_names=resolve_tool_names(preset, self.tool_runtime),
                 rounds_used=0,
                 total_calls=0,
                 thinking_parts=thinking_parts,

@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+ $ErrorActionPreference = "Stop"
 
 $ProjectDir = $PSScriptRoot
 $VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"

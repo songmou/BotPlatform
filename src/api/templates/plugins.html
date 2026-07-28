@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}消息平台 - BotPlatform{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>消息平台</h2>
+                <p class="page-desc">机器人消息渠道对接（企微 / 飞书 / iLink）</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="bot-list" class="plugin-card-grid"></div>
+
+    <div class="empty-state" id="bot-empty" style="display:none;margin-top:48px">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:0.3;margin-bottom:16px">
+            <rect x="3" y="11" width="18" height="10" rx="2"/>
+            <circle cx="12" cy="5" r="2"/>
+            <path d="M12 7v4"/>
+            <line x1="8" y1="16" x2="8" y2="16"/>
+            <line x1="16" y1="16" x2="16" y2="16"/>
+        </svg>
+        <h3 style="font-size:16px;font-weight:600;margin-bottom:8px">暂无已配置的机器人适配器</h3>
+        <p class="text-muted" style="max-width:400px;margin:0 auto">
+            将支持企业微信、飞书、iLink 三种 IM 渠道的机器人对接。
+        </p>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/bots.js"></script>
+<script>initBots();</script>
+{% endblock %}

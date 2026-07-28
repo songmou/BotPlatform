@@ -1,0 +1,17 @@
+{
+  "servers": [
+    {
+      "id": "mcp_list",
+      "name": "ZDS-MCP",
+      "transport": "streamablehttp",
+      "command": null,
+      "args": [],
+      "env": {},
+      "url": "http://gw.songker.com/ctshub/mcp/demo",
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3ODQ5MDgyMTQsImNsaWVudF9pZCI6ImRhc2hib2FyZCIsInVzZXJfaWQiOiJFNjI2MjE3ZTNlNGIwZGFkMmU2MGNiMWZiIiwic2NvcGUiOlsiYWxsIiwib2F1dGgiLCJiYXNlIiwiY29zdCIsIm1lbWJlciJdLCJncmFudF90eXBlIjoicGFzc3dvcmQiLCJ0b2tlbl90eXBlIjoiYWNjZXNzIn0.LfLkvB0jLwQ5cQVF81umLYM7UjzI26W5ASahVQhBdaM"
+      },
+      "enabled": true
+    }
+  ]
+}

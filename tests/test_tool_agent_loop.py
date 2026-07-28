@@ -57,6 +57,7 @@ def tool_call(name, arguments):
 
 class AutoScriptService:
     script_ids = ["todo_manager"]
+    definitions = {}
 
     def __init__(self):
         self.calls = []
