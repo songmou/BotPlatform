@@ -31,6 +31,7 @@ class TodoPluginTests(unittest.TestCase):
         self.context = PluginContext(
             project_root=Path(self.temp.name),
             tenant_registry=self.registry,
+            timezone="Asia/Shanghai",
         )
         self.plugin = TodoPlugin({}, context=self.context)
 
@@ -39,6 +40,7 @@ class TodoPluginTests(unittest.TestCase):
         self.assertIn("todo_manage", self.plugin.tool_definitions)
         definition = self.plugin.tool_definitions["todo_manage"]
         self.assertFalse(definition.requires_approval)
+        self.assertTrue(definition.direct_response)
         self.assertTrue(self.plugin.is_available("todo_manage"))
         self.assertFalse(self.plugin.is_available("nonexistent"))
 
@@ -110,13 +112,35 @@ class TodoPluginTests(unittest.TestCase):
             self.tenant,
         )
         self.assertIn("提醒时间", created["summary"])
+        self.assertIn("一次性任务", created["summary"])
         listed = self.plugin.execute("todo_manage", {"action": "list"}, self.tenant)
+        self.assertIn("一次性", listed["summary"])
         self.assertIn("提醒：", listed["summary"])
         cleared = self.plugin.execute(
             "todo_manage", {"action": "edit", "todo_id": "T0001", "remind_at": None},
             self.tenant,
         )
         self.assertIn("已清除提醒", cleared["summary"])
+
+    def test_add_and_edit_render_reminders_in_application_timezone(self) -> None:
+        created = self.plugin.execute_for_tenant(
+            self.tenant.tenant_id,
+            "add",
+            title="本地时间",
+            remind_at="2026-07-27T03:00:00+00:00",
+            now=moment("2026-07-24T00:00:00"),
+        )
+        self.assertIn("2026-07-27 11:00（Asia/Shanghai）", created.summary)
+
+        edited = self.plugin.execute_for_tenant(
+            self.tenant.tenant_id,
+            "edit",
+            todo_id="T0001",
+            remind_at="2026-07-27T03:10:00+00:00",
+            update_reminder=True,
+            now=moment("2026-07-24T00:01:00"),
+        )
+        self.assertIn("2026-07-27 11:10（Asia/Shanghai）", edited.summary)
 
     def test_invalid_action_raises_plugin_error(self) -> None:
         with self.assertRaises(PluginError):

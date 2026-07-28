@@ -118,6 +118,14 @@ class PluginConfig:
 
 
 @dataclass(frozen=True)
+class ChannelConfig:
+    id: str
+    type: str
+    enabled: bool
+    settings: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     default_agent: str
     timezone: str
@@ -255,6 +263,7 @@ class ProjectConfig:
     embedding: EmbeddingProfile
     skills: List[Dict[str, Any]] = field(default_factory=list)
     mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
+    channels: Dict[str, ChannelConfig] = field(default_factory=dict)
 
     @property
     def active_agent(self) -> AgentPreset:
@@ -826,6 +835,64 @@ def _load_plugins(path: Path) -> Dict[str, PluginConfig]:
     return plugins
 
 
+def _load_channels(path: Path) -> Dict[str, ChannelConfig]:
+    if not path.exists():
+        return {
+            "wechat-main": ChannelConfig(
+                id="wechat-main",
+                type="wechat_ilink",
+                enabled=True,
+            )
+        }
+    data = _load_json(path)
+    _reject_unknown(data, {"channels"}, path)
+    raw_channels = data.get("channels")
+    if not isinstance(raw_channels, list):
+        raise _error(path, "channels", "必须是数组")
+    channels: Dict[str, ChannelConfig] = {}
+    for index, raw in enumerate(raw_channels):
+        prefix = "channels[{}]".format(index)
+        if not isinstance(raw, dict):
+            raise _error(path, prefix, "必须是 JSON 对象")
+        _reject_unknown(raw, {"id", "type", "enabled", "settings"}, path, prefix)
+        channel_id = _required_nested_string(raw, "id", prefix + ".id", path)
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", channel_id):
+            raise _error(path, prefix + ".id", "格式无效")
+        if channel_id in channels:
+            raise _error(path, prefix + ".id", "不能重复")
+        channel_type = _required_nested_string(
+            raw, "type", prefix + ".type", path
+        )
+        if channel_type != "wechat_ilink":
+            raise _error(path, prefix + ".type", "首期仅支持 wechat_ilink")
+        enabled = raw.get("enabled")
+        if not isinstance(enabled, bool):
+            raise _error(path, prefix + ".enabled", "必须是布尔值")
+        settings = raw.get("settings", {})
+        if not isinstance(settings, dict):
+            raise _error(path, prefix + ".settings", "必须是 JSON 对象")
+        forbidden = {
+            key
+            for key in settings
+            if any(word in str(key).lower() for word in ("token", "secret", "password"))
+        }
+        if forbidden:
+            raise _error(
+                path,
+                prefix + ".settings",
+                "不得包含凭证字段：{}".format("、".join(sorted(forbidden))),
+            )
+        channels[channel_id] = ChannelConfig(
+            id=channel_id,
+            type=channel_type,
+            enabled=enabled,
+            settings=dict(settings),
+        )
+    if not any(channel.enabled for channel in channels.values()):
+        raise _error(path, "channels", "至少需要启用一个消息渠道")
+    return channels
+
+
 def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]:
     data = _load_json(path)
     _reject_unknown(data, {"scripts"}, path)
@@ -1240,6 +1307,7 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
     embedding = _load_embedding(config_dir / "embeddings.json")
     tools = _load_tools(config_dir / "tools.json")
     plugins = _load_plugins(config_dir / "plugins.json")
+    channels = _load_channels(config_dir / "channels.json")
     agents = _load_agents(config_dir / "agents")
     skills = _load_skills(config_dir / "skills.json")
     mcp_servers = _load_mcp_servers(config_dir / "mcp_servers.json")
@@ -1321,4 +1389,5 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
         embedding=embedding,
         skills=skills,
         mcp_servers=mcp_servers,
+        channels=channels,
     )

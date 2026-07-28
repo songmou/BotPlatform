@@ -56,6 +56,12 @@ class FakeNotificationService:
     def send_image_to(self, recipient, source, caption=""):
         self.images.append((recipient, source, caption))
 
+    def enqueue_text_to_tenant(self, tenant_id, message, **_kwargs):
+        self.texts.append((tenant_id, message))
+
+    def enqueue_image_to_tenant(self, tenant_id, source, caption="", **_kwargs):
+        self.images.append((tenant_id, source, caption))
+
 
 class ScriptServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -139,9 +145,9 @@ class ScriptServiceTests(unittest.TestCase):
         self.assertFalse(
             (self.registry.tenant_root(self.tenant.tenant_id) / "script_runs").exists()
         )
-        self.assertEqual(self.notifications.texts, [])
+        self.assertEqual(self.notifications.texts[0][0], self.tenant.tenant_id)
 
-    def test_recipient_is_snapshotted_and_result_only_notification_is_sent(self) -> None:
+    def test_result_notification_is_queued_by_tenant_with_artifacts(self) -> None:
         service = self.service()
         self.store.update(self.tenant, "context-1")
         submitted = service.submit_for_tenant(self.tenant, "fake", {"mode": "ok"})
@@ -151,9 +157,9 @@ class ScriptServiceTests(unittest.TestCase):
         while not self.notifications.texts and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(result["status"], "success")
-        self.assertEqual(self.notifications.texts[0][0].user_id, "user@im.wechat")
+        self.assertEqual(self.notifications.texts[0][0], self.tenant.tenant_id)
         self.assertIn("固定脚本结果", self.notifications.texts[0][1])
-        self.assertEqual(self.notifications.images[0][0].context_token, "context-1")
+        self.assertEqual(self.notifications.images[0][0], self.tenant.tenant_id)
 
     def test_duplicate_is_skipped_without_queueing(self) -> None:
         service = self.service()

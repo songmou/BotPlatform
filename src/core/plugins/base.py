@@ -16,6 +16,7 @@ class PluginToolDefinition:
     description: str
     parameters: Dict[str, Any]
     requires_approval: bool = False
+    direct_response: bool = False
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class PluginContext:
     project_root: Path
     tenant_registry: Any
     notification_service: Optional[Any] = None
+    timezone: str = "UTC"
 
 
 class PlatformPlugin(Protocol):

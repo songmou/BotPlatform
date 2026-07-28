@@ -84,6 +84,22 @@ def check_configuration(
         return report
     report.config = config
     report.ready.append(Diagnostic("JSON 配置结构和引用关系有效", config_dir))
+    for channel in config.channels.values():
+        target = config_dir / "channels.json"
+        if channel.enabled:
+            report.ready.append(
+                Diagnostic(
+                    "消息渠道 {} 已启用：{}（私聊、文字、图片、输入状态、主动通知）".format(
+                        channel.id,
+                        channel.type,
+                    ),
+                    target,
+                )
+            )
+        else:
+            report.warnings.append(
+                Diagnostic("消息渠道 {} 未启用".format(channel.id), target)
+            )
 
     active = config.models[config.app.active_model]
     fallback = config.models[config.app.fallback_model]

@@ -972,7 +972,7 @@ class CodexTasksPluginTests(unittest.TestCase):
         self.assertTrue(task["project_id"].startswith("external-"))
         with self.registry.database.read() as connection:
             events = connection.execute(
-                "SELECT event_type FROM codex_task_events "
+                "SELECT event_type, delivery_status FROM codex_task_events "
                 "WHERE thread_id=? ORDER BY event_id",
                 ("external-session",),
             ).fetchall()
@@ -985,6 +985,8 @@ class CodexTasksPluginTests(unittest.TestCase):
                 "completed",
             ],
         )
+        self.assertEqual(events[1]["delivery_status"], "disabled")
+        self.assertEqual(events[2]["delivery_status"], "disabled")
 
         ingestor.ingest(
             {

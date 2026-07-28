@@ -17,6 +17,197 @@ from src.core.storage.database import (
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_v12_repairs_intermediate_outbox_schema_without_losing_rows(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "botplatform.sqlite3"
+            database = Database(path)
+            with database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT INTO tenants(tenant_id, bot_id, user_id, created_at) "
+                    "VALUES ('tenant', 'bot', 'user', "
+                    "'2026-01-01T00:00:00+00:00')"
+                )
+                connection.execute("DROP TABLE notification_outbox")
+                connection.execute(
+                    "CREATE TABLE notification_outbox ("
+                    "notification_id TEXT PRIMARY KEY,"
+                    "tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) "
+                    "ON DELETE CASCADE,"
+                    "batch_id TEXT NOT NULL,"
+                    "batch_position INTEGER NOT NULL DEFAULT 0,"
+                    "source_type TEXT NOT NULL,"
+                    "source_key TEXT,"
+                    "kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),"
+                    "text_payload TEXT,"
+                    "image_path TEXT,"
+                    "delivery_status TEXT NOT NULL DEFAULT 'pending',"
+                    "attempt_count INTEGER NOT NULL DEFAULT 0,"
+                    "next_attempt_at TEXT,"
+                    "lease_expires_at TEXT,"
+                    "created_at TEXT NOT NULL,"
+                    "sent_at TEXT,"
+                    "last_error TEXT,"
+                    "UNIQUE (tenant_id, source_type, source_key)"
+                    ")"
+                )
+                connection.executemany(
+                    "INSERT INTO notification_outbox("
+                    "notification_id, tenant_id, batch_id, batch_position, "
+                    "source_type, source_key, kind, text_payload, image_path, "
+                    "delivery_status, attempt_count, next_attempt_at, "
+                    "lease_expires_at, created_at, sent_at, last_error"
+                    ") VALUES (?, 'tenant', 'batch', ?, 'cli', ?, 'text', ?, "
+                    "NULL, ?, ?, ?, NULL, '2026-01-01T00:00:00+00:00', NULL, ?)",
+                    [
+                        (
+                            "notification-second",
+                            1,
+                            "second",
+                            "第二条",
+                            "retry",
+                            3,
+                            "2026-01-01T00:01:00+00:00",
+                            "temporary failure",
+                        ),
+                        (
+                            "notification-first",
+                            0,
+                            "first",
+                            "第一条",
+                            "pending",
+                            0,
+                            "2026-01-01T00:00:00+00:00",
+                            None,
+                        ),
+                    ],
+                )
+                connection.execute(
+                    "DELETE FROM schema_migrations WHERE version>=12"
+                )
+
+            migrated = Database(path)
+            with migrated.read() as connection:
+                version = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(notification_outbox)"
+                    ).fetchall()
+                }
+                rows = connection.execute(
+                    "SELECT outbox_id, notification_id, source_ref, text_payload, "
+                    "delivery_status, attempt_count, next_attempt_at, last_error "
+                    "FROM notification_outbox ORDER BY outbox_id"
+                ).fetchall()
+
+            self.assertEqual(version, LATEST_SCHEMA_VERSION)
+            self.assertIn("outbox_id", columns)
+            self.assertIn("source_ref", columns)
+            self.assertEqual(
+                [tuple(row) for row in rows],
+                [
+                    (
+                        1,
+                        "notification-first",
+                        None,
+                        "第一条",
+                        "pending",
+                        0,
+                        "2026-01-01T00:00:00+00:00",
+                        None,
+                    ),
+                    (
+                        2,
+                        "notification-second",
+                        None,
+                        "第二条",
+                        "retry",
+                        3,
+                        "2026-01-01T00:01:00+00:00",
+                        "temporary failure",
+                    ),
+                ],
+            )
+
+    def test_v10_repairs_delivered_reminders_and_updates_pending_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "botplatform.sqlite3"
+            database = Database(path)
+            with database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT INTO tenants(tenant_id, bot_id, user_id, created_at) "
+                    "VALUES ('tenant', 'bot', 'user', '2026-01-01T00:00:00+00:00')"
+                )
+                todos = [
+                    (1, "已提醒", "2026-01-01T01:00:00+00:00"),
+                    (2, "待提醒", "2026-01-01T02:00:00+00:00"),
+                    (3, "无提醒", None),
+                ]
+                connection.executemany(
+                    "INSERT INTO todos("
+                    "tenant_id, todo_number, title, status, created_at, updated_at, "
+                    "reminder_at, is_one_off"
+                    ") VALUES ('tenant', ?, ?, 'pending', "
+                    "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', ?, 0)",
+                    todos,
+                )
+                connection.executemany(
+                    "INSERT INTO todo_reminder_events("
+                    "tenant_id, todo_number, due_at, delivery_status, attempt_count, "
+                    "created_at, updated_at, sent_at"
+                    ") VALUES ('tenant', ?, ?, ?, 1, "
+                    "'2026-01-01T00:00:00+00:00', ?, ?)",
+                    [
+                        (
+                            1,
+                            "2026-01-01T01:00:00+00:00",
+                            "sent",
+                            "2026-01-01T01:00:01+00:00",
+                            "2026-01-01T01:00:01+00:00",
+                        ),
+                        (
+                            2,
+                            "2026-01-01T02:00:00+00:00",
+                            "pending",
+                            "2026-01-01T00:00:00+00:00",
+                            None,
+                        ),
+                    ],
+                )
+                connection.execute("DELETE FROM schema_migrations WHERE version>=10")
+
+            migrated = Database(path)
+            with migrated.read() as connection:
+                rows = connection.execute(
+                    "SELECT todo_number, status, completed_at, reminder_at, is_one_off "
+                    "FROM todos ORDER BY todo_number"
+                ).fetchall()
+
+            self.assertEqual(
+                [tuple(row) for row in rows],
+                [
+                    (
+                        1,
+                        "completed",
+                        "2026-01-01T01:00:01+00:00",
+                        None,
+                        1,
+                    ),
+                    (
+                        2,
+                        "pending",
+                        None,
+                        "2026-01-01T02:00:00+00:00",
+                        1,
+                    ),
+                    (3, "pending", None, None, 0),
+                ],
+            )
+
     def test_v6_preserves_codex_events_and_adds_recipient_wait_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "botplatform.sqlite3"

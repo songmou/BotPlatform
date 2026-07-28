@@ -173,8 +173,9 @@ class CodexTasksConfig:
 class CodexTaskStore:
     """Transactional task metadata stored in BotPlatform's unified database."""
 
-    def __init__(self, tenant_registry: Any) -> None:
+    def __init__(self, tenant_registry: Any, durable_outbox: bool = False) -> None:
         self.registry = tenant_registry
+        self.durable_outbox = durable_outbox
 
     TASK_COLUMNS = (
         "thread_id, tenant_id, project_id, title, status, phase, origin, created_at, "
@@ -672,6 +673,7 @@ class CodexTaskStore:
         message: str,
         enabled: bool = True,
     ) -> Dict[str, Any]:
+        created_at = _utc_now()
         with self.registry.database.transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO codex_task_events("
@@ -684,12 +686,44 @@ class CodexTaskStore:
                     event_type,
                     message,
                     "pending" if enabled else "disabled",
-                    _utc_now(),
+                    created_at,
                 ),
             )
             row = connection.execute(
                 "SELECT * FROM codex_task_events WHERE event_key=?", (event_key,)
             ).fetchone()
+            if (
+                row is not None
+                and enabled
+                and self.durable_outbox
+                and row["delivery_status"] in ("pending", "retry")
+            ):
+                notification_id = str(uuid.uuid4())
+                connection.execute(
+                    "INSERT OR IGNORE INTO notification_outbox("
+                    "notification_id, tenant_id, batch_id, batch_position, "
+                    "source_type, source_key, source_ref, kind, text_payload, "
+                    "delivery_status, created_at) "
+                    "VALUES (?, ?, ?, 0, 'codex', ?, ?, 'text', ?, 'pending', ?)",
+                    (
+                        notification_id,
+                        tenant_id,
+                        notification_id,
+                        event_key,
+                        str(row["event_id"]),
+                        message,
+                        str(row["created_at"] or created_at),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE codex_task_events SET delivery_status='sending', "
+                    "next_attempt_at=NULL WHERE event_id=?",
+                    (row["event_id"],),
+                )
+                row = connection.execute(
+                    "SELECT * FROM codex_task_events WHERE event_id=?",
+                    (row["event_id"],),
+                ).fetchone()
         return dict(row) if row is not None else {}
 
     def claim_event(self, event_id: int) -> Optional[Dict[str, Any]]:
@@ -810,6 +844,15 @@ class CodexTaskStore:
                     "WHERE event_id=?",
                     (event_id,),
                 )
+                connection.execute(
+                    "UPDATE notification_outbox SET delivery_status='cancelled', "
+                    "next_attempt_at=NULL, lease_expires_at=NULL, "
+                    "last_error='已合并重复 Hook 通知' "
+                    "WHERE source_type='codex' AND source_ref=? "
+                    "AND delivery_status IN "
+                    "('pending','sending','retry','waiting_recipient')",
+                    (str(event_id),),
+                )
         return len(duplicate_ids)
 
     def latest_event(self, thread_id: str) -> Optional[Dict[str, Any]]:
@@ -849,7 +892,7 @@ class CodexHookIngestor:
 
     def __init__(self, config: CodexTasksConfig, tenant_registry: Any) -> None:
         self.config = config
-        self.store = CodexTaskStore(tenant_registry)
+        self.store = CodexTaskStore(tenant_registry, durable_outbox=True)
 
     @staticmethod
     def _required_text(payload: Mapping[str, Any], key: str, maximum: int = 1000) -> str:
@@ -1007,7 +1050,12 @@ class CodexHookIngestor:
             self.config.monitor_tenant_id,
             phase,
             self._message(task, phase, detail),
-            enabled=phase in self.config.notify_events,
+            # Hooks observe tasks owned by another Codex client. They do not
+            # expose that client's live request/response channel, so a
+            # waiting interaction cannot be answered safely from WeChat.
+            enabled=(
+                phase in self.config.notify_events and phase not in WAITING_PHASES
+            ),
         )
         return {
             "accepted": True,
@@ -1082,7 +1130,13 @@ class CodexTaskService:
     ) -> None:
         self.config = config
         self.context = context
-        self.store = CodexTaskStore(context.tenant_registry)
+        service = context.notification_service
+        self.store = CodexTaskStore(
+            context.tenant_registry,
+            durable_outbox=callable(
+                getattr(service, "enqueue_text_to_tenant", None)
+            ),
+        )
         self.store.reconcile_interrupted(
             config.notify_on_completion and "interrupted" in config.notify_events
         )
@@ -1592,63 +1646,64 @@ class CodexTaskService:
             service = self.context.notification_service
             if service is None:
                 attempt = int(claimed.get("attempt_count", 0))
-                delay = self.RETRY_DELAYS[attempt] if attempt < len(self.RETRY_DELAYS) else None
+                delay = self.RETRY_DELAYS[
+                    min(attempt, len(self.RETRY_DELAYS) - 1)
+                ]
                 self.store.finish_event_delivery(
                     event_id, False, "微信通知服务不可用", delay
                 )
-                if delay is None and claimed["event_type"] in TERMINAL_STATUSES:
-                    self.store.set_notification(str(claimed["thread_id"]), "failed")
                 return
+            enqueue = getattr(service, "enqueue_text_to_tenant", None)
             try:
-                service.send_text_to_tenant(
-                    str(claimed["tenant_id"]), str(claimed["message"])
-                )
+                if callable(enqueue):
+                    enqueue(
+                        str(claimed["tenant_id"]),
+                        str(claimed["message"]),
+                        source_type="codex",
+                        source_key=str(claimed["event_key"]),
+                        source_ref=str(event_id),
+                    )
+                else:
+                    service.send_text_to_tenant(
+                        str(claimed["tenant_id"]), str(claimed["message"])
+                    )
             except NotificationRecipientStaleError as exc:
                 attempt = int(claimed.get("attempt_count", 0))
                 safe_error = self._safe_error(exc)
                 if attempt < 2:
                     self.store.finish_event_delivery(
-                        event_id,
-                        False,
-                        safe_error,
-                        self.RETRY_DELAYS[attempt],
+                        event_id, False, safe_error, self.RETRY_DELAYS[attempt]
                     )
-                    delivery_status = "retry"
                 else:
                     self.store.wait_event_for_recipient(event_id, safe_error)
-                    delivery_status = "waiting_recipient"
-                LOGGER.warning(
-                    "Codex 通知等待收件人刷新 thread=%s event=%s status=%s error=%s",
-                    claimed["thread_id"],
-                    claimed["event_type"],
-                    delivery_status,
-                    safe_error,
-                )
             except (NotificationError, OSError, ValueError) as exc:
                 attempt = int(claimed.get("attempt_count", 0))
                 safe_error = self._safe_error(exc)
-                delay = self.RETRY_DELAYS[attempt] if attempt < len(self.RETRY_DELAYS) else None
+                delay = self.RETRY_DELAYS[
+                    min(attempt, len(self.RETRY_DELAYS) - 1)
+                ]
                 self.store.finish_event_delivery(
                     event_id, False, safe_error, delay
                 )
                 LOGGER.warning(
-                    "Codex 通知投递失败 thread=%s event=%s status=%s error=%s",
+                    "Codex 通知入队失败 thread=%s event=%s status=retry error=%s",
                     claimed["thread_id"],
                     claimed["event_type"],
-                    "retry" if delay is not None else "failed",
                     safe_error,
                 )
-                if delay is None and claimed["event_type"] in TERMINAL_STATUSES:
-                    self.store.set_notification(str(claimed["thread_id"]), "failed")
             else:
-                self.store.finish_event_delivery(event_id, True)
-                LOGGER.info(
-                    "Codex 通知已投递 thread=%s event=%s status=sent",
-                    claimed["thread_id"],
-                    claimed["event_type"],
-                )
-                if claimed["event_type"] in TERMINAL_STATUSES:
-                    self.store.set_notification(str(claimed["thread_id"]), "sent")
+                if callable(enqueue):
+                    LOGGER.info(
+                        "Codex 通知已持久化 thread=%s event=%s status=sending",
+                        claimed["thread_id"],
+                        claimed["event_type"],
+                    )
+                else:
+                    self.store.finish_event_delivery(event_id, True)
+                    if claimed["event_type"] in TERMINAL_STATUSES:
+                        self.store.set_notification(
+                            str(claimed["thread_id"]), "sent"
+                        )
 
     def on_recipient_refreshed(self, tenant_id: str) -> int:
         """Wake all durable notifications after an inbound WeChat message."""
@@ -2357,7 +2412,7 @@ class CodexTasksPlugin:
             )
         raise PluginError("未知 Codex 工具：{}".format(tool_name))
 
-    def resolve_wechat_command(self, tenant: Any, text: str) -> str:
+    def resolve_channel_command(self, tenant: Any, text: str) -> str:
         tenant_id = self._tenant_id(tenant)
         parts = text.strip().split(maxsplit=3)
         if len(parts) == 1:
@@ -2380,6 +2435,10 @@ class CodexTasksPlugin:
             action,
             parts[3] if action == "answer" else "",
         )
+
+    def resolve_wechat_command(self, tenant: Any, text: str) -> str:
+        """Compatibility alias for integrations built before the messaging layer."""
+        return self.resolve_channel_command(tenant, text)
 
     def preview(self, tool_name: str, arguments: Dict[str, Any], tenant: Any) -> str:
         self._tenant_id(tenant)

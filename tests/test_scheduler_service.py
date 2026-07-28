@@ -261,20 +261,23 @@ class SchedulerServiceTests(unittest.TestCase):
         service = self.service([fixed_task(), ai_task()])
 
         self.assertTrue(service.run_task(fixed_task()))
+        service.notification_service.dispatch_due()
         self.assertEqual(self.clients[-1].sent[-1], ("user@im.wechat", "context", "固定提醒"))
         self.assertTrue(self.clients[-1].closed)
 
         self.assertTrue(service.run_task(ai_task()))
+        service.notification_service.dispatch_due()
         self.assertEqual(self.agent.calls[-1], ("general", "生成提醒"))
         self.assertEqual(self.clients[-1].sent[-1][2], "AI 定时内容")
 
-    def test_missing_recipient_skips_without_creating_client(self) -> None:
+    def test_missing_recipient_is_queued_without_creating_client(self) -> None:
         service = self.service([fixed_task()])
-        self.assertFalse(service.run_task(fixed_task()))
+        self.assertTrue(service.run_task(fixed_task()))
+        self.assertEqual(service.notification_service.dispatch_due(), 0)
         self.assertEqual(self.clients, [])
-        self.assertEqual(self.logs[-1][1], "跳过")
+        self.assertEqual(self.logs[-1][1], "已入队")
 
-    def test_send_failure_is_not_retried(self) -> None:
+    def test_send_failure_remains_in_retry_queue(self) -> None:
         self.store.update(self.tenant, "context")
         calls = []
 
@@ -283,9 +286,15 @@ class SchedulerServiceTests(unittest.TestCase):
             return self.factory(credentials, fail=True)
 
         service = self.service([fixed_task()], factory=failing_factory)
-        self.assertFalse(service.run_task(fixed_task()))
+        self.assertTrue(service.run_task(fixed_task()))
+        self.assertEqual(service.notification_service.dispatch_due(), 0)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(self.logs[-1][1], "失败")
+        self.assertEqual(self.logs[-1][1], "已入队")
+        with self.registry.database.read() as connection:
+            state = connection.execute(
+                "SELECT delivery_status FROM notification_outbox"
+            ).fetchone()
+        self.assertEqual(state["delivery_status"], "retry")
 
     def test_start_registers_only_enabled_tasks_and_shutdowns(self) -> None:
         scheduler = FakeScheduler()
@@ -338,8 +347,9 @@ class SchedulerServiceTests(unittest.TestCase):
         self.assertEqual(tool_name, "todo_manage")
         self.assertEqual(arguments, {"action": "remind"})
         self.assertEqual(tenant, self.tenant)
+        service.notification_service.dispatch_due()
         self.assertEqual(self.clients[-1].sent[-1], ("user@im.wechat", "context", "提醒内容"))
-        self.assertEqual(self.logs[-1][1], "成功")
+        self.assertEqual(self.logs[-1][1], "已入队")
         self.assertIn("todo", self.logs[-1][2])
 
     def test_plugin_schedule_without_recipient_skips_notification(self) -> None:
@@ -360,21 +370,42 @@ class SchedulerServiceTests(unittest.TestCase):
         plugin = TodoPlugin(
             {}, PluginContext(Path(self.temp.name), self.registry)
         )
+        service = self.service([fixed_task()], plugins=[plugin])
         plugin.execute_for_tenant(
             self.tenant.tenant_id, "add", title="到期事项",
             remind_at="2026-07-16T08:01:00+00:00",
             now=datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc),
         )
-        service = self.service([fixed_task()], plugins=[plugin])
         self.now = datetime(2026, 7, 16, 8, 1, tzinfo=timezone.utc)
-        self.assertFalse(service.run_due_todo_reminders())
-        self.assertEqual(self.logs[-1][1], "失败")
+        self.assertTrue(service.run_due_todo_reminders())
+        with self.registry.database.read() as connection:
+            event = connection.execute(
+                "SELECT delivery_status FROM todo_reminder_events "
+                "WHERE tenant_id=? AND todo_number=1",
+                (self.tenant.tenant_id,),
+            ).fetchone()
+            outbox = connection.execute(
+                "SELECT delivery_status FROM notification_outbox "
+                "WHERE source_type='todo'"
+            ).fetchone()
+        self.assertEqual(event["delivery_status"], "sending")
+        self.assertEqual(outbox["delivery_status"], "pending")
+        self.assertEqual(service.notification_service.dispatch_due(), 0)
 
         self.store.update(self.tenant, "context")
-        self.assertTrue(service.run_due_todo_reminders())
+        service.notification_service.on_recipient_refreshed(self.tenant.tenant_id)
+        self.assertEqual(service.notification_service.dispatch_due(), 1)
         self.assertEqual(
             self.clients[-1].sent[-1], ("user@im.wechat", "context", "【待办提醒】T0001 到期事项")
         )
+        completed = plugin.execute_for_tenant(
+            self.tenant.tenant_id, "list", scope="completed"
+        )
+        self.assertIn("T0001", completed.summary)
+        pending = plugin.execute_for_tenant(
+            self.tenant.tenant_id, "list", scope="pending"
+        )
+        self.assertNotIn("T0001", pending.summary)
         self.assertFalse(service.run_due_todo_reminders())
 
     def test_one_logical_task_can_register_two_cron_triggers(self) -> None:
@@ -402,15 +433,19 @@ class SchedulerServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(service.run_task(image_task("path")))
-        self.assertEqual(loader.sources[-1].kind, "path")
+        self.assertEqual(loader.sources[0].kind, "path")
+        service.notification_service.dispatch_due()
+        service.notification_service.dispatch_due()
         self.assertEqual(
             self.clients[-1].sent[-1],
-            ("user@im.wechat", "context", b"validated-image", "状态报告"),
+            ("user@im.wechat", "context", b"validated-image", ""),
         )
+        self.assertEqual(self.clients[-2].sent[-1][2], "状态报告")
         self.assertEqual(self.logs[-1][2], "[图片] 状态报告")
 
         self.assertTrue(service.run_task(image_task("url", caption=None)))
         self.assertEqual(loader.sources[-1].kind, "url")
+        service.notification_service.dispatch_due()
         self.assertEqual(
             self.clients[-1].sent[-1],
             ("user@im.wechat", "context", b"validated-image", ""),
@@ -438,6 +473,7 @@ class SchedulerServiceTests(unittest.TestCase):
         self.interaction_time = self.now - timedelta(hours=20)
         self.store.update(self.tenant, "context-window")
         self.assertTrue(service.run_task(task))
+        service.notification_service.dispatch_due()
         self.assertEqual(
             self.clients[-1].sent[-1], ("user@im.wechat", "context-window", "静默提醒")
         )
@@ -454,7 +490,7 @@ class SchedulerServiceTests(unittest.TestCase):
             self.store.load(self.tenant.tenant_id).updated_at,
         )
 
-    def test_inactivity_failure_is_claimed_and_not_retried_after_restart(self) -> None:
+    def test_inactivity_failure_is_claimed_and_kept_for_retry_after_restart(self) -> None:
         task = inactivity_task()
         self.interaction_time = self.now - timedelta(hours=21)
         self.store.update(self.tenant, "context")
@@ -464,7 +500,9 @@ class SchedulerServiceTests(unittest.TestCase):
             calls.append(credentials)
             return self.factory(credentials, fail=True)
 
-        self.assertFalse(self.service([task], factory=failing_factory).run_task(task))
+        first = self.service([task], factory=failing_factory)
+        self.assertTrue(first.run_task(task))
+        first.notification_service.dispatch_due()
         self.assertEqual(len(calls), 1)
 
         restarted = self.service([task], factory=failing_factory)
@@ -481,7 +519,9 @@ class SchedulerServiceTests(unittest.TestCase):
         self.store.update(self.tenant, "new-context")
         self.assertEqual(self.store.load(self.tenant.tenant_id).task_attempts, {})
         self.now += timedelta(hours=20)
-        self.assertTrue(self.service([task]).run_task(task))
+        current = self.service([task])
+        self.assertTrue(current.run_task(task))
+        current.notification_service.dispatch_due()
         self.assertEqual(self.clients[-1].sent[-1][1], "new-context")
 
     def test_user_change_before_claim_prevents_stale_reminder(self) -> None:

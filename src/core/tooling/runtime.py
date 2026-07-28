@@ -447,6 +447,22 @@ class ToolRuntime:
             return state["require_approval"]
         return name in APPROVAL_TOOLS
 
+    def direct_response_text(
+        self, name: str, result: Optional[ToolResult]
+    ) -> Optional[str]:
+        """Return a trusted plugin summary that should bypass model rewriting."""
+
+        plugin = self._plugin_tools.get(name)
+        definition = plugin.tool_definitions.get(name) if plugin is not None else None
+        if not definition or not definition.direct_response or not result or not result.ok:
+            return None
+        if not isinstance(result.data, dict):
+            return None
+        summary = result.data.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            return None
+        return summary.strip()
+
     def script_approval_groups(self) -> tuple[List[str], List[str]]:
         if self.script_service is None:
             return [], []

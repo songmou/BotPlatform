@@ -79,7 +79,7 @@ class ScriptService:
     def __init__(
         self,
         definitions: Dict[str, ScriptDefinition],
-        credentials: Credentials,
+        credentials: Optional[Credentials],
         recipient_store: TenantRecipientStore,
         project_root: Path,
         tenant_registry: TenantRegistry,
@@ -542,8 +542,6 @@ class ScriptService:
     def _notify(self, run: ScriptRun) -> None:
         with self._lock:
             recipient = self._recipients.pop(run.run_id, None)
-        if recipient is None:
-            return
         labels = {
             "success": "成功",
             "failed": "失败",
@@ -560,14 +558,37 @@ class ScriptService:
         )
         errors: List[str] = []
         try:
-            self.notification_service.send_text_to(recipient, message)
+            enqueue_text = getattr(
+                self.notification_service, "enqueue_text_to_tenant", None
+            )
+            if callable(enqueue_text):
+                enqueue_text(
+                    run.tenant_id,
+                    message,
+                    source_type="script",
+                    source_key="{}:text".format(run.run_id),
+                )
+            elif recipient is not None:
+                self.notification_service.send_text_to(recipient, message)
         except NotificationError as exc:
             errors.append(_sanitize(exc, 500))
-        for artifact in run.artifacts:
+        for index, artifact in enumerate(run.artifacts):
             try:
-                self.notification_service.send_image_to(
-                    recipient, ImageSource.local(Path(artifact)), caption=""
+                enqueue_image = getattr(
+                    self.notification_service, "enqueue_image_to_tenant", None
                 )
+                if callable(enqueue_image):
+                    enqueue_image(
+                        run.tenant_id,
+                        ImageSource.local(Path(artifact)),
+                        caption="",
+                        source_type="script",
+                        source_key="{}:image:{}".format(run.run_id, index),
+                    )
+                elif recipient is not None:
+                    self.notification_service.send_image_to(
+                        recipient, ImageSource.local(Path(artifact)), caption=""
+                    )
             except NotificationError as exc:
                 errors.append(_sanitize(exc, 500))
         if errors:

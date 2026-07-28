@@ -141,12 +141,83 @@ class TodoManagerTests(unittest.TestCase):
 
     def test_empty_reminder_is_clear(self) -> None:
         result = self._execute("remind", now=moment("2026-01-01T00:00:00"))
-        self.assertEqual(result.summary, "【待办提醒】当前待办已清空。")
+        self.assertIn("【待办提醒】当前待办已清空。", result.summary)
+        self.assertIn("查询时间：2026-01-01 00:00:00（UTC）", result.summary)
 
-    def test_one_off_reminder_is_persisted_claimed_once_and_cancelled_on_complete(self) -> None:
+    def test_list_uses_local_absolute_times_and_delivery_states(self) -> None:
+        created = moment("2026-07-24T00:00:00")
+        store = SqliteTodoStore(
+            self.db_path, self.tenant_id, timezone_name="Asia/Shanghai"
+        )
+        store.execute("add", title="无提醒", now=created)
+        store.execute(
+            "add",
+            title="未来提醒",
+            remind_at="2026-07-28T02:00:00+00:00",
+            is_one_off=False,
+            now=created,
+        )
+        store.execute(
+            "add",
+            title="刚好到点",
+            remind_at="2026-07-27T08:53:00+00:00",
+            is_one_off=False,
+            now=created,
+        )
+        store.execute(
+            "add",
+            title="投递中",
+            remind_at="2026-07-25T03:00:00+00:00",
+            is_one_off=False,
+            now=created,
+        )
+        store.execute(
+            "add",
+            title="已经提醒",
+            remind_at="2026-07-26T02:00:00+00:00",
+            is_one_off=False,
+            now=created,
+        )
+        store.execute(
+            "add",
+            title="历史提醒状态缺失",
+            remind_at="2026-07-25T04:00:00+00:00",
+            is_one_off=False,
+            now=created,
+        )
+        now = moment("2026-07-27T08:53:00")
+        claimed = store.claim_due_reminders(now)
+        claimed_numbers = {item["todo_number"] for item in claimed}
+        self.assertTrue({3, 4, 5, 6}.issubset(claimed_numbers))
+        store.finish_reminder(5, True, now=now)
+        with store.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE todo_reminder_events SET delivery_status='pending' "
+                "WHERE tenant_id=? AND todo_number=3",
+                (self.tenant_id,),
+            )
+            connection.execute(
+                "DELETE FROM todo_reminder_events "
+                "WHERE tenant_id=? AND todo_number=6",
+                (self.tenant_id,),
+            )
+
+        summary = store.execute("list", scope="pending", now=now).summary
+
+        self.assertIn("查询时间：2026-07-27 16:53:00（Asia/Shanghai）", summary)
+        self.assertIn("2026-07-28 10:00（Asia/Shanghai）；尚未到提醒时间", summary)
+        self.assertIn("2026-07-27 16:53（Asia/Shanghai）；已到提醒时间，等待投递", summary)
+        self.assertIn("2026-07-25 11:00（Asia/Shanghai）；提醒投递中", summary)
+        self.assertIn("2026-07-26 10:00（Asia/Shanghai）；已提醒，待办仍未完成", summary)
+        self.assertIn("2026-07-25 12:00（Asia/Shanghai）；提醒时间已过", summary)
+        self.assertNotIn("今天 11:00", summary)
+        self.assertNotIn("明天 10:00", summary)
+
+    def test_persistent_reminder_is_persisted_claimed_once_and_cancelled_on_complete(self) -> None:
         created = moment("2026-01-01T00:00:00")
         self._execute(
-            "add", title="五分钟后提醒", remind_at="5分钟后", now=created
+            "add", title="五分钟后提醒", remind_at="5分钟后",
+            is_one_off=False, now=created,
         )
         store = SqliteTodoStore(self.db_path, self.tenant_id)
         with store.database.read() as connection:
@@ -182,7 +253,6 @@ class TodoManagerTests(unittest.TestCase):
             "add",
             title="今晚 10 点发布部署更新",
             remind_at="5分钟后",
-            is_one_off=True,
             now=created,
         )
         store = SqliteTodoStore(self.db_path, self.tenant_id)
@@ -198,7 +268,10 @@ class TodoManagerTests(unittest.TestCase):
 
     def test_delivered_regular_reminder_remains_pending(self) -> None:
         created = moment("2026-01-01T00:00:00")
-        self._execute("add", title="需要后续跟进", remind_at="5分钟后", now=created)
+        self._execute(
+            "add", title="需要后续跟进", remind_at="5分钟后",
+            is_one_off=False, now=created,
+        )
         store = SqliteTodoStore(self.db_path, self.tenant_id)
         store.claim_due_reminders(moment("2026-01-01T00:05:00"))
         store.finish_reminder(1, True, now=moment("2026-01-01T00:05:01"))

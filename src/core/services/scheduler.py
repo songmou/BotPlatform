@@ -1,4 +1,4 @@
-"""Best-effort scheduled delivery for subscribed tenants."""
+"""Durably queue scheduled delivery for subscribed tenants."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from src.core.infrastructure.logging import log_scheduled_task
 from src.core.integrations.ilink import Credentials, ILinkClient
 from src.core.integrations.images import ImageSource, ImageSourceLoader
 from src.core.services.notification import (
-    NotificationRecipientError,
     NotificationService,
     Recipient,
     TenantRecipientStore,
@@ -47,6 +46,7 @@ class SchedulerService:
         schedule_store: ScheduleStore = None,
         plugins: Optional[List[PlatformPlugin]] = None,
         memory_service: Optional[MemoryService] = None,
+        notification_service: Optional[NotificationService] = None,
     ) -> None:
         self.credentials = credentials
         self.tasks = tasks or []
@@ -73,7 +73,9 @@ class SchedulerService:
         }
         if self.tenant_registry is None or self.schedule_store is None:
             raise ValueError("多用户调度器需要租户注册表和订阅存储")
-        if credentials is not None and recipient_store is not None:
+        if notification_service is not None:
+            self.notification_service = notification_service
+        elif recipient_store is not None:
             self.notification_service = NotificationService(
                 credentials_loader=lambda: self.credentials,
                 recipient_store=self.recipient_store,
@@ -194,24 +196,42 @@ class SchedulerService:
         todo = self._plugins.get("todo")
         if todo is None:
             return False
+        due = getattr(todo, "due_reminders", None)
         claim = getattr(todo, "claim_due_reminders", None)
         finish = getattr(todo, "finish_reminder", None)
-        if claim is None or finish is None:
+        if (due is None and claim is None) or finish is None:
             return False
         any_success = False
-        for event in claim(self.now_provider()):
+        events = due(self.now_provider()) if due is not None else claim(self.now_provider())
+        for event in events:
             tenant_id = str(event["tenant_id"])
             number = int(event["todo_number"])
             try:
-                recipient = self.recipient_store.load(tenant_id)
-                if recipient is None:
-                    raise NotificationRecipientError("用户尚无有效收件地址")
+                enqueue_todo = getattr(
+                    self.notification_service, "enqueue_todo_reminder", None
+                )
+                if callable(enqueue_todo):
+                    enqueue_todo(
+                        tenant_id,
+                        number,
+                        str(event["due_at"]),
+                        str(event["title"]),
+                    )
+                else:
+                    message = "【待办提醒】{} {}".format(
+                        "T{:04d}".format(number), event["title"]
+                    )
+                    self.notification_service.enqueue_text_to_tenant(
+                        tenant_id,
+                        message,
+                        source_type="todo",
+                        source_key="{}:{}".format(number, event["due_at"]),
+                        source_ref=str(number),
+                    )
                 message = "【待办提醒】{} {}".format(
                     "T{:04d}".format(number), event["title"]
                 )
-                self.notification_service.send_text_to(recipient, message)
-                finish(tenant_id, number, True, now=self.now_provider())
-                self.logger("todo_due_reminders", "成功", message, tenant_id)
+                self.logger("todo_due_reminders", "已入队", message, tenant_id)
                 any_success = True
             except Exception as exc:
                 finish(tenant_id, number, False, str(exc), now=self.now_provider())
@@ -246,15 +266,17 @@ class SchedulerService:
                 return status != "skipped"
             if task.action.type == "plugin":
                 return self._run_plugin_task(task, tenant, recipient)
-            if recipient is None:
-                self.logger(task.id, "跳过", "用户尚无有效收件地址", tenant.tenant_id)
-                return False
             if task.condition is not None:
+                if recipient is None:
+                    self.logger(task.id, "跳过", "用户尚无有效收件地址", tenant.tenant_id)
+                    return False
                 return self._run_conditional_task(
                     task, recipient, tenant_id=tenant.tenant_id, tenant=tenant
                 )
-            result, detail = self._deliver_action(task, recipient=recipient, tenant=tenant)
-            self.logger(task.id, "成功", detail, tenant.tenant_id)
+            _, detail = self._deliver_action(
+                task, tenant_id=tenant.tenant_id, tenant=tenant
+            )
+            self.logger(task.id, "已入队", detail, tenant.tenant_id)
             return True
         except Exception as exc:
             self.logger(task.id, "失败", str(exc), tenant.tenant_id)
@@ -280,11 +302,15 @@ class SchedulerService:
             summary = str(result.get("summary", ""))
         elif isinstance(result, str):
             summary = result
-        if recipient is not None and summary:
-            self.notification_service.send_text_to(recipient, summary)
+        if summary:
+            self.notification_service.enqueue_text_to_tenant(
+                tenant.tenant_id,
+                summary,
+                source_type="schedule",
+            )
         self.logger(
             task.id,
-            "成功",
+            "已入队" if summary else "成功",
             "插件={}，工具={}".format(plugin_id, tool_name),
             tenant.tenant_id,
         )
@@ -306,7 +332,12 @@ class SchedulerService:
             return "定时任务触发了一个需要确认的操作，请在对话中回复确认或取消：\n\n" + outcome.text
         return outcome.text
 
-    def _deliver_action(self, task: ScheduledTask, recipient: Recipient, tenant: Optional[TenantContext] = None):
+    def _deliver_action(
+        self,
+        task: ScheduledTask,
+        tenant_id: str,
+        tenant: Optional[TenantContext] = None,
+    ):
         if task.action.type == "image":
             source = (
                 ImageSource.local(Path(task.action.image_path or ""))
@@ -314,16 +345,21 @@ class SchedulerService:
                 else ImageSource.remote(task.action.image_url or "")
             )
             caption = task.action.caption or ""
-            result = self.notification_service.send_image_to(
-                recipient,
+            result = self.notification_service.enqueue_image_to_tenant(
+                tenant_id,
                 source,
-                caption=caption,
+                caption,
+                source_type="schedule",
             )
             detail = "[图片]{}".format(" " + caption if caption else "")
             return result, detail
 
         message = self._message_for_task(task, tenant)
-        result = self.notification_service.send_text_to(recipient, message)
+        result = self.notification_service.enqueue_text_to_tenant(
+            tenant_id,
+            message,
+            source_type="schedule",
+        )
         return result, message
 
     def _run_conditional_task(
@@ -375,6 +411,6 @@ class SchedulerService:
             )
             return False
 
-        result, detail = self._deliver_action(task, recipient=recipient, tenant=tenant)
-        self.logger(task.id, "成功", detail, result.recipient_user_id)
+        _, detail = self._deliver_action(task, tenant_id=tenant_id, tenant=tenant)
+        self.logger(task.id, "已入队", detail, tenant_id)
         return True

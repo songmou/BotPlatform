@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from src.core.services.agent import AgentService
 from src.core.config.loader import load_project_config
@@ -51,6 +54,41 @@ class AgentServiceTests(unittest.TestCase):
         for index in range(7):
             self.service.chat("user", "追加{}".format(index))
         self.assertEqual(len(self.service.histories["user"]), 12)
+
+    def test_authoritative_local_time_is_injected_for_each_request(self) -> None:
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                fixed = cls(
+                    2026,
+                    7,
+                    26,
+                    21,
+                    30,
+                    45,
+                    tzinfo=ZoneInfo("Asia/Shanghai"),
+                )
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        with patch("src.core.services.agent.datetime", FixedDateTime):
+            self.service.chat("user", "今天的待办还没到时间？")
+
+        time_context = self.ollama.calls[0].messages[1]
+        self.assertEqual(time_context.role, "system")
+        self.assertIn("2026-07-26T21:30:45+08:00", time_context.content)
+        self.assertIn("本地时间：21:30:45", time_context.content)
+        self.assertIn("星期日", time_context.content)
+        self.assertIn("作为权威时间基准", time_context.content)
+        self.assertIn("不得根据训练数据、对话历史或自行推测时间", time_context.content)
+
+    def test_direct_todo_scope_only_accepts_high_confidence_queries(self) -> None:
+        self.assertEqual(self.service._direct_todo_scope("待办？"), "pending")
+        self.assertEqual(self.service._direct_todo_scope("已完成的待办"), "completed")
+        self.assertEqual(self.service._direct_todo_scope("已归档待办"), "archived")
+        self.assertEqual(self.service._direct_todo_scope("查看全部待办"), "all")
+        self.assertIsNone(
+            self.service._direct_todo_scope("待办和 Codex 开发任务有什么区别？")
+        )
 
     def test_agent_specific_image_prompt_and_description(self) -> None:
         app = replace(self.config.app, default_agent="image_analyst")

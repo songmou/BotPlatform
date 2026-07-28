@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-LATEST_SCHEMA_VERSION = 11
+LATEST_SCHEMA_VERSION = 15
 
 
 SCHEMA_V1 = r"""
@@ -440,6 +440,175 @@ CREATE INDEX IF NOT EXISTS ix_soul_profiles_dirty
 
 
 SCHEMA_V10 = r"""
+-- Reminder times are one-shot by default. Repair reminders that were already
+-- delivered under v8/v9 but remained pending because is_one_off defaulted to 0.
+UPDATE todos
+SET status='completed',
+    completed_at=COALESCE(
+        (
+            SELECT event.sent_at
+            FROM todo_reminder_events AS event
+            WHERE event.tenant_id=todos.tenant_id
+              AND event.todo_number=todos.todo_number
+        ),
+        updated_at
+    ),
+    updated_at=COALESCE(
+        (
+            SELECT event.sent_at
+            FROM todo_reminder_events AS event
+            WHERE event.tenant_id=todos.tenant_id
+              AND event.todo_number=todos.todo_number
+        ),
+        updated_at
+    ),
+    reminder_at=NULL,
+    is_one_off=1
+WHERE status='pending'
+  AND reminder_at IS NOT NULL
+  AND EXISTS (
+      SELECT 1
+      FROM todo_reminder_events AS event
+      WHERE event.tenant_id=todos.tenant_id
+        AND event.todo_number=todos.todo_number
+        AND event.due_at=todos.reminder_at
+        AND event.delivery_status='sent'
+  );
+
+-- Existing reminders that have not fired yet should follow the corrected
+-- one-shot default as well.
+UPDATE todos
+SET is_one_off=1
+WHERE status='pending' AND reminder_at IS NOT NULL;
+"""
+
+
+SCHEMA_V11 = r"""
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification_id TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    batch_id TEXT NOT NULL,
+    batch_position INTEGER NOT NULL DEFAULT 0,
+    source_type TEXT NOT NULL,
+    source_key TEXT,
+    source_ref TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),
+    text_payload TEXT,
+    image_path TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        delivery_status IN (
+            'pending', 'sending', 'retry', 'waiting_recipient',
+            'sent', 'failed', 'cancelled'
+        )
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    lease_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT,
+    UNIQUE (tenant_id, source_type, source_key)
+);
+CREATE INDEX IF NOT EXISTS ix_notification_outbox_delivery
+    ON notification_outbox(delivery_status, next_attempt_at, lease_expires_at);
+CREATE INDEX IF NOT EXISTS ix_notification_outbox_tenant_order
+    ON notification_outbox(tenant_id, outbox_id);
+"""
+
+SCHEMA_V12_OUTBOX_TABLE = r"""
+CREATE TABLE notification_outbox_v12 (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification_id TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    batch_id TEXT NOT NULL,
+    batch_position INTEGER NOT NULL DEFAULT 0,
+    source_type TEXT NOT NULL,
+    source_key TEXT,
+    source_ref TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),
+    text_payload TEXT,
+    image_path TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        delivery_status IN (
+            'pending', 'sending', 'retry', 'waiting_recipient',
+            'sent', 'failed', 'cancelled'
+        )
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    lease_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT,
+    UNIQUE (tenant_id, source_type, source_key)
+);
+"""
+
+SCHEMA_V13 = r"""
+CREATE TABLE IF NOT EXISTS channel_identities (
+    identity_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE (channel_id, account_id, external_user_id)
+);
+CREATE INDEX IF NOT EXISTS ix_channel_identities_tenant
+    ON channel_identities(tenant_id, last_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS delivery_endpoints (
+    endpoint_id TEXT PRIMARY KEY,
+    identity_id TEXT NOT NULL REFERENCES channel_identities(identity_id)
+        ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    conversation_type TEXT NOT NULL CHECK (
+        conversation_type IN ('direct', 'group', 'channel', 'thread')
+    ),
+    conversation_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL DEFAULT '',
+    route_context_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+        status IN ('active', 'stale', 'disabled')
+    ),
+    last_seen_at TEXT NOT NULL,
+    UNIQUE (
+        channel_id, account_id, conversation_type,
+        conversation_id, recipient_id, thread_id
+    )
+);
+CREATE INDEX IF NOT EXISTS ix_delivery_endpoints_tenant_active
+    ON delivery_endpoints(tenant_id, status, last_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS message_inbox (
+    inbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'processing', 'retry', 'done', 'ignored', 'failed')
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    lease_expires_at TEXT,
+    received_at TEXT NOT NULL,
+    processed_at TEXT,
+    last_error TEXT,
+    UNIQUE (channel_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS ix_message_inbox_delivery
+    ON message_inbox(status, next_attempt_at, lease_expires_at, inbox_id);
+"""
+
+
+SCHEMA_V14 = r"""
 CREATE TABLE IF NOT EXISTS tool_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -458,7 +627,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_audit_tool ON tool_audit_log(tool_name);
 """
 
 
-SCHEMA_V11 = r"""
+SCHEMA_V15 = r"""
 CREATE TABLE IF NOT EXISTS admin_roles (
     role_id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
@@ -488,7 +657,7 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 CREATE INDEX IF NOT EXISTS ix_admin_sessions_user ON admin_sessions(user_id);
 CREATE INDEX IF NOT EXISTS ix_admin_sessions_exp ON admin_sessions(expires_at);
 
-INSERT INTO admin_roles(code, name, permissions, builtin) VALUES
+INSERT OR IGNORE INTO admin_roles(code, name, permissions, builtin) VALUES
     ('admin', '管理员', '["*"]', 1),
     ('editor', '编辑', '["tenants.read","tenants.delete","panel.read","panel.write"]', 1),
     ('viewer', '只读', '["tenants.read","panel.read"]', 1);
@@ -641,6 +810,134 @@ class Database:
                         "VALUES (11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
                     current = 11
+                if current < 12:
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        migrated_version = int(
+                            connection.execute(
+                                "SELECT COALESCE(MAX(version), 0) "
+                                "FROM schema_migrations"
+                            ).fetchone()[0]
+                        )
+                        if migrated_version < 12:
+                            columns = {
+                                str(info[1])
+                                for info in connection.execute(
+                                    "PRAGMA table_info(notification_outbox)"
+                                ).fetchall()
+                            }
+                            connection.execute(
+                                "DROP TABLE IF EXISTS notification_outbox_v12"
+                            )
+                            connection.execute(SCHEMA_V12_OUTBOX_TABLE)
+                            if columns:
+                                target_columns = [
+                                    "notification_id",
+                                    "tenant_id",
+                                    "batch_id",
+                                    "batch_position",
+                                    "source_type",
+                                    "source_key",
+                                    "source_ref",
+                                    "kind",
+                                    "text_payload",
+                                    "image_path",
+                                    "delivery_status",
+                                    "attempt_count",
+                                    "next_attempt_at",
+                                    "lease_expires_at",
+                                    "created_at",
+                                    "sent_at",
+                                    "last_error",
+                                ]
+                                select_columns = [
+                                    column if column in columns else "NULL"
+                                    for column in target_columns
+                                ]
+                                if "outbox_id" in columns:
+                                    target_columns.insert(0, "outbox_id")
+                                    select_columns.insert(0, "outbox_id")
+                                    order_by = "outbox_id"
+                                else:
+                                    order_by = (
+                                        "created_at, batch_position, notification_id"
+                                    )
+                                connection.execute(
+                                    "INSERT INTO notification_outbox_v12({}) "
+                                    "SELECT {} FROM notification_outbox "
+                                    "ORDER BY {}".format(
+                                        ", ".join(target_columns),
+                                        ", ".join(select_columns),
+                                        order_by,
+                                    )
+                                )
+                            connection.execute(
+                                "DROP TABLE IF EXISTS notification_outbox"
+                            )
+                            connection.execute(
+                                "ALTER TABLE notification_outbox_v12 "
+                                "RENAME TO notification_outbox"
+                            )
+                            connection.execute(
+                                "CREATE INDEX IF NOT EXISTS "
+                                "ix_notification_outbox_delivery "
+                                "ON notification_outbox("
+                                "delivery_status, next_attempt_at, lease_expires_at)"
+                            )
+                            connection.execute(
+                                "CREATE INDEX IF NOT EXISTS "
+                                "ix_notification_outbox_tenant_order "
+                                "ON notification_outbox(tenant_id, outbox_id)"
+                            )
+                            connection.execute(
+                                "INSERT INTO schema_migrations(version, applied_at) "
+                                "VALUES (12, "
+                                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                            )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    current = 12
+                if current < 13:
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        connection.executescript(SCHEMA_V13)
+                        outbox_columns = {
+                            str(info[1])
+                            for info in connection.execute(
+                                "PRAGMA table_info(notification_outbox)"
+                            ).fetchall()
+                        }
+                        if "selected_endpoint_id" not in outbox_columns:
+                            connection.execute(
+                                "ALTER TABLE notification_outbox "
+                                "ADD COLUMN selected_endpoint_id TEXT"
+                            )
+                        connection.execute(
+                            "INSERT INTO schema_migrations(version, applied_at) "
+                            "VALUES (13, "
+                            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                    current = 13
+                if current < 14:
+                    connection.executescript(SCHEMA_V14)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 14
+                if current < 15:
+                    connection.executescript(SCHEMA_V15)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (15, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 15
             except sqlite3.Error as exc:
                 raise DatabaseError("无法初始化 SQLite 数据库：{}".format(exc)) from exc
             finally:

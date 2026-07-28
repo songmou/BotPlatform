@@ -42,7 +42,7 @@ def _secure_directory(path: Path) -> None:
 
 
 class TenantRegistry:
-    """Map a bot-scoped WeChat identity to an opaque tenant UUID."""
+    """Manage canonical tenant UUIDs and legacy bot/user identity keys."""
 
     def __init__(self, data_root: Path, database: Optional[Database] = None) -> None:
         self.data_root = data_root.resolve()
