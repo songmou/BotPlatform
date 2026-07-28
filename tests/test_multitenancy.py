@@ -8,6 +8,7 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
+from src.core.bots.base import BotIdentity
 from src.core.config.loader import ScriptDefinition, ToolConfig
 from src.core.integrations.ilink import Credentials
 from src.core.integrations.keychain import KeychainReference, KeychainService
@@ -230,6 +231,8 @@ Path(os.environ['ILINKBOT_SCRIPT_RESULT_FILE']).write_text(
 class TenantCommandTests(unittest.TestCase):
     def test_soul_commands_show_and_rebuild_tenant_profile(self):
         class FakeILink:
+            identity = BotIdentity("ilink", "bot", "owner")
+
             def __init__(self):
                 self.credentials = Credentials(
                     "token", "https://gateway", "bot", "owner"
@@ -307,6 +310,8 @@ class TenantCommandTests(unittest.TestCase):
 
     def test_integration_password_bypasses_transcript(self):
         class FakeILink:
+            identity = BotIdentity("ilink", "bot", "owner")
+
             def __init__(self):
                 self.credentials = Credentials(
                     "token", "https://gateway", "bot", "owner"
@@ -362,6 +367,8 @@ class TenantCommandTests(unittest.TestCase):
 
     def test_commands_subscription_delete_and_explicit_notify_target(self):
         class FakeILink:
+            identity = BotIdentity("ilink", "bot", "owner")
+
             def __init__(self):
                 self.credentials = Credentials(
                     "token", "https://gateway", "bot", "owner"
@@ -435,6 +442,8 @@ class TenantCommandTests(unittest.TestCase):
 
     def test_codex_command_is_routed_directly_to_plugin(self):
         class FakeILink:
+            identity = BotIdentity("ilink", "bot", "owner")
+
             def __init__(self):
                 self.credentials = Credentials(
                     "token", "https://gateway", "bot", "owner"

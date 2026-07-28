@@ -294,3 +294,66 @@ class McpServerUpdate(BaseModel):
     url: Optional[str] = None
     headers: Optional[Dict[str, str]] = None
     enabled: Optional[bool] = None
+
+
+class TenantOverviewOut(BaseModel):
+    tenant_id: str
+    bot_id: str
+    user_id: str
+    created_at: str
+    message_count: int = 0
+    last_active_at: Optional[str] = None
+    model_mode: str = "auto"
+
+
+class TenantDetailOut(TenantOverviewOut):
+    schedule_subscriptions: List[Dict[str, Any]] = []
+    integrations: List[Dict[str, Any]] = []
+    recent_events: List[Dict[str, Any]] = []
+
+
+class AdminRoleOut(BaseModel):
+    role_id: int
+    code: str
+    name: str
+    permissions: List[str]
+    builtin: bool
+
+
+class AdminRoleUpdate(BaseModel):
+    permissions: List[str]
+
+
+class AdminUserOut(BaseModel):
+    user_id: int
+    username: str
+    role: AdminRoleOut
+    disabled: bool
+    created_at: str
+    last_login_at: Optional[str] = None
+
+
+class AdminUserCreate(BaseModel):
+    username: str
+    role_id: int
+    password: Optional[str] = None
+
+
+class AdminUserUpdate(BaseModel):
+    role_id: Optional[int] = None
+    disabled: Optional[bool] = None
+
+
+class PasswordResetOut(BaseModel):
+    user_id: int
+    new_password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class MeOut(BaseModel):
+    user: AdminUserOut
+    permissions: List[str]

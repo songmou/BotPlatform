@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}文档说明 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/docs.css">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>文档说明</h2>
+                <p class="page-desc">BotPlatform 管理面板功能介绍与使用指南</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="doc-body">
+        <section class="doc-card">
+            <h3>概览</h3>
+            <p>BotPlatform 是一套多租户智能体机器人平台。本管理面板用于配置模型、智能体、工具、定时任务，查看会话，并管理接入机器人的终端用户与面板管理员账号。左侧导航对应各功能模块，下面逐一说明。</p>
+        </section>
+
+        <section class="doc-card">
+            <h3>登录与账号</h3>
+            <ul>
+                <li>面板通过<strong>账号 + 密码</strong>登录，登录后使用会话 Cookie 维持状态；点击左下角退出按钮可注销。</li>
+                <li>首次启动会自动创建管理员账号 <code>admin</code>，初始密码打印在启动日志，并保存在 <code>data/system/admin_initial_password</code>，请登录后尽快修改。</li>
+                <li>不同账号按<strong>角色</strong>拥有不同权限，界面会依据权限自动隐藏无权访问的入口。</li>
+            </ul>
+        </section>
+
+        <section class="doc-card">
+            <h3>功能模块</h3>
+
+            <div class="doc-item">
+                <h4>对话</h4>
+                <p>与智能体进行多轮对话调试。可新建/切换/删除会话，支持流式输出、工具调用轨迹展示；可查看历史消息。用于验证智能体配置与效果。</p>
+            </div>
+
+            <div class="doc-item">
+                <h4>模型</h4>
+                <p>管理可用的模型档案（新增、编辑、启用/禁用、切换主模型）。密钥不在此填写，需写入 <code>data/system/model.env</code>；远程模型地址须为 HTTPS，仅本机回环可用 HTTP。</p>
+            </div>
+
+            <div class="doc-item">
+                <h4>智能体</h4>
+                <p>创建与编辑智能体：设置名称、系统提示词、可用工具、技能与 MCP 服务等。智能体的可用工具 = 内置工具 + 插件工具 + 已授权的 MCP 工具。</p>
+            </div>
+
+            <div class="doc-item">
+                <h4>工具</h4>
+                <p>包含多个子项：</p>
+                <ul>
+                    <li><strong>内置工具</strong>：文件读写、命令执行、脚本运行等本机能力，可单独启用/停用与设置是否需要审批。</li>
+                    <li><strong>插件工具</strong>：待办、浏览器自动化、Codex 任务等插件提供的工具。</li>
+                    <li><strong>审计日志</strong>：工具调用记录，便于排查与合规。</li>
+                    <li><strong>Skill 技能</strong>：注入到系统提示的提示片段。</li>
+                    <li><strong>MCP 服务</strong>：接入的 MCP 服务器及其工具，可在线调试。</li>
+                </ul>
+            </div>
+
+            <div class="doc-item">
+                <h4>消息平台</h4>
+                <p>查看已接入的机器人渠道（如微信 iLink）的连接状态。</p>
+            </div>
+
+            <div class="doc-item">
+                <h4>定时任务</h4>
+                <p>管理 cron 定时任务，支持文本、智能体生成、脚本执行、插件调用等动作。修改后自动重载调度，无需重启。</p>
+            </div>
+
+            <div class="doc-item">
+                <h4>用户管理</h4>
+                <ul>
+                    <li><strong>机器人用户</strong>：列出通过机器人接入的终端用户（租户），可查看详情（会话、订阅、集成）并删除其全部数据。</li>
+                    <li><strong>管理员账号</strong>：新建/编辑/停用/删除面板管理员，并为其分配角色；新账号初始密码为 <code>12345</code>，可用"重置密码"生成随机新密码。</li>
+                    <li><strong>角色权限</strong>：查看与编辑各角色的权限（点击角色行弹窗编辑）；内置 admin 角色拥有全部权限且不可修改。</li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="doc-card">
+            <h3>常见问题</h3>
+            <ul>
+                <li><strong>改了配置没生效？</strong> 修改 <code>config/*.json</code> 或后端代码后需完整重启服务（无热重载）；仅定时任务的增删改会自动重载。</li>
+                <li><strong>看不到某些菜单？</strong> 说明当前账号无对应权限，请联系管理员在"角色权限"中调整。</li>
+                <li><strong>局域网访问不了？</strong> 启动时需指定 <code>--host 0.0.0.0</code> 才能被其他机器访问。</li>
+            </ul>
+        </section>
+    </div>
+</div>
+{% endblock %}

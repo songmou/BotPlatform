@@ -16,6 +16,20 @@ from src.core.integrations.ilink import (
 )
 
 
+def inbound_from_raw(msg) -> Optional[InboundMessage]:
+    """Convert a raw iLink message dict to an InboundMessage; None if not a private user message."""
+    if not is_private_user_message(msg):
+        return None
+    text, image_item = extract_text_and_image(msg)
+    return InboundMessage(
+        user_id=str(msg["from_user_id"]),
+        reply_token=str(msg["context_token"]),
+        text=text,
+        image_ref=image_item,
+        raw=msg,
+    )
+
+
 class ILinkAdapter:
     """BotAdapter implementation wrapping the existing ILinkClient."""
 
@@ -64,18 +78,9 @@ class ILinkAdapter:
         )
         messages: List[InboundMessage] = []
         for msg in raw.get("msgs") or []:
-            if not is_private_user_message(msg):
-                continue
-            text, image_item = extract_text_and_image(msg)
-            messages.append(
-                InboundMessage(
-                    user_id=str(msg["from_user_id"]),
-                    reply_token=str(msg["context_token"]),
-                    text=text,
-                    image_ref=image_item,
-                    raw=msg,
-                )
-            )
+            inbound = inbound_from_raw(msg)
+            if inbound is not None:
+                messages.append(inbound)
         return new_cursor, messages
 
     def send_text(self, user_id: str, reply_token: str, text: str) -> None:

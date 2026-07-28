@@ -14,7 +14,7 @@ from src.core.config.loader import load_project_config
 from src.core.infrastructure.diagnostics import check_configuration, print_report
 from src.core.infrastructure.instance_lock import AlreadyRunning, SingleInstanceLock
 from src.core.integrations.images import ImageSource
-from src.core.paths import CONFIG_DIR, CREDENTIALS_PATH, DATA_DIR, INSTANCE_LOCK_PATH
+from src.core.paths import CONFIG_DIR, CREDENTIALS_PATH, DATA_DIR, INSTANCE_LOCK_PATH, SYSTEM_DATA_DIR
 from src.core.plugins.codex_tasks import CodexHookIngestor, CodexTasksConfig
 from src.core.services.notification import (
     NotificationError,
@@ -184,7 +184,26 @@ def run_codex_hook_command(
     return 0
 
 
+def _load_model_env() -> None:
+    """Load API keys from data/system/model.env if present."""
+    import os
+
+    env_file = SYSTEM_DATA_DIR / "model.env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if key and value and not os.environ.get(key):
+                os.environ[key] = value
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    _load_model_env()
     args = parse_args(argv)
     if args.command == "notify":
         return run_notify_command(args)

@@ -358,7 +358,14 @@ class ScriptService:
 
     def _environment(self, run: ScriptRun, result_path: Path) -> Dict[str, str]:
         environment = {}
-        for name in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "NO_PROXY", "no_proxy"):
+        allowed = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "NO_PROXY", "no_proxy"]
+        if os.name == "nt":
+            allowed += [
+                "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+                "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+                "TEMP", "TMP", "USERNAME",
+            ]
+        for name in allowed:
             value = os.environ.get(name)
             if value:
                 environment[name] = value

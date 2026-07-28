@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}工具 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/tools.css">{% endblock %}
 {% block content %}
 <div class="page-container">
     <!-- Skill 技能 -->
@@ -292,5 +293,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/js/tools.js"></script>
 <script>initTools();</script>
 {% endblock %}

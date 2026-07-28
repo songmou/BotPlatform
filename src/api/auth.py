@@ -1,69 +1,37 @@
-"""Token-based authentication for the web management panel."""
+"""Session-based authentication middleware for the web management panel."""
 
 from __future__ import annotations
 
-import secrets
-from pathlib import Path
-
-from fastapi import Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.core.paths import SYSTEM_DATA_DIR
+SESSION_COOKIE = "admin_session"
+SESSION_MAX_AGE = 86400 * 7
 
-TOKEN_FILE = SYSTEM_DATA_DIR / "web_token"
-COOKIE_NAME = "web_token"
-TOKEN_LENGTH = 32
-
-
-def load_or_create_token() -> str:
-    if TOKEN_FILE.exists():
-        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-    token = secrets.token_hex(TOKEN_LENGTH)
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(token, encoding="utf-8")
-    return token
+OPEN_PATHS = {"/api/health", "/static", "/login", "/api/auth/login"}
 
 
-def verify_token(request: Request, token: str | None) -> bool:
-    if not token:
-        return False
-    expected = getattr(request.app.state, "web_token", None)
-    if not expected:
-        return False
-    return secrets.compare_digest(token, expected)
+def _is_open(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in OPEN_PATHS)
 
 
-class TokenAuthMiddleware(BaseHTTPMiddleware):
-    OPEN_PATHS = {"/api/health", "/static"}
-
+class SessionAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if any(path == p or path.startswith(p + "/") for p in self.OPEN_PATHS):
+        if _is_open(path):
             return await call_next(request)
 
-        token = (
-            request.query_params.get("token")
-            or request.cookies.get(COOKIE_NAME)
-            or _bearer_token(request)
-        )
-        if not verify_token(request, token):
+        auth_service = getattr(request.app.state, "admin_auth", None)
+        token = request.cookies.get(SESSION_COOKIE)
+        principal = auth_service.identify(token) if auth_service else None
+        if principal is None:
             if path.startswith("/api/"):
-                return JSONResponse({"detail": "未授权"}, status_code=401)
-            return Response(status_code=401, content="Unauthorized")
+                return JSONResponse({"detail": "未登录"}, status_code=401)
+            login_url = "/login"
+            if path and path != "/":
+                login_url = "/login?next={}".format(path)
+            return RedirectResponse(login_url, status_code=302)
 
-        response = await call_next(request)
-        if request.query_params.get("token") and verify_token(request, token):
-            response.set_cookie(
-                COOKIE_NAME, token, httponly=True, samesite="lax", max_age=86400 * 30
-            )
-        return response
-
-
-def _bearer_token(request: Request) -> str | None:
-    auth = request.headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return None
+        request.state.principal = principal
+        return await call_next(request)

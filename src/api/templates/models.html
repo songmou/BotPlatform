@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}模型管理 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/models.css">{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
@@ -91,5 +92,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/js/models.js"></script>
 <script>initModels();</script>
 {% endblock %}

@@ -231,7 +231,12 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "parameters": _object_schema(),
     },
     "run_script": {
-        "description": "按已注册脚本的审批配置提交固定脚本到后台运行，并返回任务编号。",
+        "description": (
+            "提交已注册的固定脚本到后台异步运行，立即返回任务编号（状态通常为 running）。"
+            "脚本在后台执行，完成后其结果摘要和产物会自动推送给用户，无需你在对话中等待。"
+            "提交成功后应直接告知用户“已提交，结果将在完成后自动发送”，"
+            "不要反复调用 get_script_run 轮询等待完成（会耗尽工具调用轮次）。"
+        ),
         "parameters": _object_schema(
             {
                 "script_id": {"type": "string"},
@@ -245,7 +250,10 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ),
     },
     "get_script_run": {
-        "description": "按任务编号查询固定脚本的运行状态和结果。",
+        "description": (
+            "仅在用户明确要求查询某个任务编号的当前状态时，做一次性状态查询；"
+            "不要用它轮询等待脚本完成，脚本结果会在完成后自动推送。"
+        ),
         "parameters": _object_schema(
             {"run_id": {"type": "string"}}, ["run_id"]
         ),
@@ -389,6 +397,7 @@ class ToolRuntime:
             if not definition or not self.is_available(name):
                 continue
             parameters = copy.deepcopy(definition["parameters"])
+            description = definition["description"]
             if name == "run_command":
                 parameters["properties"]["profile"]["enum"] = list(
                     self.config.enabled_command_profiles
@@ -397,12 +406,23 @@ class ToolRuntime:
                 parameters["properties"]["script_id"]["enum"] = list(
                     self.script_service.script_ids
                 )
+                catalog = "；".join(
+                    "{}＝{}（{}）".format(item.id, item.name, item.description)
+                    if item.description
+                    else "{}＝{}".format(item.id, item.name)
+                    for item in sorted(
+                        self.script_service.definitions.values(),
+                        key=lambda entry: entry.id,
+                    )
+                )
+                if catalog:
+                    description = "{}可用脚本：{}。".format(description, catalog)
             schemas.append(
                 {
                     "type": "function",
                     "function": {
                         "name": name,
-                        "description": definition["description"],
+                        "description": description,
                         "parameters": parameters,
                     },
                 }

@@ -593,6 +593,16 @@ class CodexTaskStore:
                     expires_at,
                 ),
             )
+            connection.execute(
+                "UPDATE codex_task_runs SET phase=?, updated_at=?, last_seen_at=? "
+                "WHERE thread_id=?",
+                (
+                    "waiting_input" if kind == "user_input" else "waiting_approval",
+                    created_at,
+                    created_at,
+                    thread_id,
+                ),
+            )
         return self.get_interaction(interaction_id) or {}
 
     def get_interaction(self, interaction_id: str) -> Optional[Dict[str, Any]]:
@@ -1490,6 +1500,17 @@ class CodexTaskService:
         )
         code = str(interaction["interaction_id"])
         if interaction["status"] != "pending":
+            with self._lock:
+                waiter = self._waiters.get(code)
+                if waiter is None:
+                    waiter = _InteractionWaiter(threading.Event())
+                    self._waiters[code] = waiter
+            waiter.event.wait(1.0)
+            with self._lock:
+                if self._waiters.get(code) is waiter:
+                    self._waiters.pop(code, None)
+            if waiter.response is not None:
+                return waiter.response
             stored_response = interaction.get("response_json")
             if stored_response:
                 try:
@@ -2015,9 +2036,11 @@ class CodexTaskService:
         code = str(interaction["interaction_id"])
         with self._lock:
             waiter = self._waiters.get(code)
-            if waiter is not None:
-                waiter.response = response
-                waiter.event.set()
+            if waiter is None:
+                waiter = _InteractionWaiter(threading.Event())
+                self._waiters[code] = waiter
+            waiter.response = response
+            waiter.event.set()
         labels = {"approved": "已批准", "declined": "已拒绝", "answered": "已提交答案"}
         return "{} Codex 请求 {}。".format(labels[status], code)
 
@@ -2060,10 +2083,13 @@ class CodexTaskService:
         if resolved is None:
             return
         with self._lock:
-            waiter = self._waiters.get(str(interaction["interaction_id"]))
-            if waiter is not None:
-                waiter.response = response
-                waiter.event.set()
+            code = str(interaction["interaction_id"])
+            waiter = self._waiters.get(code)
+            if waiter is None:
+                waiter = _InteractionWaiter(threading.Event())
+                self._waiters[code] = waiter
+            waiter.response = response
+            waiter.event.set()
 
     def close_tenant(self, tenant_id: str) -> None:
         for task in self.store.list(tenant_id, 100, ACTIVE_STATUSES):

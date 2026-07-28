@@ -279,6 +279,13 @@ class WeChatBot:
         self._log("微信输出", user_id, reply)
 
     def handle_message(self, msg: InboundMessage) -> None:
+        if isinstance(msg, dict):
+            from src.core.bots.adapters.ilink import inbound_from_raw
+
+            normalized = inbound_from_raw(msg)
+            if normalized is None:
+                return
+            msg = normalized
         user_id = msg.user_id
         context_token = msg.reply_token
         tenant = self._resolve_tenant(user_id)

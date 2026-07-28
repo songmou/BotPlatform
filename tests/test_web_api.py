@@ -122,6 +122,14 @@ class WebApiTest(unittest.TestCase):
     def setUp(self):
         from src.api.app import create_app
         import src.api.routers.chat as chat_module
+        from pathlib import Path
+        from src.core.services.auth import AdminAuthService
+        from src.core.storage.admin_users import (
+            AdminRoleStore,
+            AdminSessionStore,
+            AdminUserStore,
+        )
+        from src.core.storage.database import Database
 
         self.config = _make_config()
         self.fake_client = FakeClient()
@@ -133,11 +141,33 @@ class WebApiTest(unittest.TestCase):
         self.mock_store = MagicMock()
         self.mock_store.load_context.return_value = []
 
-        self.app = create_app(
-            self.config, self.model_router, self.mock_registry, self.mock_store
+        self._db_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._db_dir.cleanup)
+        database = Database(Path(self._db_dir.name) / "botplatform.sqlite3")
+        self.admin_users = AdminUserStore(database)
+        self.admin_roles = AdminRoleStore(database)
+        self.admin_sessions = AdminSessionStore(database, b"test-secret")
+        self.admin_auth = AdminAuthService(
+            self.admin_users,
+            self.admin_roles,
+            self.admin_sessions,
+            Path(self._db_dir.name),
         )
-        self.app.state.web_token = "test-token"
+        admin_role = self.admin_roles.get_by_code("admin")
+        self.admin_users.create("admin", "password12345", admin_role.role_id)
+
+        self.app = create_app(
+            self.config, self.model_router, self.mock_registry, self.mock_store,
+            admin_auth=self.admin_auth,
+            admin_user_store=self.admin_users,
+            admin_role_store=self.admin_roles,
+        )
         self.client = TestClient(self.app)
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "password12345"},
+        )
+        assert response.status_code == 200, response.text
 
         self._tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp.close()
@@ -150,7 +180,7 @@ class WebApiTest(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(self._tmp.name) and os.remove(self._tmp.name))
 
     def _auth_params(self):
-        return {"token": "test-token"}
+        return {}
 
     def _create_conversation(self):
         response = self.client.post("/api/chat/conversations", params=self._auth_params())
@@ -163,7 +193,10 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
 
     def test_status_requires_auth(self):
-        response = self.client.get("/api/status")
+        from fastapi.testclient import TestClient as _TestClient
+
+        anonymous = _TestClient(self.app)
+        response = anonymous.get("/api/status")
         self.assertEqual(response.status_code, 401)
 
     def test_status_with_auth(self):
@@ -273,9 +306,31 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("agent-list", response.text)
 
-    def test_cookie_set_on_token_param(self):
-        response = self.client.get("/api/status", params=self._auth_params())
-        self.assertIn("web_token", response.cookies)
+    def test_login_sets_session_cookie(self):
+        from fastapi.testclient import TestClient as _TestClient
+
+        client = _TestClient(self.app)
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "password12345"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("admin_session", response.cookies)
+        self.assertEqual(response.json()["user"]["username"], "admin")
+
+    def test_unauthenticated_page_redirects_to_login(self):
+        from fastapi.testclient import TestClient as _TestClient
+
+        anonymous = _TestClient(self.app)
+        response = anonymous.get("/models", follow_redirects=False)
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers["location"].startswith("/login"))
+
+    def test_logout_invalidates_session(self):
+        response = self.client.post("/api/auth/logout")
+        self.assertEqual(response.status_code, 200)
+        response = self.client.get("/api/status")
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

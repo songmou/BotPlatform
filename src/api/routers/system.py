@@ -63,3 +63,15 @@ def page_tools(request: Request):
 def page_plugins(request: Request):
     templates = request.app.state.templates
     return templates.TemplateResponse(name="plugins.html", request=request, context={"active": "plugins"})
+
+
+@router.get("/users", response_class=HTMLResponse)
+def page_users(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(name="users.html", request=request, context={"active": "users"})
+
+
+@router.get("/docs", response_class=HTMLResponse)
+def page_docs(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(name="docs.html", request=request, context={"active": "docs"})

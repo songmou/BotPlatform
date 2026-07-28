@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}智能体管理 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/agents.css">{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
@@ -103,5 +104,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/js/agents.js"></script>
 <script>initAgents();</script>
 {% endblock %}

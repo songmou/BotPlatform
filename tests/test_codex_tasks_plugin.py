@@ -822,6 +822,17 @@ class CodexTasksPluginTests(unittest.TestCase):
         )
         thread_id = created["task_id"]
         wait_for(lambda: plugin.service.store.get(thread_id)["status"] == "completed")
+
+        def retry_recorded():
+            with self.registry.database.read() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM codex_task_events "
+                    "WHERE thread_id=? AND delivery_status='retry'",
+                    (thread_id,),
+                ).fetchone()
+            return row is not None
+
+        wait_for(retry_recorded)
         with self.registry.database.transaction(immediate=True) as connection:
             connection.execute(
                 "UPDATE codex_task_events SET next_attempt_at=? "

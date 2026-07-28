@@ -129,6 +129,36 @@ class TenantRegistry:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def list_overviews(self) -> List[Dict[str, Any]]:
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT t.tenant_id, t.bot_id, t.user_id, t.created_at, "
+                "COALESCE(s.model_mode, 'auto') AS model_mode, "
+                "COALESCE(e.message_count, 0) AS message_count, e.last_active_at "
+                "FROM tenants t "
+                "LEFT JOIN tenant_settings s ON s.tenant_id = t.tenant_id "
+                "LEFT JOIN (SELECT tenant_id, COUNT(*) AS message_count, "
+                "MAX(created_at) AS last_active_at FROM conversation_events "
+                "GROUP BY tenant_id) e ON e.tenant_id = t.tenant_id "
+                "WHERE t.deleting=0 ORDER BY t.created_at"
+            ).fetchall()
+        return [
+            {
+                "tenant_id": str(row["tenant_id"]),
+                "bot_id": str(row["bot_id"]),
+                "user_id": str(row["user_id"]),
+                "created_at": str(row["created_at"]),
+                "model_mode": str(row["model_mode"]),
+                "message_count": int(row["message_count"]),
+                "last_active_at": (
+                    str(row["last_active_at"])
+                    if row["last_active_at"] is not None
+                    else None
+                ),
+            }
+            for row in rows
+        ]
+
     def delete(self, context: TenantContext) -> None:
         self._validate_context(context)
         requested_at = _utc_now()

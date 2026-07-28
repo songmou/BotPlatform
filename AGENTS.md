@@ -1,0 +1,37 @@
+# AGENTS.md
+
+本文件为 AI 智能体在本仓库中工作提供指引。
+
+BotPlatform 是一个微信（iLink）AI 机器人，外加一个 FastAPI Web 管理面板。支持多租户，具备可审批的本机工具、知识库、记忆、定时任务、插件以及 MCP。
+
+## 导入根路径
+- 所有真实代码位于 `src.core.*`（bot/services/storage/tooling/…）与 `src.api.*`（Web 面板）之下。请从这些路径导入，**不要**从 `src.*` 导入。
+- 顶层的 `src/config`、`src/application` 等是空的陈旧目录 —— 请忽略。
+
+## 入口
+- `main.py` → 微信机器人（`src.core.application.cli`）。也可用 `python -m src`。
+- `web.py` → FastAPI 管理面板，默认 `--host 127.0.0.1 --port 8080`。
+- `./start.sh` / `.\start.ps1` 封装 `main.py`；`./start.sh web ...` 运行 `web.py`。
+
+## 配置：无热重载，冻结数据类
+- 修改 `config/*.json` 中的任何内容都需要完整重启进程 —— 没有热重载。
+- 改完代码后，务必确认已真正杀掉旧进程再重启（同端口上残留的旧服务是常见坑）。`web.py`/`uvicorn` 运行时不带 `--reload`。
+- `ProjectConfig` 及所有配置数据类都是 `@dataclass(frozen=True)`。若要就地更新某个运行时字段（例如 API 写入后刷新 `config.mcp_servers`/`config.skills`），请使用 `object.__setattr__(config, "field", value)` —— 直接赋值会抛出 `FrozenInstanceError`。
+
+## 测试
+- 使用标准库 `unittest`，**不是** pytest。运行：`python -m unittest discover -s tests -v`。
+- CI 在 Python 3.10 和 3.12（ubuntu）上运行同一命令。测试无需真实 API Key、Ollama、微信或个人数据。
+- 部分测试仅适用于 POSIX，在 Windows 上会失败（如 `folder/code.py` 这类路径分隔符断言，以及 `0o600`/`0o700` 权限检查）。这些 Windows 失败属于环境问题，并非回归 —— 请以 CI 目标环境的行为为准。
+
+## 密钥与数据
+- `DEEPSEEK_API_KEY` 存放于 `data/system/model.env`（必须是 `0600` 权限，且仅含单个密钥）。微信登录凭证为 `data/system/credentials.json`。
+- 切勿提交、记录密钥，也不要把密钥写入 `config/*.json`。`data/` 已在 gitignore 中。
+
+## 约定
+- 面向用户的字符串以及错误/`HTTPException` 消息一律用中文书写。文档字符串（docstring）和代码注释用英文。
+- 远程 OpenAI 兼容/模型 URL 必须是 HTTPS；仅本机回环（loopback）可用 HTTP。
+
+## 架构说明
+- 内置工具是「名称→字典」的定义，分发到 `_tool_{name}` 方法（而非类）。一个智能体可用的工具 = 内置 + 插件 + MCP。
+- MCP：异步的 `mcp` SDK 通过一个后台事件循环线程桥接到同步运行时；每个服务器连接由一个专属的生命周期任务持有（anyio 要求 transport 的 cancel scope 在同一任务中开启和关闭）。MCP 工具名采用 `{server_id}__{tool_name}` 命名空间。
+- Skill 是注入到系统提示词中的提示片段；MCP 服务器则是真正的工具来源。

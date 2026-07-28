@@ -48,9 +48,15 @@ def main() -> int:
     from src.core.tooling import ToolRuntime
     from src.core.plugins.registry import build_plugins
     from src.core.plugins.base import PluginContext
-    from src.core.paths import PROJECT_ROOT
+    from src.core.paths import PROJECT_ROOT, SYSTEM_DATA_DIR
     from src.api.app import create_app
-    from src.api.auth import TOKEN_FILE
+    from src.core.services.auth import AdminAuthService
+    from src.core.storage.admin_users import (
+        AdminRoleStore,
+        AdminSessionStore,
+        AdminUserStore,
+        load_or_create_session_secret,
+    )
 
     try:
         config = load_project_config(CONFIG_DIR)
@@ -175,6 +181,16 @@ def main() -> int:
     )
     scheduler.start()
 
+    admin_user_store = AdminUserStore(registry.database)
+    admin_role_store = AdminRoleStore(registry.database)
+    admin_session_store = AdminSessionStore(
+        registry.database, load_or_create_session_secret(SYSTEM_DATA_DIR)
+    )
+    admin_auth = AdminAuthService(
+        admin_user_store, admin_role_store, admin_session_store, SYSTEM_DATA_DIR
+    )
+    initial_password = admin_auth.bootstrap_default_admin()
+
     app = create_app(
         config, model_router, registry, conversation_store,
         tool_runtime=tool_runtime,
@@ -182,12 +198,24 @@ def main() -> int:
         plugin_context=plugin_context,
         scheduler=scheduler,
         tool_audit_store=tool_audit_store,
+        admin_auth=admin_auth,
+        admin_user_store=admin_user_store,
+        admin_role_store=admin_role_store,
     )
 
-    token = app.state.web_token
     print("Web 管理面板已启动：http://{}:{}".format(args.host, args.port))
-    print("访问令牌：{}（已保存到 {}）".format(token, TOKEN_FILE))
-    print("浏览器打开：http://{}:{}?token={}".format(args.host, args.port, token))
+    if initial_password:
+        print(
+            "已生成默认管理员账号 admin，初始密码：{}".format(initial_password),
+            file=sys.stderr,
+        )
+        print(
+            "初始密码已保存到 {}，请登录后立即修改并删除该文件。".format(
+                SYSTEM_DATA_DIR / "admin_initial_password"
+            ),
+            file=sys.stderr,
+        )
+    print("浏览器打开 http://{}:{}/login 登录".format(args.host, args.port))
 
     import uvicorn
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-LATEST_SCHEMA_VERSION = 10
+LATEST_SCHEMA_VERSION = 11
 
 
 SCHEMA_V1 = r"""
@@ -458,6 +458,43 @@ CREATE INDEX IF NOT EXISTS idx_tool_audit_tool ON tool_audit_log(tool_name);
 """
 
 
+SCHEMA_V11 = r"""
+CREATE TABLE IF NOT EXISTS admin_roles (
+    role_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    permissions TEXT NOT NULL DEFAULT '[]',
+    builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role_id INTEGER NOT NULL REFERENCES admin_roles(role_id) ON DELETE RESTRICT,
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    session_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES admin_users(user_id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    ip TEXT,
+    user_agent TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_admin_sessions_user ON admin_sessions(user_id);
+CREATE INDEX IF NOT EXISTS ix_admin_sessions_exp ON admin_sessions(expires_at);
+
+INSERT INTO admin_roles(code, name, permissions, builtin) VALUES
+    ('admin', '管理员', '["*"]', 1),
+    ('editor', '编辑', '["tenants.read","tenants.delete","panel.read","panel.write"]', 1),
+    ('viewer', '只读', '["tenants.read","panel.read"]', 1);
+"""
+
+
 class DatabaseError(RuntimeError):
     pass
 
@@ -597,6 +634,13 @@ class Database:
                         "VALUES (10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
                     )
                     current = 10
+                if current < 11:
+                    connection.executescript(SCHEMA_V11)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                    )
+                    current = 11
             except sqlite3.Error as exc:
                 raise DatabaseError("无法初始化 SQLite 数据库：{}".format(exc)) from exc
             finally:

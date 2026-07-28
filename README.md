@@ -4,7 +4,7 @@ BotPlatform 是一个运行在自己电脑上的微信 AI 机器人。它通过�
 
 当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化、Codex 开发任务和个人后台任务。向量检索保持关闭，不需要安装 `bge-m3`。
 
-核心代码位于 `src/` 包：`application/` 负责入口和消息编排，`services/` 承载业务服务，`storage/` 管理 SQLite 与租户数据，`integrations/` 对接微信、图片和向量能力，`infrastructure/` 提供诊断、日志与单实例运行支持。模型、工具和插件分别位于同名子包中，可独立执行的后台任务集中在 `src/core/jobs/`。根目录 `main.py` 仅作为兼容启动入口，也可以使用 `python -m src` 启动。
+核心代码位于 `src/core/*` 与 `src/api/*` 两个包：`src/core/application/` 负责入口与消息编排，`src/core/services/` 承载业务服务，`src/core/storage/` 管理 SQLite 与租户数据，`src/core/integrations/` 对接微信、图片和向量能力，`src/core/infrastructure/` 提供诊断、日志与单实例运行支持，模型、工具、插件分别位于同名子包，可独立执行的后台任务集中在 `src/core/jobs/`；`src/api/` 则是 FastAPI Web 管理面板（路由、鉴权、模板与静态资源）。根目录 `main.py` 启动微信机器人（也可用 `python -m src`），`web.py` 启动 Web 管理面板。请统一从 `src.core.*` / `src.api.*` 导入，顶层的 `src/config`、`src/application` 等为空的陈旧目录。
 
 ## 5 分钟快速开始
 
@@ -238,12 +238,45 @@ ollama pull bge-m3
 
 也可通过 `--stdin` 输入多行文本，或用 `--image-url` 发送远程图片。`notify` 不占用主机器人单实例锁。
 
+## Web 管理面板
+
+除了微信机器人，项目还提供一个 FastAPI Web 管理面板（`web.py`），用于在浏览器中配置与运维。
+
+启动：
+
+```bash
+./start.sh web                          # 默认 127.0.0.1:8080
+./start.sh web --host 0.0.0.0 --port 8080   # 供局域网访问
+```
+
+Windows 或不使用包装脚本时：
+
+```powershell
+python web.py --host 0.0.0.0 --port 8080
+```
+
+- **登录与账号**：面板采用「账号 + 密码」登录并以会话 Cookie 维持状态（无共享 token）。首次启动若无管理员，会自动创建账号 `admin`，初始密码打印在启动日志，并写入 `data/system/admin_initial_password`（权限 `0600`），请登录后尽快修改。会话密钥保存在 `data/system/session_secret`。
+- **访问地址**：浏览器打开 `http://<host>:<port>/login` 登录。
+
+左侧导航对应各功能模块：
+
+- **对话**：与智能体多轮对话调试，支持流式输出与工具调用轨迹；
+- **模型**：管理模型档案（新增、编辑、启用/停用、切换主模型）；密钥仍写入 `data/system/model.env`；
+- **智能体**：编辑名称、系统提示词、可用工具、技能与 MCP；
+- **工具**：内置工具、插件工具、审计日志、Skill 技能、MCP 服务（可在线调试）；
+- **消息平台**：查看已接入机器人渠道的连接状态；
+- **定时任务**：管理 cron 任务，改动自动重载调度；
+- **用户管理**：机器人用户（租户列表/详情/删除）、管理员账号（增删改、分配角色、重置密码，新账号初始密码为 `12345`）、角色权限（点击角色弹窗编辑；内置 admin 拥有全部权限且不可修改）；
+- **文档说明**：面板功能与使用指南。
+
+账号按角色拥有不同权限，界面会依据权限自动隐藏无权访问的入口。面板与机器人同样遵循「无热重载」：修改 `config/*.json` 或后端代码后需重启服务（仅定时任务的增删改会自动重载）。
+
 ## 数据、安全与多租户
 
-- `data/system/botplatform.sqlite3` 保存租户、对话、设置、订阅、知识、记忆、待办和审计；
+- `data/system/botplatform.sqlite3` 保存租户、对话、设置、订阅、知识、记忆、待办和审计；也保存 Web 面板的管理员账号、角色与会话（密码为 PBKDF2 哈希，绝不明文存储）；
 - `data/users/<tenant_uuid>/` 保存每个租户隔离的 `SOUL.md`、workspace 和后台任务产物；
 - `SOUL.md` 是由 SQLite 有效记忆自动生成的紧凑画像，禁止手工编辑；每日扫描遗漏记忆，每周使用当前系统默认模型尝试压缩；
-- 登录凭据和模型 Key 位于 `data/system/`，不进入 SQLite；
+- 登录凭据、模型 Key、面板会话密钥（`session_secret`）与初始管理员密码（`admin_initial_password`）位于 `data/system/`，不进入 SQLite；
 - `data/`、虚拟环境、缓存、日志和系统文件已加入 `.gitignore`；
 - macOS/Linux 上敏感文件使用 `0600`，数据目录使用 `0700`；
 - 模型、工具和插件日志只记录必要元数据，不记录 API Key。
