@@ -46,6 +46,30 @@ def get_tool_audit_store(request: Request):
     return getattr(request.app.state, "tool_audit_store", None)
 
 
+def get_model_analytics_store(request: Request):
+    return getattr(request.app.state, "model_analytics_store", None)
+
+
+def get_script_service(request: Request):
+    return getattr(request.app.state, "script_service", None)
+
+
+def get_script_registry(request: Request):
+    return getattr(request.app.state, "script_registry", None)
+
+
+def get_script_schedule_service(request: Request):
+    return getattr(request.app.state, "script_schedule_service", None)
+
+
+def get_drive_service(request: Request):
+    return getattr(request.app.state, "drive_service", None)
+
+
+def get_drive_audit_store(request: Request):
+    return getattr(request.app.state, "drive_audit_store", None)
+
+
 def get_admin_auth(request: Request) -> "AdminAuthService":
     return request.app.state.admin_auth
 

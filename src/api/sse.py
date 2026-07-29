@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncGenerator, Generator
+from typing import Generator
 
 from fastapi.responses import StreamingResponse
 
@@ -16,8 +16,11 @@ def sse_token(content: str) -> str:
     return sse_event({"type": "token", "content": content})
 
 
-def sse_done(full_text: str) -> str:
-    return sse_event({"type": "done", "full_text": full_text})
+def sse_done(full_text: str, run_id: str | None = None) -> str:
+    payload = {"type": "done", "full_text": full_text}
+    if run_id:
+        payload["run_id"] = run_id
+    return sse_event(payload)
 
 
 def sse_error(message: str) -> str:

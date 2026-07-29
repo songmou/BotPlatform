@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Request
@@ -16,6 +17,8 @@ from src.api.schemas import (
     TaskConditionOut,
 )
 from src.core.paths import CONFIG_DIR
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
@@ -38,6 +41,7 @@ def _task_to_out(task) -> ScheduleTaskOut:
         script_id=task.action.script_id,
         plugin_id=task.action.plugin_id,
         tool_name=task.action.tool_name,
+        parameters=dict(task.action.parameters),
     )
     condition = None
     if task.condition:
@@ -82,8 +86,8 @@ def _reload_scheduler(request: Request) -> None:
         config = get_config(request)
         try:
             scheduler.reload_tasks(list(config.schedules))
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - config is saved; reload takes effect on restart
+            logger.warning("重载定时任务失败，重启后生效", exc_info=True)
 
 
 def _validate_cron(cron: str) -> None:
@@ -115,6 +119,23 @@ def _validate_action(action_data: dict) -> None:
             raise HTTPException(status_code=400, detail="plugin 动作需要 tool_name 字段")
 
 
+def _action_parameters(config, action_data: dict) -> dict:
+    parameters = action_data.get("parameters", {})
+    if not isinstance(parameters, dict):
+        raise HTTPException(status_code=400, detail="动作 parameters 必须是 JSON 对象")
+    if action_data.get("type") != "script":
+        return dict(parameters)
+    script_id = action_data.get("script_id")
+    definition = config.scripts.get(script_id)
+    if definition is None:
+        raise HTTPException(status_code=400, detail="引用了不存在的脚本：{}".format(script_id))
+    from src.core.config.loader import validate_script_parameters
+    try:
+        return validate_script_parameters(definition, parameters)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _task_to_json(task, action, condition) -> dict:
     task_data = {
         "id": task.id,
@@ -132,6 +153,7 @@ def _task_to_json(task, action, condition) -> dict:
                 "script_id": action.script_id,
                 "plugin_id": action.plugin_id,
                 "tool_name": action.tool_name,
+                "parameters": action.parameters,
             }.items() if v is not None
         },
     }
@@ -196,6 +218,7 @@ def create_schedule(body: ScheduleTaskCreate, request: Request):
         script_id=body.action.get("script_id"),
         plugin_id=body.action.get("plugin_id"),
         tool_name=body.action.get("tool_name"),
+        parameters=_action_parameters(config, body.action),
     )
 
     condition = None
@@ -266,6 +289,7 @@ def update_schedule(task_id: str, body: ScheduleTaskUpdate, request: Request):
             script_id=body.action.get("script_id"),
             plugin_id=body.action.get("plugin_id"),
             tool_name=body.action.get("tool_name"),
+            parameters=_action_parameters(config, body.action),
         )
     else:
         action = task.action

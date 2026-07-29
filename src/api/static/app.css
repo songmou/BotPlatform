@@ -307,7 +307,8 @@ body {
 }
 
 /* Messages */
-.message-row {
+.message-row,
+.trace-container {
     max-width: 960px;
     margin: 0 auto;
     padding: 0 24px;
@@ -515,7 +516,7 @@ body {
 
 /* Tool call trace */
 .trace-container {
-    margin: 0 0 8px;
+    margin: 0 auto 8px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -1339,6 +1340,16 @@ body {
     color: #ffcf3f;
 }
 
+.badge-danger {
+    background: #fdecea;
+    color: #b91c1c;
+}
+
+[data-theme="dark"] .badge-danger {
+    background: #3f1d1d;
+    color: #f87171;
+}
+
 .text-muted {
     color: var(--text-muted);
     font-size: 12px;
@@ -1652,17 +1663,45 @@ body {
     transform: translateX(12px);
 }
 
-.tool-audit-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
+#tool-audit-table {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
 }
 
-.tool-audit-row:last-child {
-    border-bottom: none;
+.tool-audit-head,
+.tool-audit-row {
+    display: grid;
+    grid-template-columns: 140px minmax(150px, 1.5fr) 70px minmax(140px, 1fr) 70px 20px;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+}
+
+.tool-audit-head {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.tool-audit-entry + .tool-audit-entry {
+    border-top: 1px solid var(--border);
+}
+
+.tool-audit-row {
+    font-size: 13px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.tool-audit-row::-webkit-details-marker {
+    display: none;
+}
+
+.tool-audit-row:hover {
+    background: var(--bg-hover);
 }
 
 .audit-ts {
@@ -1675,7 +1714,17 @@ body {
 .audit-tool {
     font-size: 13px;
     font-weight: 600;
-    min-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.audit-owner {
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .audit-duration {
@@ -1684,17 +1733,92 @@ body {
     white-space: nowrap;
 }
 
-.audit-error {
-    color: #dc2626;
+.audit-chevron {
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+}
+
+.tool-audit-entry[open] .audit-chevron {
+    transform: rotate(90deg);
+}
+
+.audit-detail {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px 16px;
+    padding: 14px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.audit-detail > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.audit-detail span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.audit-detail code,
+.audit-detail strong {
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
     font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
+    font-weight: 400;
+}
+
+.audit-detail-error {
+    color: #dc2626 !important;
+}
+
+.audit-loading,
+.audit-error-state {
+    padding: 28px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.audit-error-state {
+    color: #dc2626;
 }
 
 .audit-row-fail {
     background: rgba(220, 38, 38, 0.04);
+}
+
+@media (max-width: 900px) {
+    .tool-audit-head,
+    .tool-audit-row {
+        grid-template-columns: 130px minmax(130px, 1fr) 70px 70px 20px;
+    }
+
+    .audit-owner,
+    .audit-head-owner {
+        display: none;
+    }
+}
+
+@media (max-width: 620px) {
+    .tool-audit-head {
+        display: none;
+    }
+
+    .tool-audit-row {
+        grid-template-columns: minmax(0, 1fr) 70px 20px;
+    }
+
+    .audit-ts,
+    .audit-owner,
+    .audit-duration {
+        display: none;
+    }
+
+    .audit-detail {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Responsive */
@@ -1718,7 +1842,7 @@ body {
     .conv-sidebar {
         display: none;
     }
-    .chat-input-area, .message-row {
+    .chat-input-area, .message-row, .trace-container {
         padding-left: 16px;
         padding-right: 16px;
     }

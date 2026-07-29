@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -10,13 +11,22 @@ from src.api.deps import get_config, get_plugin_context, get_tool_audit_store, g
 from src.api.schemas import PluginOut, PluginToolOut, PluginUpdate, ToolStateUpdate
 from src.core.paths import CONFIG_DIR, DATA_DIR
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 
 tools_router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 TOOL_CATEGORIES = [
-    ("知识库", ["knowledge_add_text", "knowledge_index_file", "knowledge_search", "knowledge_list", "knowledge_delete"]),
-    ("文件系统", ["list_allowed_roots", "list_directory", "find_files", "search_text", "read_text_file", "get_path_info", "create_directory", "write_text_file", "replace_text", "copy_path", "move_path", "move_to_trash"]),
+    ("知识库", [
+        "knowledge_add_text", "knowledge_index_file", "knowledge_search",
+        "knowledge_list", "knowledge_delete",
+    ]),
+    ("文件系统", [
+        "list_allowed_roots", "list_directory", "find_files", "search_text",
+        "read_text_file", "get_path_info", "create_directory", "write_text_file",
+        "replace_text", "copy_path", "move_path", "move_to_trash",
+    ]),
     ("系统信息", ["get_current_time", "get_system_info", "get_disk_usage", "list_processes"]),
     ("命令执行", ["run_command"]),
     ("脚本", ["list_scripts", "run_script", "get_script_run"]),
@@ -126,8 +136,8 @@ def update_plugin(plugin_id: str, body: PluginUpdate, request: Request):
         try:
             new_plugins = build_plugins(config.plugins, context=plugin_context)
             tool_runtime.reload_plugins(new_plugins)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - config is saved; reload takes effect on restart
+            logger.warning("热重载插件失败，重启后生效", exc_info=True)
 
     return _build_plugin_out(plugin_id, config)
 
@@ -213,11 +223,22 @@ def list_tool_audit(
     request: Request,
     limit: int = 50,
     tool: str = None,
+    status: str = None,
     offset: int = 0,
 ):
+    if status is not None and status not in {"成功", "失败"}:
+        raise HTTPException(status_code=422, detail="状态仅支持“成功”或“失败”")
+    # Clamp pagination inputs to sane bounds instead of failing the request.
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     store = get_tool_audit_store(request)
     if store is None:
         return {"items": [], "total": 0}
-    items = store.list_recent(limit=limit, tool_name=tool, offset=offset)
-    total = store.count(tool_name=tool)
+    items = store.list_recent(
+        limit=limit,
+        tool_name=tool,
+        offset=offset,
+        status=status,
+    )
+    total = store.count(tool_name=tool, status=status)
     return {"items": items, "total": total}

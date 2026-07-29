@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from src.core.messaging import (
     RecipientUnavailable,
 )
 from src.core.storage.tenants import (
+    ConversationStore,
     TenantContext,
     TenantRegistry,
     TenantStoreError,
@@ -690,6 +692,7 @@ class NotificationService:
         image_loader: Optional[ImageSourceLoader] = None,
         message_router: Optional[MessageRouter] = None,
         address_store: Optional[ChannelAddressStore] = None,
+        conversation_store: Optional[ConversationStore] = None,
     ) -> None:
         self.credentials_loader = credentials_loader
         self.recipient_store = recipient_store
@@ -697,10 +700,41 @@ class NotificationService:
         self.image_loader = image_loader or ImageSourceLoader()
         self.message_router = message_router
         self.address_store = address_store
+        self.conversation_store = conversation_store
         self.outbox = NotificationOutboxStore(
             recipient_store.registry,
         )
         self.outbox.cleanup_orphan_images()
+
+    def _record_delivered_context(
+        self,
+        tenant_id: str,
+        content: str,
+        *,
+        image: bool = False,
+        idempotency_key: str = "",
+    ) -> None:
+        if self.conversation_store is None:
+            return
+        delivery_key = (
+            "notification:{}".format(idempotency_key)
+            if idempotency_key
+            else ""
+        )
+        try:
+            self.conversation_store.record_outbound_message(
+                tenant_id,
+                content,
+                image=image,
+                delivery_key=delivery_key,
+            )
+        except (OSError, sqlite3.Error, TenantStoreError):
+            LOGGER.exception("记录已送达主动消息的对话上下文失败 tenant=%s", tenant_id)
+
+    def _conversation_lock(self, tenant_id: str):
+        if self.conversation_store is None:
+            return nullcontext()
+        return self.conversation_store.lock_for(tenant_id)
 
     @staticmethod
     def _source_key(base: Optional[str], position: int, count: int) -> Optional[str]:
@@ -1030,28 +1064,36 @@ class NotificationService:
         """Send to an explicit tenant; never fall back to a last-active user."""
         if not isinstance(message, str) or not message.strip():
             raise NotificationError("通知内容不能为空")
-        if self.message_router is not None and self.address_store is not None:
-            selected = endpoint or self.address_store.latest_endpoint(
+        with self._conversation_lock(tenant_id):
+            if self.message_router is not None and self.address_store is not None:
+                selected = endpoint or self.address_store.latest_endpoint(
+                    tenant_id,
+                    channel_id=channel_id,
+                )
+                if selected is None:
+                    raise NotificationRecipientError("该用户尚无有效的消息收件地址")
+                result = self._deliver_endpoint(
+                    selected,
+                    OutboundMessage(
+                        text=message,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
+            else:
+                credentials = self._load_credentials()
+                try:
+                    recipient = self.recipient_store.load(tenant_id)
+                except (RecipientStoreError, TypeError) as exc:
+                    raise NotificationRecipientError(str(exc)) from exc
+                if recipient is None:
+                    raise NotificationRecipientError("该用户尚无有效的微信收件地址")
+                result = self._deliver(credentials, recipient, message)
+            self._record_delivered_context(
                 tenant_id,
-                channel_id=channel_id,
+                message,
+                idempotency_key=idempotency_key,
             )
-            if selected is None:
-                raise NotificationRecipientError("该用户尚无有效的消息收件地址")
-            return self._deliver_endpoint(
-                selected,
-                OutboundMessage(
-                    text=message,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        credentials = self._load_credentials()
-        try:
-            recipient = self.recipient_store.load(tenant_id)
-        except (RecipientStoreError, TypeError) as exc:
-            raise NotificationRecipientError(str(exc)) from exc
-        if recipient is None:
-            raise NotificationRecipientError("该用户尚无有效的微信收件地址")
-        return self._deliver(credentials, recipient, message)
+        return result
 
     def send_image_to(
         self,
@@ -1074,33 +1116,45 @@ class NotificationService:
         idempotency_key: str = "",
     ) -> NotificationResult:
         """Send an image to an explicit tenant recipient."""
-        if self.message_router is not None and self.address_store is not None:
-            selected = endpoint or self.address_store.latest_endpoint(
+        with self._conversation_lock(tenant_id):
+            if self.message_router is not None and self.address_store is not None:
+                selected = endpoint or self.address_store.latest_endpoint(
+                    tenant_id,
+                    channel_id=channel_id,
+                )
+                if selected is None:
+                    raise NotificationRecipientError("该用户尚无有效的消息收件地址")
+                try:
+                    image_bytes = self.image_loader.load(source)
+                except ImageSourceError as exc:
+                    raise NotificationImageError(str(exc)) from exc
+                result = self._deliver_endpoint(
+                    selected,
+                    OutboundMessage(
+                        text=caption,
+                        image_bytes=image_bytes,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
+            else:
+                credentials = self._load_credentials()
+                try:
+                    recipient = self.recipient_store.load(tenant_id)
+                except (RecipientStoreError, TypeError) as exc:
+                    raise NotificationRecipientError(str(exc)) from exc
+                if recipient is None:
+                    raise NotificationRecipientError("该用户尚无有效的微信收件地址")
+                result = self._deliver_image(credentials, recipient, source, caption)
+            context = "[主动推送图片]"
+            if caption.strip():
+                context += "\n" + caption
+            self._record_delivered_context(
                 tenant_id,
-                channel_id=channel_id,
+                context,
+                image=True,
+                idempotency_key=idempotency_key,
             )
-            if selected is None:
-                raise NotificationRecipientError("该用户尚无有效的消息收件地址")
-            try:
-                image_bytes = self.image_loader.load(source)
-            except ImageSourceError as exc:
-                raise NotificationImageError(str(exc)) from exc
-            return self._deliver_endpoint(
-                selected,
-                OutboundMessage(
-                    text=caption,
-                    image_bytes=image_bytes,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        credentials = self._load_credentials()
-        try:
-            recipient = self.recipient_store.load(tenant_id)
-        except (RecipientStoreError, TypeError) as exc:
-            raise NotificationRecipientError(str(exc)) from exc
-        if recipient is None:
-            raise NotificationRecipientError("该用户尚无有效的微信收件地址")
-        return self._deliver_image(credentials, recipient, source, caption)
+        return result
 
     def _load_credentials(self) -> Credentials:
         if self.credentials_loader is None:

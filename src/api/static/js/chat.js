@@ -29,12 +29,12 @@ function initChat() {
                 });
             })
             .then(function (data) {
-                allAgents = data.agents;
-                selectedAgentIds = data.agents
+                allAgents = data.agents.filter(function (a) { return a.enabled !== false; });
+                selectedAgentIds = allAgents
                     .filter(function (a) { return a.id === data.activeId; })
                     .map(function (a) { return a.id; });
-                if (selectedAgentIds.length === 0 && data.agents.length > 0) {
-                    selectedAgentIds = [data.agents[0].id];
+                if (selectedAgentIds.length === 0 && allAgents.length > 0) {
+                    selectedAgentIds = [allAgents[0].id];
                 }
                 renderAgentDropdown();
                 updateAgentLabel();
@@ -306,6 +306,37 @@ function initChat() {
         if (welcome) welcome.style.display = "none";
     }
 
+    function renderMarkdown(target, content) {
+        var source = typeof content === "string" ? content : String(content || "");
+        try {
+            if (!window.marked || typeof window.marked.parse !== "function" ||
+                    !window.DOMPurify || typeof window.DOMPurify.sanitize !== "function") {
+                throw new Error("Markdown 渲染依赖不可用");
+            }
+            var parsed = window.marked.parse(source, { async: false });
+            target.innerHTML = window.DOMPurify.sanitize(parsed, {
+                USE_PROFILES: { html: true },
+            });
+            target.classList.remove("markdown-fallback");
+            target.querySelectorAll("a[href]").forEach(function (link) {
+                var href = link.getAttribute("href");
+                try {
+                    var url = new URL(href, window.location.href);
+                    if ((url.protocol === "http:" || url.protocol === "https:") &&
+                            url.origin !== window.location.origin) {
+                        link.target = "_blank";
+                        link.rel = "noopener noreferrer";
+                    }
+                } catch (e) {
+                    link.removeAttribute("href");
+                }
+            });
+        } catch (error) {
+            target.textContent = source;
+            target.classList.add("markdown-fallback");
+        }
+    }
+
     function appendMessage(role, content, animate, agentName) {
         hideWelcome();
         var row = document.createElement("div");
@@ -327,7 +358,7 @@ function initChat() {
         if (role === "assistant") {
             var contentDiv = document.createElement("div");
             contentDiv.className = "bubble-content";
-            contentDiv.innerHTML = marked.parse(content);
+            renderMarkdown(contentDiv, content);
             bubble.appendChild(contentDiv);
             contentEl = contentDiv;
         } else {
@@ -429,6 +460,45 @@ function initChat() {
         return actions;
     }
 
+    function addFeedbackActions(row, runId) {
+        if (!runId) return;
+        var actions = row.querySelector(".msg-actions");
+        if (!actions || actions.querySelector("[data-feedback]")) return;
+        ["good", "bad"].forEach(function (rating) {
+            var btn = document.createElement("button");
+            btn.className = "msg-action-btn";
+            btn.setAttribute("data-feedback", rating);
+            btn.innerHTML = rating === "good" ? "<span>👍 好评</span>" : "<span>👎 差评</span>";
+            btn.addEventListener("click", function () {
+                var reasons = [];
+                var comment = "";
+                if (rating === "bad") {
+                    var reason = window.prompt(
+                        "差评原因：答非所问、事实错误、格式表达、工具执行失败、响应过慢、其他",
+                        "答非所问"
+                    );
+                    if (reason === null) return;
+                    reasons = [reason.trim() || "其他"];
+                    comment = window.prompt("补充说明（可选，最多 500 字）", "") || "";
+                }
+                fetch("/api/model-runs/" + encodeURIComponent(runId) + "/feedback", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ rating: rating, reasons: reasons, comment: comment }),
+                }).then(function (r) {
+                    if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                    row.querySelectorAll("[data-feedback]").forEach(function (item) {
+                        item.classList.toggle("selected", item.getAttribute("data-feedback") === rating);
+                    });
+                    showToast("感谢反馈", "success");
+                }).catch(function (err) {
+                    showToast("提交反馈失败：" + err.message, "error");
+                });
+            });
+            actions.appendChild(btn);
+        });
+    }
+
     function setRegenerate(row, getText, userText) {
         if (activeRegenBtn && activeRegenBtn.parentElement) activeRegenBtn.remove();
         var actions = row.querySelector(".msg-actions");
@@ -466,6 +536,7 @@ function initChat() {
         var streamContentEl = null;
         var fullText = "";
         var inSummary = false;
+        var currentRunId = null;
         var activeAgentName = null;
         if (ids.length >= 1) {
             var matched = allAgents.filter(function (a) { return a.id === ids[0]; })[0];
@@ -591,17 +662,18 @@ function initChat() {
             } else if (ev.type === "token") {
                 fullText += ev.content;
                 if (streamContentEl) {
-                    streamContentEl.innerHTML = marked.parse(fullText);
+                    renderMarkdown(streamContentEl, fullText);
                 }
                 scrollToBottom();
             } else if (ev.type === "error") {
                 fullText += "\n\n⚠️ " + ev.message;
                 if (streamContentEl) {
-                    streamContentEl.innerHTML = marked.parse(fullText);
+                    renderMarkdown(streamContentEl, fullText);
                 }
                 showToast(ev.message, "error");
             } else if (ev.type === "done") {
                 fullText = ev.full_text || fullText;
+                currentRunId = ev.run_id || currentRunId;
             }
         }
 
@@ -668,6 +740,7 @@ function initChat() {
             if (summaryRow) {
                 var getText = function () { return fullText; };
                 addAssistantActions(summaryRow, getText);
+                addFeedbackActions(summaryRow, currentRunId);
                 setRegenerate(summaryRow, getText, userText);
             }
             if (sourcesData.length > 0 && summaryRow) {
@@ -754,4 +827,3 @@ function initChat() {
         }
     });
 }
-

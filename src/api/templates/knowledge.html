@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}知识库 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/knowledge.css">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>知识库</h2>
+                <p class="page-desc">按租户管理私人知识：上传 TXT/Markdown/PDF/Word/Excel/PPT 文档或录入文本，自动分块建立检索索引</p>
+            </div>
+            <div class="knowledge-toolbar">
+                <select id="knowledge-tenant"></select>
+                <button id="knowledge-reindex-btn" class="btn-secondary">重建向量索引</button>
+                <button id="knowledge-add-text-btn" class="btn-secondary">+ 录入文本</button>
+                <button id="knowledge-upload-btn" class="btn-primary">+ 上传文档</button>
+                <input type="file" id="knowledge-file-input" style="display:none"
+                       accept=".txt,.md,.markdown,.pdf,.docx,.xlsx,.pptx">
+            </div>
+        </div>
+    </div>
+
+    <div id="knowledge-status" class="status-card" style="display:none"></div>
+
+    <div class="knowledge-search-bar">
+        <input type="text" id="knowledge-search-input" placeholder="输入关键词测试检索效果">
+        <button id="knowledge-search-btn" class="btn-secondary">检索测试</button>
+    </div>
+    <div id="knowledge-search-results"></div>
+
+    <div class="table-scroll">
+        <table class="data-table" id="knowledge-table">
+            <thead>
+                <tr>
+                    <th>名称</th>
+                    <th>类型</th>
+                    <th>状态</th>
+                    <th>分块数</th>
+                    <th>更新时间</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="knowledge-table-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Manual text modal -->
+<div id="knowledge-text-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>录入文本知识</h3>
+            <button id="knowledge-text-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="knowledge-text-form" class="modal-body">
+            <div class="form-group">
+                <label for="knowledge-text-name">知识名称</label>
+                <input type="text" id="knowledge-text-name" required placeholder="如 产品FAQ">
+            </div>
+            <div class="form-group">
+                <label for="knowledge-text-content">内容（最多 20000 字符）</label>
+                <textarea id="knowledge-text-content" rows="10" required placeholder="粘贴要保存到知识库的纯文本，支持 Markdown 标题分节"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="knowledge-text-modal-cancel" class="btn-secondary">取消</button>
+                <button type="submit" class="btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/knowledge.js"></script>
+<script>initKnowledge();</script>
+{% endblock %}

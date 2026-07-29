@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -26,6 +27,14 @@ class ConfigError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ModelPricing:
+    input_per_million: str
+    output_per_million: str
+    cached_input_per_million: Optional[str] = None
+    reasoning_output_per_million: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ModelProfile:
     id: str
     enabled: bool
@@ -40,6 +49,8 @@ class ModelProfile:
     api_key_env: Optional[str] = None
     request_extra: Dict[str, Any] = field(default_factory=dict)
     assistant_passthrough_fields: List[str] = field(default_factory=list)
+    billing_currency: str = "CNY"
+    pricing: Optional[ModelPricing] = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,9 @@ BUILTIN_TOOL_NAMES = {
     "list_scripts",
     "run_script",
     "get_script_run",
+    "cancel_script_run",
+    "list_script_schedules",
+    "manage_script_schedule",
     "knowledge_add_text",
     "knowledge_index_file",
     "knowledge_search",
@@ -154,6 +168,7 @@ class AgentPreset:
     description: str
     system_prompt: str
     capabilities: List[Capability]
+    enabled: bool = True
     image_prompt: Optional[str] = None
     tools: List[str] = field(default_factory=list)
     skills: List[str] = field(default_factory=list)
@@ -200,23 +215,41 @@ class ScriptDefinition:
     data_directory: str = ""
     parameters: Dict[str, ScriptParameter] = field(default_factory=dict)
     artifact_types: List[str] = field(default_factory=list)
+    runtime: str = "python"
+    working_directory: str = ""
+    sha256: str = ""
+    enabled: bool = True
+    external: bool = False
+    env_allowlist: List[str] = field(default_factory=list)
+    concurrency_scope: str = "tenant"
+    concurrency_key: str = ""
 
 
 def validate_script_parameters(
     definition: ScriptDefinition, raw: Dict[str, Any]
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("脚本参数必须是 JSON 对象")
     unknown = sorted(set(raw) - set(definition.parameters))
     if unknown:
         raise ValueError("包含未知参数：{}".format("、".join(unknown)))
-    normalized: Dict[str, str] = {}
+    normalized: Dict[str, Any] = {}
     for name, spec in definition.parameters.items():
         if name not in raw:
             if spec.required:
                 raise ValueError("缺少必填参数：{}".format(name))
             continue
         value = raw[name]
+        if spec.type == "boolean":
+            if not isinstance(value, bool):
+                raise ValueError("参数 {} 必须是布尔值".format(name))
+            normalized[name] = value
+            continue
+        if spec.type == "integer":
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError("参数 {} 必须是整数".format(name))
+            normalized[name] = value
+            continue
         if not isinstance(value, str) or not value.strip():
             raise ValueError("参数 {} 必须是非空字符串".format(name))
         value = value.strip()
@@ -264,6 +297,21 @@ class ProjectConfig:
     skills: List[Dict[str, Any]] = field(default_factory=list)
     mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
     channels: Dict[str, ChannelConfig] = field(default_factory=dict)
+
+    def update_skills(self, skills: List[Dict[str, Any]]) -> None:
+        """Validate and apply a runtime skills update.
+
+        The list object is mutated in place so every holder of the original
+        reference (AgentService, chat router) observes the change without
+        bypassing the frozen dataclass contract.
+        """
+        self.skills[:] = validate_skill_entries(skills, "运行时 skills 更新")
+
+    def update_mcp_servers(self, servers: List[Dict[str, Any]]) -> None:
+        """Validate and apply a runtime MCP server list update in place."""
+        self.mcp_servers[:] = validate_mcp_server_entries(
+            servers, "运行时 mcp_servers 更新"
+        )
 
     @property
     def active_agent(self) -> AgentPreset:
@@ -524,7 +572,18 @@ def _validate_model_url(value: str, field_path: str, path: Path) -> str:
 
 def _load_models(path: Path) -> Dict[str, ModelProfile]:
     data = _load_json(path)
-    _reject_unknown(data, {"profiles"}, path)
+    _reject_unknown(data, {"billing", "profiles"}, path)
+    raw_billing = data.get("billing", {})
+    if not isinstance(raw_billing, dict):
+        raise _error(path, "billing", "必须是 JSON 对象")
+    _reject_unknown(raw_billing, {"currency"}, path, "billing")
+    currency = raw_billing.get("currency", "CNY")
+    if (
+        not isinstance(currency, str)
+        or not re.fullmatch(r"[A-Z]{3}", currency.strip())
+    ):
+        raise _error(path, "billing.currency", "必须是三个大写字母的币种代码")
+    currency = currency.strip()
     raw_profiles = data.get("profiles")
     if not isinstance(raw_profiles, dict) or not raw_profiles:
         raise _error(path, "profiles", "必须是非空 JSON 对象")
@@ -538,7 +597,7 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
         _reject_unknown(raw, {
             "enabled", "type", "provider", "base_url", "api_key_env", "model",
             "temperature", "max_tokens", "timeout_seconds", "capabilities",
-            "request_extra", "assistant_passthrough_fields",
+            "request_extra", "assistant_passthrough_fields", "pricing",
         }, path, field_base)
         enabled = raw.get("enabled")
         if not isinstance(enabled, bool):
@@ -629,6 +688,53 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
                 )
             normalized_fields.append(value)
 
+        pricing = None
+        raw_pricing = raw.get("pricing")
+        if raw_pricing is not None:
+            if not isinstance(raw_pricing, dict):
+                raise _error(path, field_base + ".pricing", "必须是 JSON 对象")
+            _reject_unknown(
+                raw_pricing,
+                {
+                    "input_per_million",
+                    "cached_input_per_million",
+                    "output_per_million",
+                    "reasoning_output_per_million",
+                },
+                path,
+                field_base + ".pricing",
+            )
+            normalized_pricing: Dict[str, Optional[str]] = {}
+            for key in (
+                "input_per_million",
+                "output_per_million",
+                "cached_input_per_million",
+                "reasoning_output_per_million",
+            ):
+                value = raw_pricing.get(key)
+                if value is None and key in {
+                    "cached_input_per_million",
+                    "reasoning_output_per_million",
+                }:
+                    normalized_pricing[key] = None
+                    continue
+                try:
+                    decimal_value = Decimal(str(value))
+                except (InvalidOperation, ValueError):
+                    raise _error(
+                        path,
+                        "{}.pricing.{}".format(field_base, key),
+                        "必须是大于或等于 0 的十进制数",
+                    )
+                if not decimal_value.is_finite() or decimal_value < 0:
+                    raise _error(
+                        path,
+                        "{}.pricing.{}".format(field_base, key),
+                        "必须是大于或等于 0 的十进制数",
+                    )
+                normalized_pricing[key] = format(decimal_value, "f")
+            pricing = ModelPricing(**normalized_pricing)
+
         if adapter_type == "ollama":
             override_url = os.getenv("OLLAMA_BASE_URL")
             if override_url:
@@ -652,6 +758,8 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
             api_key_env=api_key_env,
             request_extra=dict(request_extra),
             assistant_passthrough_fields=normalized_fields,
+            billing_currency=currency,
+            pricing=pricing,
         )
     return profiles
 
@@ -680,8 +788,11 @@ def _load_agent(path: Path) -> AgentPreset:
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
         "capabilities", "tools", "skills", "mcp_servers", "model", "greeting",
-        "greeting_hints", "temperature", "max_tokens",
+        "greeting_hints", "temperature", "max_tokens", "enabled",
     }, path)
+    enabled = data.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise _error(path, "enabled", "必须是布尔值")
     capabilities_data = data.get("capabilities")
     if not isinstance(capabilities_data, list) or not capabilities_data:
         raise _error(path, "capabilities", "必须是非空数组")
@@ -769,6 +880,7 @@ def _load_agent(path: Path) -> AgentPreset:
         role=_required_string(data, "role", path),
         description=_required_string(data, "description", path),
         system_prompt=_required_string(data, "system_prompt", path),
+        enabled=enabled,
         image_prompt=_optional_string(data, "image_prompt", path),
         capabilities=capabilities,
         tools=tools,
@@ -959,8 +1071,12 @@ def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]
             ):
                 raise _error(path, field_name, "必须是具名 JSON 对象")
             parameter_type = parameter_data.get("type")
-            if parameter_type not in {"string", "date"}:
-                raise _error(path, field_name + ".type", "仅支持 string 或 date")
+            if parameter_type not in {"string", "date", "integer", "boolean"}:
+                raise _error(
+                    path,
+                    field_name + ".type",
+                    "仅支持 string、date、integer 或 boolean",
+                )
             required = parameter_data.get("required", False)
             positional = parameter_data.get("positional", False)
             flag = parameter_data.get("flag")
@@ -973,6 +1089,8 @@ def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]
                 raise _error(path, field_name + ".flag", "必须是 -- 开头的字符串")
             if positional == (flag is not None):
                 raise _error(path, field_name, "必须且只能设置 positional=true 或 flag")
+            if parameter_type == "boolean" and positional:
+                raise _error(path, field_name, "boolean 参数只能使用 flag")
             if not isinstance(choices, list) or any(
                 not isinstance(choice, str) or not choice for choice in choices
             ):
@@ -1280,24 +1398,133 @@ def _load_schedules(
     return tasks
 
 
+RUNTIME_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+KNOWN_MCP_TRANSPORTS = {"stdio", "sse", "streamablehttp", "http"}
+
+_SKILL_FIELDS = {"id", "name", "description", "prompt", "enabled"}
+_MCP_SERVER_FIELDS = {
+    "id", "name", "transport", "command", "args", "env", "url",
+    "headers", "enabled",
+}
+
+
+def _entry_error(source: Any, field: str, message: str) -> ConfigError:
+    return ConfigError("{}: 字段 {} {}".format(source, field, message))
+
+
+def _validated_entry_id(entry: Dict[str, Any], field: str, source: Any) -> str:
+    value = entry.get("id")
+    if not isinstance(value, str) or not RUNTIME_ID_PATTERN.match(value):
+        raise _entry_error(
+            source, field, "必须是以小写字母开头、仅含小写字母/数字/下划线的字符串"
+        )
+    return value
+
+
+def _validated_string_map(
+    entry: Dict[str, Any], key: str, field: str, source: Any
+) -> None:
+    value = entry.get(key)
+    if value is None:
+        return
+    if not isinstance(value, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
+    ):
+        raise _entry_error(source, field, "必须是字符串到字符串的对象")
+
+
+def validate_skill_entries(entries: Any, source: Any) -> List[Dict[str, Any]]:
+    """Validate a raw skills list; used at load time and on runtime updates."""
+    if not isinstance(entries, list):
+        raise _entry_error(source, "skills", "必须是数组")
+    validated: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        field = "skills[{}]".format(index)
+        if not isinstance(entry, dict):
+            raise _entry_error(source, field, "必须是对象")
+        unknown = sorted(set(entry) - _SKILL_FIELDS)
+        if unknown:
+            raise _entry_error(source, field, "包含未知字段：{}".format(", ".join(unknown)))
+        skill_id = _validated_entry_id(entry, field + ".id", source)
+        if skill_id in seen:
+            raise _entry_error(source, field + ".id", "不能重复：{}".format(skill_id))
+        seen.add(skill_id)
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise _entry_error(source, field + ".name", "必须是非空字符串")
+        for key in ("description", "prompt"):
+            if key in entry and not isinstance(entry[key], str):
+                raise _entry_error(source, "{}.{}".format(field, key), "必须是字符串")
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise _entry_error(source, field + ".enabled", "必须是布尔值")
+        validated.append(dict(entry))
+    return validated
+
+
+def validate_mcp_server_entries(entries: Any, source: Any) -> List[Dict[str, Any]]:
+    """Validate a raw MCP server list; used at load time and on runtime updates."""
+    if not isinstance(entries, list):
+        raise _entry_error(source, "servers", "必须是数组")
+    validated: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        field = "servers[{}]".format(index)
+        if not isinstance(entry, dict):
+            raise _entry_error(source, field, "必须是对象")
+        unknown = sorted(set(entry) - _MCP_SERVER_FIELDS)
+        if unknown:
+            raise _entry_error(source, field, "包含未知字段：{}".format(", ".join(unknown)))
+        server_id = _validated_entry_id(entry, field + ".id", source)
+        if server_id in seen:
+            raise _entry_error(source, field + ".id", "不能重复：{}".format(server_id))
+        seen.add(server_id)
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise _entry_error(source, field + ".name", "必须是非空字符串")
+        transport = entry.get("transport", "stdio")
+        if transport not in KNOWN_MCP_TRANSPORTS:
+            raise _entry_error(
+                source,
+                field + ".transport",
+                "必须是 {} 之一".format("、".join(sorted(KNOWN_MCP_TRANSPORTS))),
+            )
+        if transport == "stdio":
+            command = entry.get("command")
+            if not isinstance(command, str) or not command.strip():
+                raise _entry_error(source, field + ".command", "stdio 模式必须是非空字符串")
+        else:
+            url = entry.get("url")
+            if not isinstance(url, str) or not url.strip():
+                raise _entry_error(
+                    source, field + ".url", "{} 模式必须是非空字符串".format(transport)
+                )
+        args = entry.get("args")
+        if args is not None and (
+            not isinstance(args, list)
+            or any(not isinstance(item, str) for item in args)
+        ):
+            raise _entry_error(source, field + ".args", "必须是字符串数组")
+        _validated_string_map(entry, "env", field + ".env", source)
+        _validated_string_map(entry, "headers", field + ".headers", source)
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise _entry_error(source, field + ".enabled", "必须是布尔值")
+        validated.append(dict(entry))
+    return validated
+
+
 def _load_skills(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
     data = _load_json(path)
-    skills = data.get("skills", [])
-    if not isinstance(skills, list):
-        raise _error(path, "skills", "必须是数组")
-    return skills
+    return validate_skill_entries(data.get("skills", []), path)
 
 
 def _load_mcp_servers(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
     data = _load_json(path)
-    servers = data.get("servers", [])
-    if not isinstance(servers, list):
-        raise _error(path, "servers", "必须是数组")
-    return servers
+    return validate_mcp_server_entries(data.get("servers", []), path)
 
 
 def load_project_config(config_dir: Path) -> ProjectConfig:
@@ -1341,6 +1568,12 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
     if app.default_agent not in agents:
         raise ConfigError(
             "{}: default_agent 引用了不存在的 Agent：{}".format(
+                config_dir / "app.json", app.default_agent
+            )
+        )
+    if not agents[app.default_agent].enabled:
+        raise ConfigError(
+            "{}: 默认 Agent {} 必须启用".format(
                 config_dir / "app.json", app.default_agent
             )
         )

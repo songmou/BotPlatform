@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from src.api.deps import get_config
 from src.api.schemas import SkillCreate, SkillOut, SkillUpdate
+from src.core.config.loader import ConfigError
 from src.core.paths import CONFIG_DIR
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
@@ -28,6 +29,15 @@ def _save(skills: list) -> None:
         json.dumps({"skills": skills}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _apply_and_save(request: Request, skills: list) -> None:
+    """Validate, apply to the live config in place, then persist to disk."""
+    try:
+        get_config(request).update_skills(skills)
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _save(skills)
 
 
 def _to_out(item: dict) -> SkillOut:
@@ -60,8 +70,7 @@ def create_skill(body: SkillCreate, request: Request):
         "enabled": body.enabled,
     }
     skills.append(item)
-    _save(skills)
-    object.__setattr__(get_config(request), "skills", skills)
+    _apply_and_save(request, skills)
     return _to_out(item)
 
 
@@ -78,8 +87,7 @@ def update_skill(skill_id: str, body: SkillUpdate, request: Request):
                 s["prompt"] = body.prompt
             if body.enabled is not None:
                 s["enabled"] = body.enabled
-            _save(skills)
-            object.__setattr__(get_config(request), "skills", skills)
+            _apply_and_save(request, skills)
             return _to_out(s)
     raise HTTPException(status_code=404, detail="技能不存在")
 
@@ -90,6 +98,5 @@ def delete_skill(skill_id: str, request: Request):
     filtered = [s for s in skills if s["id"] != skill_id]
     if len(filtered) == len(skills):
         raise HTTPException(status_code=404, detail="技能不存在")
-    _save(filtered)
-    object.__setattr__(get_config(request), "skills", filtered)
+    _apply_and_save(request, filtered)
     return {"status": "ok"}

@@ -10,14 +10,20 @@ from array import array
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.integrations.embeddings import EmbeddingClient, EmbeddingError
+from src.core.services.document_extract import (
+    DOCUMENT_SUFFIXES,
+    extract_document_text,
+)
 from src.core.storage.tenants import TenantContext, TenantRegistry
 
 
 MAX_TEXT_CHARACTERS = 20_000
 MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+TEXT_SUFFIXES = {".txt", ".md", ".markdown"}
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
 
@@ -115,14 +121,22 @@ class KnowledgeService:
         candidate = candidate.resolve(strict=True)
         if workspace not in candidate.parents or not candidate.is_file():
             raise ValueError("知识文件必须位于当前租户 workspace 内")
-        if candidate.suffix.lower() not in {".txt", ".md", ".markdown"}:
-            raise ValueError("知识文件仅支持 TXT 或 Markdown")
-        if candidate.stat().st_size > MAX_FILE_BYTES:
-            raise ValueError("知识文件不能超过 5 MiB")
-        try:
-            content = candidate.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("知识文件必须是 UTF-8 文本") from exc
+        suffix = candidate.suffix.lower()
+        if suffix in TEXT_SUFFIXES:
+            if candidate.stat().st_size > MAX_FILE_BYTES:
+                raise ValueError("知识文件不能超过 5 MiB")
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("知识文件必须是 UTF-8 文本") from exc
+        elif suffix in DOCUMENT_SUFFIXES:
+            if candidate.stat().st_size > MAX_DOCUMENT_BYTES:
+                raise ValueError("知识文档不能超过 20 MiB")
+            content = extract_document_text(candidate)
+        else:
+            raise ValueError(
+                "知识文件仅支持 TXT、Markdown、PDF、Word(docx)、Excel(xlsx) 或 PPT(pptx)"
+            )
         relative = candidate.relative_to(workspace).as_posix()
         return self._index(tenant.tenant_id, "file", relative, relative, content)
 
@@ -344,7 +358,14 @@ class KnowledgeService:
                     connection.execute(
                         "INSERT OR REPLACE INTO knowledge_embeddings(chunk_id, model_id, dimensions, "
                         "vector, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (row["chunk_id"], self.embedding.profile.id, len(vector), array("f", vector).tobytes(), row["content_hash"], _now()),
+                        (
+                            row["chunk_id"],
+                            self.embedding.profile.id,
+                            len(vector),
+                            array("f", vector).tobytes(),
+                            row["content_hash"],
+                            _now(),
+                        ),
                     )
                     completed += 1
         with self.registry.database.transaction(immediate=True) as connection:

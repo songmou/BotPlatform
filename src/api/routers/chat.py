@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +12,13 @@ from typing import Generator, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from src.api.deps import get_config, get_conversation_store, get_registry, get_router
+from src.api.deps import (
+    get_config,
+    get_conversation_store,
+    get_model_analytics_store,
+    get_registry,
+    get_router,
+)
 from src.api.schemas import ChatHistoryItem, ChatHistoryResponse, ChatRequest
 from src.api.sse import (
     sse_agent_done,
@@ -27,11 +34,20 @@ from src.api.sse import (
     sse_tool_result,
     streaming_response,
 )
-from src.core.modeling.contracts import CanonicalMessage, GenerationOptions, ModelError, ModelRequest
+from src.core.modeling.contracts import (
+    CanonicalMessage,
+    GenerationOptions,
+    ModelCallContext,
+    ModelError,
+    ModelRequest,
+)
 from src.core.paths import SYSTEM_DATA_DIR
 from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
+from src.core.storage.tenants import TenantContext
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+logger = logging.getLogger(__name__)
 
 WEB_BOT_ID = "web"
 CONVERSATIONS_FILE = SYSTEM_DATA_DIR / "web_conversations.json"
@@ -81,10 +97,9 @@ def _touch_conversation(conv_id: str, user_text: Optional[str]) -> None:
     _save_conversations(convs)
 
 
-def _resolve_conv_tenant(request: Request, conv_id: str) -> str:
+def _resolve_conv_tenant(request: Request, conv_id: str) -> TenantContext:
     registry = get_registry(request)
-    context = registry.resolve(WEB_BOT_ID, conv_id)
-    return context.tenant_id
+    return registry.resolve(WEB_BOT_ID, conv_id)
 
 
 PLANNER_PROMPT = (
@@ -114,14 +129,24 @@ def _extract_plan_json(text: str):
         return None
 
 
-def _make_plan(user_message: str, agents: list, model_router) -> Optional[List[dict]]:
+def _make_plan(
+    user_message: str,
+    agents: list,
+    model_router,
+    context: ModelCallContext,
+) -> Optional[List[dict]]:
     agents_desc = "\n".join(
         "- id: {}, 名称: {}, 描述: {}".format(a.id, a.name, a.description) for a in agents
     )
     prompt = PLANNER_PROMPT.format(agents=agents_desc, request=user_message)
     client = model_router.clients[model_router.primary_profile_id]
     response = client.complete(
-        ModelRequest(messages=[CanonicalMessage("user", prompt)])
+        ModelRequest(
+            messages=[CanonicalMessage("user", prompt)],
+            context=ModelCallContext(
+                **{**context.__dict__, "operation": "planner", "agent_id": None}
+            ),
+        )
     )
     plan = _extract_plan_json(response.message.content)
     if not isinstance(plan, list) or not plan:
@@ -139,7 +164,16 @@ def _make_plan(user_message: str, agents: list, model_router) -> Optional[List[d
     return valid or None
 
 
-def _run_agent(agent, subtask: str, history: list, model_router, skills: list) -> str:
+def _run_agent(
+    agent,
+    subtask: str,
+    history: list,
+    model_router,
+    skills: list,
+    context: ModelCallContext,
+    tool_runtime=None,
+    tenant: Optional[TenantContext] = None,
+) -> str:
     messages = [CanonicalMessage("system", build_system_prompt(agent, skills))]
     messages.extend(history)
     messages.append(CanonicalMessage("user", subtask))
@@ -148,8 +182,121 @@ def _run_agent(agent, subtask: str, history: list, model_router, skills: list) -
         agent_model if agent_model and agent_model in model_router.clients else None
     )
     session = model_router.session("auto", start_profile_id=start_profile)
-    response = session.complete(ModelRequest(messages=messages))
-    return response.message.content
+    generation = GenerationOptions(
+        temperature=getattr(agent, "temperature", None),
+        max_tokens=getattr(agent, "max_tokens", None),
+    )
+    call_context = ModelCallContext(
+        **{
+            **context.__dict__,
+            "operation": "agent_subtask",
+            "agent_id": agent.id,
+        }
+    )
+
+    tool_names = resolve_tool_names(agent, tool_runtime) if tool_runtime else []
+    tool_schemas = []
+    if tool_runtime and tenant and tool_names and session.capabilities.tools:
+        try:
+            tool_runtime.bind_tenant(tenant)
+            tool_schemas = tool_runtime.schemas(tool_names)
+        except Exception as exc:
+            raise ModelError(
+                "多智能体工具初始化失败：{}".format(str(exc)),
+                provider=session.identity.provider,
+            ) from exc
+
+    if not tool_schemas:
+        response = session.complete(
+            ModelRequest(
+                messages=messages,
+                generation=generation,
+                context=call_context,
+            )
+        )
+        answer = response.message.content.strip()
+        if not answer:
+            raise ModelError(
+                "智能体 {} 没有返回文字".format(agent.name),
+                provider=session.identity.provider,
+            )
+        return answer
+
+    allowed_tool_names = {
+        schema["function"]["name"]
+        for schema in tool_schemas
+        if isinstance(schema, dict)
+        and isinstance(schema.get("function"), dict)
+        and isinstance(schema["function"].get("name"), str)
+    }
+    max_rounds = tool_runtime.config.max_tool_rounds
+    max_calls = tool_runtime.config.max_total_tool_calls
+    rounds_used = 0
+    total_calls = 0
+
+    while rounds_used < max_rounds:
+        response = session.complete(
+            ModelRequest(
+                messages=messages,
+                generation=generation,
+                tools=tool_schemas,
+                context=call_context,
+            )
+        )
+        rounds_used += 1
+        model_message = response.message
+        raw_calls = model_message.tool_calls
+        if not raw_calls:
+            answer = model_message.content.strip()
+            if not answer:
+                raise ModelError(
+                    "智能体 {} 结束工具循环时没有返回文字".format(agent.name),
+                    provider=session.identity.provider,
+                )
+            return answer
+
+        if total_calls + len(raw_calls) > max_calls:
+            return "本次子任务需要的工具步骤超过安全上限，请缩小问题范围后重试。"
+
+        # One assistant message may contain multiple parallel tool calls. It
+        # must appear exactly once before the corresponding tool results.
+        messages.append(model_message)
+        total_calls += len(raw_calls)
+        for call in raw_calls:
+            tool_name = call.name or "unknown"
+            tool_args = call.arguments if isinstance(call.arguments, dict) else {}
+            if tool_name not in allowed_tool_names:
+                result_payload = {
+                    "ok": False,
+                    "error": "该智能体无权调用工具：{}".format(tool_name),
+                }
+            else:
+                try:
+                    if tool_runtime.requires_approval(tool_name, tool_args):
+                        result_payload = {
+                            "ok": False,
+                            "error": (
+                                "多智能体模式暂不执行需要确认的工具：{}；"
+                                "请改用支持审批的交互渠道完成该操作。"
+                            ).format(tool_name),
+                        }
+                    else:
+                        tool_runtime.bind_tenant(tenant)
+                        result_payload = tool_runtime.execute(
+                            tool_name, tool_args
+                        ).payload()
+                except Exception as exc:
+                    result_payload = {"ok": False, "error": str(exc)}
+
+            messages.append(
+                CanonicalMessage(
+                    role="tool",
+                    content=json.dumps(result_payload, ensure_ascii=False),
+                    tool_call_id=call.call_id,
+                )
+            )
+
+    return "本次子任务达到工具调用轮次上限，请缩小问题范围后重试。"
 
 
 def _orchestrate(
@@ -159,15 +306,19 @@ def _orchestrate(
     model_router,
     store,
     tenant_id: str,
+    tenant: TenantContext,
     conv_id: str,
     skills: list,
+    tool_runtime,
+    analytics_store,
+    context: ModelCallContext,
 ) -> Generator[str, None, None]:
     agents_by_id = {a.id: a for a in agents}
     try:
         if len(agents) <= 2:
             plan = [{"agent_id": a.id, "subtask": user_message} for a in agents]
         else:
-            plan = _make_plan(user_message, agents, model_router)
+            plan = _make_plan(user_message, agents, model_router, context)
             if plan is None:
                 plan = [{"agent_id": a.id, "subtask": user_message} for a in agents]
 
@@ -184,7 +335,15 @@ def _orchestrate(
             for idx, item in enumerate(plan):
                 agent = agents_by_id[item["agent_id"]]
                 future = executor.submit(
-                    _run_agent, agent, item["subtask"], history, model_router, skills
+                    _run_agent,
+                    agent,
+                    item["subtask"],
+                    history,
+                    model_router,
+                    skills,
+                    context,
+                    tool_runtime,
+                    tenant,
                 )
                 future_to_idx[future] = idx
 
@@ -227,17 +386,37 @@ def _orchestrate(
         full_summary = ""
         if hasattr(summary_client, "complete_stream"):
             for chunk in summary_client.complete_stream(
-                ModelRequest(messages=[CanonicalMessage("user", summary_prompt)])
+                ModelRequest(
+                    messages=[CanonicalMessage("user", summary_prompt)],
+                    context=ModelCallContext(
+                        **{
+                            **context.__dict__,
+                            "operation": "summary",
+                            "agent_id": None,
+                        }
+                    ),
+                )
             ):
                 full_summary += chunk
                 yield sse_token(chunk)
         else:
             resp = summary_client.complete(
-                ModelRequest(messages=[CanonicalMessage("user", summary_prompt)])
+                ModelRequest(
+                    messages=[CanonicalMessage("user", summary_prompt)],
+                    context=ModelCallContext(
+                        **{
+                            **context.__dict__,
+                            "operation": "summary",
+                            "agent_id": None,
+                        }
+                    ),
+                )
             )
             full_summary = resp.message.content
             yield sse_token(full_summary)
-        yield sse_done(full_summary)
+        if analytics_store is not None:
+            analytics_store.finish_run(context.run_id or "", "success")
+        yield sse_done(full_summary, context.run_id)
 
         updated = list(history)
         updated.append(CanonicalMessage("user", user_message))
@@ -247,8 +426,16 @@ def _orchestrate(
         store.append_transcript(tenant_id, "assistant", full_summary)
         _touch_conversation(conv_id, user_message)
     except ModelError as exc:
+        if analytics_store is not None:
+            analytics_store.finish_run(
+                context.run_id or "", "failed", error_category="model_error"
+            )
         yield sse_error(exc.safe_message)
     except Exception as exc:
+        if analytics_store is not None:
+            analytics_store.finish_run(
+                context.run_id or "", "failed", error_category=exc.__class__.__name__
+            )
         yield sse_error("编排执行出错：{}".format(str(exc)))
 
 
@@ -281,8 +468,8 @@ def delete_conversation(conv_id: str, request: Request):
     try:
         context = registry.resolve(WEB_BOT_ID, conv_id)
         registry.delete(context)
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - conversation entry is already removed
+        logger.warning("删除会话租户数据失败：%s", conv_id, exc_info=True)
     return {"status": "ok"}
 
 
@@ -295,7 +482,28 @@ def chat(body: ChatRequest, request: Request):
     conv_id = body.conversation_id
     if not conv_id or _find_conversation(conv_id) is None:
         raise HTTPException(status_code=400, detail="缺少有效的会话 ID")
-    tenant_id = _resolve_conv_tenant(request, conv_id)
+    tenant = _resolve_conv_tenant(request, conv_id)
+    tenant_id = tenant.tenant_id
+    analytics_store = get_model_analytics_store(request)
+    selected_agent_id = body.agent_id or config.app.default_agent
+    run_id = (
+        analytics_store.start_run(
+            tenant_id=tenant_id,
+            source="web",
+            agent_id=selected_agent_id,
+            conversation_id=conv_id,
+        )
+        if analytics_store is not None
+        else None
+    )
+    call_context = ModelCallContext(
+        run_id=run_id,
+        tenant_id=tenant_id,
+        source="web",
+        operation="answer",
+        agent_id=selected_agent_id,
+        conversation_id=conv_id,
+    )
 
     history = store.load_context(tenant_id)
 
@@ -304,16 +512,29 @@ def chat(body: ChatRequest, request: Request):
         agents = []
         for aid in agent_ids:
             agent = config.agents.get(aid)
-            if agent is not None:
+            if agent is not None and agent.enabled:
                 agents.append(agent)
         if not agents:
             agents = [config.active_agent]
         return streaming_response(
-            _orchestrate(body.message, agents, history, model_router, store, tenant_id, conv_id, config.skills)
+            _orchestrate(
+                body.message,
+                agents,
+                history,
+                model_router,
+                store,
+                tenant_id,
+                tenant,
+                conv_id,
+                config.skills,
+                getattr(request.app.state, "tool_runtime", None),
+                analytics_store,
+                call_context,
+            )
         )
 
     agent = config.agents.get(body.agent_id or config.app.default_agent)
-    if agent is None:
+    if agent is None or not agent.enabled:
         agent = config.active_agent
 
     if body.regenerate:
@@ -359,6 +580,7 @@ def chat(body: ChatRequest, request: Request):
     tool_schemas = []
     if tool_runtime and agent_tools:
         try:
+            tool_runtime.bind_tenant(tenant)
             tool_schemas = tool_runtime.schemas(agent_tools)
         except Exception:
             tool_schemas = []
@@ -383,17 +605,23 @@ def chat(body: ChatRequest, request: Request):
 
             def stream_final(msgs):
                 nonlocal full_text
-                req = ModelRequest(messages=msgs, generation=generation)
+                req = ModelRequest(
+                    messages=msgs,
+                    generation=generation,
+                    context=ModelCallContext(
+                        **{**call_context.__dict__, "operation": "answer"}
+                    ),
+                )
                 if hasattr(client, "complete_stream"):
                     for chunk in client.complete_stream(req):
                         full_text += chunk
                         yield sse_token(chunk)
-                    yield sse_done(full_text)
+                    yield sse_done(full_text, run_id)
                 else:
                     resp = session.complete(req)
                     full_text = resp.message.content.strip()
                     yield sse_token(full_text)
-                    yield sse_done(full_text)
+                    yield sse_done(full_text, run_id)
 
             if not tool_schemas:
                 yield from stream_final(current_messages)
@@ -404,6 +632,9 @@ def chat(body: ChatRequest, request: Request):
                         messages=current_messages,
                         generation=generation,
                         tools=tool_schemas,
+                        context=ModelCallContext(
+                            **{**call_context.__dict__, "operation": "tool_loop"}
+                        ),
                     )
                     response = session.complete(current_request)
 
@@ -430,6 +661,7 @@ def chat(body: ChatRequest, request: Request):
                         yield sse_tool_call(tool_name, tool_args)
 
                         try:
+                            tool_runtime.bind_tenant(tenant)
                             result = tool_runtime.execute(tool_name, tool_args)
                             result_payload = result.payload()
                         except Exception as exc:
@@ -457,9 +689,23 @@ def chat(body: ChatRequest, request: Request):
                 store.append_transcript(tenant_id, "user", body.message)
             store.append_transcript(tenant_id, "assistant", full_text)
             _touch_conversation(conv_id, body.message if not body.regenerate else None)
+            if analytics_store is not None:
+                analytics_store.finish_run(run_id or "", "success")
+        except GeneratorExit:
+            if analytics_store is not None:
+                analytics_store.finish_run(run_id or "", "cancelled")
+            raise
         except ModelError as exc:
+            if analytics_store is not None:
+                analytics_store.finish_run(
+                    run_id or "", "failed", error_category="model_error"
+                )
             yield sse_error(exc.safe_message)
         except Exception as exc:
+            if analytics_store is not None:
+                analytics_store.finish_run(
+                    run_id or "", "failed", error_category=exc.__class__.__name__
+                )
             yield sse_error("对话出错：{}".format(str(exc)))
 
     return streaming_response(generate())
@@ -470,8 +716,8 @@ def chat_history(request: Request, conversation_id: Optional[str] = None):
     if not conversation_id or _find_conversation(conversation_id) is None:
         return ChatHistoryResponse(messages=[])
     store = get_conversation_store(request)
-    tenant_id = _resolve_conv_tenant(request, conversation_id)
-    messages = store.load_context(tenant_id)
+    tenant = _resolve_conv_tenant(request, conversation_id)
+    messages = store.load_context(tenant.tenant_id)
     return ChatHistoryResponse(
         messages=[ChatHistoryItem(role=m.role, content=m.content) for m in messages]
     )

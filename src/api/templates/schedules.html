@@ -13,6 +13,18 @@
     </div>
     <div id="schedule-status" class="status-card"></div>
     <div id="schedule-list" class="card-grid"></div>
+
+    <div class="page-header" style="margin-top:28px">
+        <div>
+            <h2>租户脚本自动化</h2>
+            <p class="page-desc">创建时一次授权，之后按计划无人值守执行</p>
+        </div>
+        <div class="page-header-row">
+            <select id="script-schedule-tenant"></select>
+            <button id="create-script-schedule-btn" class="btn-primary">+ 新建脚本计划</button>
+        </div>
+    </div>
+    <div id="script-schedule-list" class="card-grid"></div>
 </div>
 
 <!-- Modal -->
@@ -71,6 +83,10 @@
                 <label for="action-tool-name" style="margin-top:8px">工具名称</label>
                 <input type="text" id="action-tool-name" placeholder="如 todo_manage">
             </div>
+            <div class="form-group" id="action-parameters-group" style="display:none">
+                <label for="action-parameters">动作参数（JSON 对象）</label>
+                <textarea id="action-parameters" rows="5" class="code-input">{}</textarea>
+            </div>
             <div class="form-group">
                 <label class="checkbox-label"><input type="checkbox" id="schedule-condition-enabled"> 启用条件触发（不活跃时触发）</label>
             </div>
@@ -91,8 +107,29 @@
         </form>
     </div>
 </div>
+
+<div id="script-schedule-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="script-schedule-modal-title">新建脚本计划</h3>
+            <button id="script-schedule-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="script-schedule-form" class="modal-body">
+            <div class="form-group" id="script-schedule-id-group">
+                <label for="script-schedule-id">计划 ID</label>
+                <input id="script-schedule-id" required pattern="^[a-z][a-z0-9_]{0,63}$">
+            </div>
+            <div class="form-group"><label for="script-schedule-script">脚本</label><select id="script-schedule-script"></select></div>
+            <div class="form-group"><label for="script-schedule-crons">Cron（每行一个）</label><textarea id="script-schedule-crons" rows="3" placeholder="0 3 * * *" required></textarea><small>时区：Asia/Shanghai</small></div>
+            <div id="script-schedule-parameters"></div>
+            <label class="checkbox-label"><input id="script-schedule-enabled" type="checkbox" checked> 启用并授权无人值守执行</label>
+            <div class="status-card">保存即确认当前脚本版本和参数；脚本内容变化后计划会自动暂停。</div>
+            <div class="modal-footer"><button type="button" id="script-schedule-modal-cancel" class="btn-secondary">取消</button><button type="submit" class="btn-danger">确认并保存</button></div>
+        </form>
+    </div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script src="/static/js/schedules.js"></script>
-<script>initSchedules();</script>
+<script>initSchedules(); initScriptAutomation();</script>
 {% endblock %}

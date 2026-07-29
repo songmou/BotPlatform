@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.core.config.loader import (
     ScriptDefinition,
@@ -32,6 +32,7 @@ from src.core.services.notification import (
     Recipient,
     TenantRecipientStore,
 )
+from src.core.services.script_registry import ExternalScriptRegistry, file_sha256
 from src.core.storage.tenants import IntegrationStore, TenantContext, TenantRegistry
 
 
@@ -45,7 +46,7 @@ class ScriptRun:
     script_id: str
     script_name: str
     trigger: str
-    parameters: Dict[str, str]
+    parameters: Dict[str, Any]
     status: str
     summary: str
     tenant_id: str
@@ -75,6 +76,15 @@ def _sanitize(value: object, limit: int = 2000) -> str:
     return text
 
 
+def _redact_values(value: object, secrets: List[str]) -> str:
+    text = str(value or "")
+    for secret in sorted(
+        {item for item in secrets if item}, key=len, reverse=True
+    ):
+        text = text.replace(secret, "***")
+    return text
+
+
 class ScriptService:
     def __init__(
         self,
@@ -88,8 +98,11 @@ class ScriptService:
         notification_service: Optional[NotificationService] = None,
         image_loader: Optional[ImageSourceLoader] = None,
         keychain_service: Optional[KeychainService] = None,
+        external_registry: Optional[ExternalScriptRegistry] = None,
     ) -> None:
-        self.definitions = dict(definitions)
+        self.builtin_definitions = dict(definitions)
+        self.external_registry = external_registry
+        self.definitions = self._merged_definitions()
         self.credentials = credentials
         self.recipient_store = recipient_store
         self.project_root = project_root.resolve()
@@ -104,9 +117,11 @@ class ScriptService:
         self.keychain_service = keychain_service or KeychainService()
         self._lock = threading.RLock()
         self._active: Dict[str, str] = {}
+        self._active_run_keys: Dict[str, str] = {}
         self._processes: Dict[str, subprocess.Popen] = {}
         self._recipients: Dict[str, Recipient] = {}
         self._cancelled = set()
+        self._completion_listeners: List[Callable[[ScriptRun], None]] = []
         self._shutting_down = False
         self._executor = ThreadPoolExecutor(
             max_workers=max(2, len(self.definitions)),
@@ -116,6 +131,23 @@ class ScriptService:
     @property
     def script_ids(self) -> List[str]:
         return sorted(self.definitions)
+
+    def _merged_definitions(self) -> Dict[str, ScriptDefinition]:
+        definitions = dict(self.builtin_definitions)
+        if self.external_registry is not None:
+            for script_id, definition in self.external_registry.definitions.items():
+                if script_id in definitions:
+                    raise ValueError("外部脚本与内置脚本 ID 冲突：{}".format(script_id))
+                definitions[script_id] = definition
+        return definitions
+
+    def reload_external_definitions(self) -> None:
+        if self.external_registry is None:
+            return
+        self.external_registry.reload()
+        definitions = self._merged_definitions()
+        with self._lock:
+            self.definitions = definitions
 
     def requires_approval(self, script_id: object) -> bool:
         """Fail closed for missing or unknown scripts."""
@@ -138,6 +170,8 @@ class ScriptService:
                     "type": spec.type,
                     "required": spec.required,
                     "choices": list(spec.choices),
+                    "positional": spec.positional,
+                    "flag": spec.flag,
                 }
             result.append(
                 {
@@ -146,11 +180,22 @@ class ScriptService:
                     "description": definition.description,
                     "requires_approval": definition.requires_approval,
                     "parameters": parameters,
+                    "runtime": definition.runtime,
+                    "sha256": definition.sha256,
+                    "sha256_short": definition.sha256[:12] if definition.sha256 else "",
+                    "enabled": definition.enabled,
+                    "external": definition.external,
                 }
             )
         return result
 
-    def normalize(self, script_id: str, parameters: object) -> tuple[ScriptDefinition, Dict[str, str]]:
+    def add_completion_listener(self, listener: Callable[[ScriptRun], None]) -> None:
+        with self._lock:
+            self._completion_listeners.append(listener)
+
+    def normalize(
+        self, script_id: str, parameters: object
+    ) -> tuple[ScriptDefinition, Dict[str, Any]]:
         if not isinstance(script_id, str) or script_id not in self.definitions:
             raise ValueError("未知脚本：{}".format(script_id or "<空>"))
         if parameters is None:
@@ -158,13 +203,35 @@ class ScriptService:
         if not isinstance(parameters, dict):
             raise ValueError("parameters 必须是 JSON 对象")
         definition = self.definitions[script_id]
+        if not definition.enabled:
+            raise ValueError("脚本已被禁用：{}".format(script_id))
+        self.verify_definition(definition)
         return definition, validate_script_parameters(definition, parameters)
+
+    def verify_definition(self, definition: ScriptDefinition) -> str:
+        if definition.external:
+            if self.external_registry is None:
+                raise ValueError("外部脚本注册表不可用")
+            return self.external_registry.verify(definition)
+        return file_sha256(Path(definition.entrypoint))
+
+    def current_hash(self, script_id: str) -> str:
+        definition = self.definitions.get(script_id)
+        if definition is None:
+            raise ValueError("未知脚本：{}".format(script_id))
+        if not definition.enabled:
+            raise ValueError("脚本已被禁用：{}".format(script_id))
+        return self.verify_definition(definition)
 
     def preview(self, script_id: str, parameters: object) -> str:
         definition, normalized = self.normalize(script_id, parameters)
         detail = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
         return "运行固定脚本：{}（{}）\n参数：{}".format(
             definition.name, definition.id, detail
+        ) + (
+            "\n版本：{}".format(definition.sha256[:12])
+            if definition.sha256
+            else ""
         )
 
     def submit_for_tenant(
@@ -214,7 +281,7 @@ class ScriptService:
         with self._lock:
             if self._shutting_down:
                 raise ValueError("脚本服务正在关闭，不能提交新任务")
-            active_key = self._active_key(run)
+            active_key = self._active_key(run, definition)
             existing = self._active.get(active_key)
             if existing:
                 run.status = "skipped"
@@ -223,9 +290,11 @@ class ScriptService:
                 self._persist(run)
                 if recipient:
                     self._recipients[run_id] = recipient
+                self._emit_completion(run)
                 self._executor.submit(self._notify, run)
                 return run.to_dict()
             self._active[active_key] = run_id
+            self._active_run_keys[run_id] = active_key
             if recipient:
                 self._recipients[run_id] = recipient
             self._persist(run)
@@ -257,8 +326,11 @@ class ScriptService:
             )
 
     @staticmethod
-    def _active_key(run: ScriptRun) -> str:
-        return "{}:{}".format(run.tenant_id, run.script_id)
+    def _active_key(run: ScriptRun, definition: ScriptDefinition) -> str:
+        key = definition.concurrency_key or definition.id
+        if definition.concurrency_scope == "global":
+            return "global:{}".format(key)
+        return "{}:{}".format(run.tenant_id, key)
 
     def _roots_for(self, run: ScriptRun) -> tuple[Path, Path]:
         root = self.tenant_registry.tenant_root(run.tenant_id)
@@ -288,6 +360,13 @@ class ScriptService:
                 (run_id,),
             ).fetchall()
         root = self.tenant_registry.tenant_root(tenant.tenant_id)
+        log_path = root / "scripts" / "logs" / (run_id + ".log")
+        log_tail = ""
+        if log_path.is_file():
+            try:
+                log_tail = log_path.read_text(encoding="utf-8")[-8192:]
+            except OSError:
+                log_tail = ""
         return {
             "run_id": str(row["run_id"]),
             "script_id": str(row["script_id"]),
@@ -304,7 +383,25 @@ class ScriptService:
             "exit_code": row["exit_code"],
             "error": row["error"],
             "notification_error": row["notification_error"],
+            "log_tail": log_tail,
         }
+
+    def list_runs(
+        self,
+        tenant: TenantContext,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        if self.tenant_registry.get(tenant.tenant_id) != tenant:
+            raise ValueError("租户身份不匹配")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise ValueError("limit 必须是 1 到 200 的整数")
+        with self.tenant_registry.database.read() as connection:
+            rows = connection.execute(
+                "SELECT run_id FROM script_runs WHERE tenant_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (tenant.tenant_id, limit),
+            ).fetchall()
+        return [self.get_run(tenant, str(row["run_id"])) for row in rows]
 
     def _persist(self, run: ScriptRun) -> None:
         root = self.tenant_registry.tenant_root(run.tenant_id).resolve()
@@ -344,19 +441,35 @@ class ScriptService:
                 artifacts,
             )
 
-    def _argv(self, definition: ScriptDefinition, parameters: Dict[str, str]) -> List[str]:
+    def _argv(self, definition: ScriptDefinition, parameters: Dict[str, Any]) -> List[str]:
         positional: List[str] = []
         flagged: List[str] = []
         for name, spec in definition.parameters.items():
             if name not in parameters:
                 continue
+            value = parameters[name]
+            if spec.type == "boolean":
+                if value:
+                    flagged.append(spec.flag or "")
+                continue
             if spec.positional:
-                positional.append(parameters[name])
+                positional.append(str(value))
             else:
-                flagged.extend([spec.flag or "", parameters[name]])
-        return [self.python_executable, definition.entrypoint, *positional, *flagged]
+                flagged.extend([spec.flag or "", str(value)])
+        prefix = (
+            [self.python_executable, definition.entrypoint]
+            if definition.runtime == "python"
+            else [definition.entrypoint]
+        )
+        return [*prefix, *positional, *flagged]
 
-    def _environment(self, run: ScriptRun, result_path: Path) -> Dict[str, str]:
+    def _environment(
+        self,
+        run: ScriptRun,
+        result_path: Path,
+        definition: Optional[ScriptDefinition] = None,
+    ) -> Dict[str, str]:
+        definition = definition or self.definitions[run.script_id]
         environment = {}
         allowed = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "NO_PROXY", "no_proxy"]
         if os.name == "nt":
@@ -374,13 +487,14 @@ class ScriptService:
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONPATH"] = str(self.project_root)
         environment["ILINKBOT_SCRIPT_RESULT_FILE"] = str(result_path)
-        definition = self.definitions[run.script_id]
         _, outputs_root = self._roots_for(run)
         environment["ILINKBOT_SCRIPT_DATA_ROOT"] = str(
             outputs_root / (definition.data_directory or definition.id)
         )
         environment["ILINKBOT_TENANT_ID"] = run.tenant_id
         environment["ILINKBOT_DATABASE_PATH"] = str(self.tenant_registry.database_path)
+        if definition.external and self.external_registry is not None:
+            environment.update(self.external_registry.environment_for(definition))
         integration_id = self._integration_id(run.script_id)
         if integration_id:
             metadata = self.integration_store.get(run.tenant_id, integration_id)
@@ -417,6 +531,7 @@ class ScriptService:
     def _execute(self, definition: ScriptDefinition, run: ScriptRun) -> None:
         runs_root, _ = self._roots_for(run)
         child_result = runs_root / ("." + run.run_id + ".child.json")
+        secret_values: List[str] = []
         try:
             with self._lock:
                 if self._shutting_down:
@@ -424,14 +539,23 @@ class ScriptService:
                 cancelled = run.run_id in self._cancelled
             if cancelled:
                 run.status = "cancelled"
-                run.summary = "iLinkBot 已关闭，任务未启动。"
+                run.summary = "脚本任务在启动前已取消。"
                 return
+            # Revalidate immediately before spawning so queued runs cannot use a
+            # file that changed after approval/submission.
+            self.verify_definition(definition)
             run.started_at = _utc_now()
             self._persist(run)
+            environment = self._environment(run, child_result, definition)
+            secret_values = [
+                environment[name]
+                for name in definition.env_allowlist
+                if environment.get(name)
+            ]
             process = subprocess.Popen(
                 self._argv(definition, run.parameters),
-                cwd=str(Path(definition.entrypoint).parent),
-                env=self._environment(run, child_result),
+                cwd=definition.working_directory or str(Path(definition.entrypoint).parent),
+                env=environment,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -448,21 +572,41 @@ class ScriptService:
                 stdout, stderr = process.communicate()
                 run.status = "timed_out"
                 run.summary = "脚本运行超过 {} 秒，已终止。".format(definition.timeout_seconds)
-                run.error = _sanitize(stderr or stdout)
+                run.error = _sanitize(
+                    _redact_values(stderr or stdout, secret_values)
+                )
             else:
                 with self._lock:
                     cancelled = run.run_id in self._cancelled
                 if cancelled:
                     run.status = "cancelled"
-                    run.summary = "iLinkBot 关闭时已终止脚本任务。"
+                    run.summary = "脚本任务已取消。"
                 else:
-                    self._apply_child_result(run, child_result, process.returncode, stdout, stderr)
+                    self._apply_child_result(
+                        run,
+                        definition,
+                        child_result,
+                        process.returncode,
+                        _redact_values(stdout, secret_values),
+                        _redact_values(stderr, secret_values),
+                        secret_values,
+                    )
             run.exit_code = process.returncode
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             run.status = "failed"
             run.summary = "无法完成脚本任务。"
             run.error = _sanitize(exc)
         finally:
+            try:
+                self._persist_log(
+                    run,
+                    _redact_values(locals().get("stdout", ""), secret_values),
+                    _redact_values(locals().get("stderr", ""), secret_values),
+                )
+            except OSError as exc:
+                run.notification_error = _sanitize(
+                    "保存脚本日志失败：{}".format(exc), 500
+                )
             run.finished_at = _utc_now()
             try:
                 child_result.unlink()
@@ -470,19 +614,22 @@ class ScriptService:
                 pass
             with self._lock:
                 self._processes.pop(run.run_id, None)
-                active_key = self._active_key(run)
+                active_key = self._active_run_keys.pop(run.run_id, "")
                 if self._active.get(active_key) == run.run_id:
                     self._active.pop(active_key, None)
             self._persist(run)
+            self._emit_completion(run)
             self._notify(run)
 
     def _apply_child_result(
         self,
         run: ScriptRun,
+        definition: ScriptDefinition,
         result_path: Path,
         returncode: int,
         stdout: str,
         stderr: str,
+        secret_values: Optional[List[str]] = None,
     ) -> None:
         payload: Dict[str, Any] = {}
         if result_path.is_file():
@@ -497,11 +644,15 @@ class ScriptService:
             "success" if returncode == 0 else "failed"
         )
         summary = payload.get("summary")
-        run.summary = _sanitize(summary or stdout or stderr or "脚本运行结束。")
+        run.summary = _sanitize(
+            _redact_values(
+                summary or stdout or stderr or "脚本运行结束。",
+                secret_values or [],
+            )
+        )
         raw_artifacts = payload.get("artifacts", [])
         artifacts: List[str] = []
         if isinstance(raw_artifacts, list):
-            definition = self.definitions[run.script_id]
             _, outputs_root = self._roots_for(run)
             allowed_root = (
                 outputs_root / (definition.data_directory or definition.id)
@@ -524,7 +675,53 @@ class ScriptService:
         run.artifacts = artifacts
         error = payload.get("error")
         if run.status != "success":
-            run.error = _sanitize(error or stderr or stdout)
+            run.error = _sanitize(
+                _redact_values(error or stderr or stdout, secret_values or [])
+            )
+
+    def _emit_completion(self, run: ScriptRun) -> None:
+        with self._lock:
+            listeners = list(self._completion_listeners)
+        for listener in listeners:
+            try:
+                listener(run)
+            except Exception:
+                continue
+
+    def _persist_log(self, run: ScriptRun, stdout: str, stderr: str) -> None:
+        root = self.tenant_registry.tenant_root(run.tenant_id)
+        log_root = root / "scripts" / "logs"
+        log_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(str(log_root), 0o700)
+        content = ""
+        if stdout:
+            content += "[stdout]\n" + _sanitize(stdout, 512 * 1024)
+        if stderr:
+            content += ("\n" if content else "") + "[stderr]\n" + _sanitize(
+                stderr, 512 * 1024
+            )
+        if not content:
+            return
+        path = log_root / (run.run_id + ".log")
+        descriptor = os.open(
+            str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.chmod(str(path), 0o600)
+
+    def cancel_run(self, tenant: TenantContext, run_id: str) -> Dict[str, Any]:
+        if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
+            raise ValueError("任务编号格式无效")
+        current = self.get_run(tenant, run_id)
+        if current["status"] in FINAL_STATUSES:
+            raise ValueError("脚本任务已经结束，不能取消")
+        with self._lock:
+            process = self._processes.get(run_id)
+            self._cancelled.add(run_id)
+            if process is not None:
+                self._stop_process(process)
+        return {"run_id": run_id, "status": "cancelling", "summary": "已请求取消脚本任务。"}
 
     @staticmethod
     def _stop_process(process: subprocess.Popen) -> None:

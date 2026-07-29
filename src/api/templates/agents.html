@@ -12,7 +12,7 @@
             <button id="create-agent-btn" class="btn-primary">+ 新建智能体</button>
         </div>
     </div>
-    <div id="agent-list" class="agent-grid"></div>
+    <div id="agent-list" class="card-grid agent-card-grid"></div>
 </div>
 
 <!-- Modal -->
@@ -39,6 +39,10 @@
             <div class="form-group">
                 <label for="agent-desc">描述</label>
                 <input type="text" id="agent-desc" placeholder="简短描述该智能体的用途">
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label"><input type="checkbox" id="agent-enabled" checked> 启用</label>
+                <small>禁用后不会出现在对话的智能体选择中</small>
             </div>
             <div class="form-group">
                 <label for="agent-model">使用模型</label>

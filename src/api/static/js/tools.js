@@ -12,6 +12,10 @@ function initTools() {
     var searchInput = document.getElementById("plugin-search");
     var filterSelect = document.getElementById("plugin-filter-status");
     var allPlugins = [];
+    var auditOffset = 0;
+    var auditLimit = 20;
+    var auditSearchTimer = null;
+    var auditRequestSeq = 0;
 
     var validTabs = ["skills", "mcp", "plugins", "builtin", "audit"];
     function switchTab() {
@@ -26,13 +30,17 @@ function initTools() {
         document.querySelectorAll(".nav-sub-item").forEach(function (el) {
             el.classList.toggle("active", el.getAttribute("data-tab") === hash);
         });
+        // Audit data is loaded lazily and refreshed on every tab entry.
+        if (hash === "audit") {
+            auditOffset = 0;
+            loadAuditLogs(false);
+        }
     }
     switchTab();
     window.addEventListener("hashchange", switchTab);
 
     loadPlugins();
     loadBuiltinTools();
-    loadAuditLogs();
     loadSkills();
     loadMcpServers();
 
@@ -273,50 +281,114 @@ function initTools() {
             });
     }
 
-    var auditOffset = 0;
-    var auditLimit = 20;
+    function formatAuditTime(ts) {
+        if (!ts) return "";
+        var date = new Date(ts);
+        if (isNaN(date.getTime())) return ts;
+        function pad(n) { return n < 10 ? "0" + n : "" + n; }
+        return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) +
+            " " + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+    }
+
+    function renderAuditEntry(item) {
+        var statusBadge = item.status === "成功"
+            ? '<span class="badge badge-success">成功</span>'
+            : '<span class="badge badge-danger">失败</span>';
+        var owner = [item.tenant_id, item.agent_id].filter(Boolean).join(" / ") || "系统";
+        return '<details class="tool-audit-entry' +
+            (item.status !== "成功" ? " audit-row-fail" : "") + '">' +
+            '<summary class="tool-audit-row">' +
+                '<span class="audit-ts">' + escapeHtml(formatAuditTime(item.ts)) + "</span>" +
+                '<code class="audit-tool">' + escapeHtml(item.tool_name) + "</code>" +
+                statusBadge +
+                '<span class="audit-owner">' + escapeHtml(owner) + "</span>" +
+                '<span class="audit-duration">' + (item.duration_ms || 0) + "ms</span>" +
+                '<span class="audit-chevron">›</span>' +
+            "</summary>" +
+            '<div class="audit-detail">' +
+                '<div><span>机器人用户</span><code>' + escapeHtml(item.tenant_id || "-") + "</code></div>" +
+                '<div><span>智能体</span><code>' + escapeHtml(item.agent_id || "-") + "</code></div>" +
+                '<div><span>会话</span><code>' + escapeHtml(item.session_id || "-") + "</code></div>" +
+                '<div><span>参数哈希</span><code>' + escapeHtml(item.args_hash || "-") + "</code></div>" +
+                '<div><span>输出大小</span><strong>' + (item.output_bytes || 0) + " B</strong></div>" +
+                '<div><span>错误信息</span><strong class="audit-detail-error">' +
+                    escapeHtml(item.error || "-") + "</strong></div>" +
+            "</div></details>";
+    }
 
     function loadAuditLogs(append) {
-        fetch("/api/tools/audit?limit=" + auditLimit + "&offset=" + auditOffset)
-            .then(function (r) { return r.json(); })
+        var tool = document.getElementById("audit-filter-tool").value.trim();
+        var status = document.getElementById("audit-filter-status").value;
+        var requestOffset = append ? auditOffset : 0;
+        var query = "?limit=" + encodeURIComponent(auditLimit) +
+            "&offset=" + encodeURIComponent(requestOffset);
+        if (tool) query += "&tool=" + encodeURIComponent(tool);
+        if (status) query += "&status=" + encodeURIComponent(status);
+        var container = document.getElementById("tool-audit-list");
+        var loadMoreWrap = document.getElementById("audit-load-more-wrap");
+        var totalEl = document.getElementById("audit-total");
+        // Stale-response guard: only the latest request may touch the DOM.
+        var seq = ++auditRequestSeq;
+        if (!append) container.innerHTML = '<div class="audit-loading">正在加载审计记录…</div>';
+        fetch("/api/tools/audit" + query)
+            .then(function (r) {
+                if (!r.ok) {
+                    return r.json().then(function (body) {
+                        throw new Error(body.detail || "请求失败");
+                    });
+                }
+                return r.json();
+            })
             .then(function (data) {
-                var container = document.getElementById("tool-audit-list");
-                var loadMoreWrap = document.getElementById("audit-load-more-wrap");
+                if (seq !== auditRequestSeq) return;
                 var items = data.items || [];
+                totalEl.textContent = "共 " + (data.total || 0) + " 条";
                 if (!items.length && !append) {
-                    container.innerHTML = '<p class="text-muted">暂无审计记录</p>';
+                    container.innerHTML = '<div class="empty-state">暂无符合条件的工具执行记录</div>';
                     loadMoreWrap.style.display = "none";
                     return;
                 }
-                var html = items.map(function (item) {
-                    var statusBadge = item.status === "成功"
-                        ? '<span class="badge badge-success">成功</span>'
-                        : '<span class="badge badge-warning">失败</span>';
-                    var ts = item.ts ? item.ts.replace("T", " ").substring(0, 19) : "";
-                    return '<div class="tool-audit-row' + (item.status !== "成功" ? " audit-row-fail" : "") + '">' +
-                        '<span class="audit-ts">' + escapeHtml(ts) + "</span>" +
-                        '<code class="audit-tool">' + escapeHtml(item.tool_name) + "</code>" +
-                        statusBadge +
-                        '<span class="audit-duration">' + (item.duration_ms || 0) + "ms</span>" +
-                        (item.error ? '<span class="audit-error">' + escapeHtml(item.error) + "</span>" : "") +
-                    "</div>";
-                }).join("");
+                var html = items.map(renderAuditEntry).join("");
                 if (append) {
-                    container.innerHTML += html;
+                    // insertAdjacentHTML keeps already-expanded entries open.
+                    container.insertAdjacentHTML("beforeend", html);
                 } else {
                     container.innerHTML = html;
                 }
-                loadMoreWrap.style.display = (auditOffset + items.length < data.total) ? "" : "none";
+                // Advance the offset only after a successful load so a failed
+                // "load more" can simply be retried without skipping a page.
+                auditOffset = requestOffset + items.length;
+                loadMoreWrap.style.display = auditOffset < data.total ? "" : "none";
+            })
+            .catch(function (error) {
+                if (seq !== auditRequestSeq) return;
+                if (!append) {
+                    container.innerHTML = '<div class="audit-error-state">加载审计记录失败：' +
+                        escapeHtml(error.message) + "</div>";
+                    loadMoreWrap.style.display = "none";
+                }
+                showToast("加载审计记录失败：" + error.message, "error");
             });
     }
 
     var auditLoadMoreBtn = document.getElementById("audit-load-more");
     if (auditLoadMoreBtn) {
         auditLoadMoreBtn.addEventListener("click", function () {
-            auditOffset += auditLimit;
             loadAuditLogs(true);
         });
     }
+    document.getElementById("audit-filter-status").addEventListener("change", function () {
+        loadAuditLogs(false);
+    });
+    document.getElementById("audit-filter-tool").addEventListener("input", function () {
+        if (auditSearchTimer) clearTimeout(auditSearchTimer);
+        auditSearchTimer = setTimeout(function () {
+            loadAuditLogs(false);
+        }, 300);
+    });
+    document.getElementById("audit-refresh").addEventListener("click", function () {
+        loadAuditLogs(false);
+    });
 
     /* ---- Skill 技能 ---- */
     var skillModal = document.getElementById("skill-modal");

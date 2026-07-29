@@ -1,0 +1,59 @@
+/* knowledge page styles (split from app.css). Loaded after app.css. */
+
+.knowledge-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.knowledge-toolbar select {
+    min-height: 36px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    font-family: var(--font);
+    max-width: 320px;
+    outline: none;
+}
+
+.knowledge-toolbar select:focus {
+    border-color: var(--accent);
+}
+
+/* Keep borderless .btn-primary the same height as bordered controls. */
+.knowledge-toolbar button,
+.knowledge-search-bar button {
+    min-height: 36px;
+}
+
+.knowledge-search-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.knowledge-search-bar input {
+    flex: 1;
+    min-height: 36px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    font-family: var(--font);
+    outline: none;
+    transition: border-color 0.15s ease;
+}
+
+.knowledge-search-bar input:focus {
+    border-color: var(--accent);
+}
+
+#knowledge-text-content {
+    min-height: 180px;
+}

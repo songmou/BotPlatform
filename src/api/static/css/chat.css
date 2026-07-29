@@ -308,6 +308,10 @@
     margin-top: 8px;
 }
 
+.bubble-content.markdown-fallback {
+    white-space: pre-wrap;
+}
+
 /* Message action buttons */
 .msg-actions {
     display: flex;
@@ -320,6 +324,11 @@
 
 .message-row:hover .msg-actions {
     opacity: 1;
+}
+
+.msg-action-btn.selected {
+    color: var(--accent);
+    background: var(--accent-light);
 }
 
 .msg-action-btn {
@@ -380,4 +389,3 @@
 .copy-menu-item:hover {
     background: var(--bg-hover);
 }
-

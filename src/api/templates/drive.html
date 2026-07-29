@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}网盘 - BotPlatform{% endblock %}
+{% block head %}
+<style>
+.drive-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.drive-breadcrumbs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 12px 0; font-size: 14px; }
+.drive-breadcrumbs a { cursor: pointer; color: var(--primary, #2563eb); text-decoration: none; }
+.drive-breadcrumbs .sep { opacity: .5; }
+.drive-entry-name { cursor: default; display: inline-flex; align-items: center; gap: 6px; }
+.drive-entry-name.folder { cursor: pointer; color: var(--primary, #2563eb); }
+.drive-actions button { margin-right: 4px; }
+.drive-tabs { display: flex; gap: 16px; margin: 20px 0 12px; border-bottom: 1px solid var(--border, #e5e7eb); }
+.drive-tab { padding: 8px 2px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 14px; }
+.drive-tab.active { border-bottom-color: var(--primary, #2563eb); font-weight: 600; }
+.drive-audit-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.drive-pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; }
+#drive-preview-content { white-space: pre-wrap; max-height: 60vh; overflow: auto; background: var(--code-bg, #f6f8fa); padding: 12px; border-radius: 6px; font-family: monospace; font-size: 13px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>网盘</h2>
+                <p class="page-desc">管理公共文件区与租户独立文件区：支持多级文件夹、上传下载、重命名、移动与删除，所有操作留有审计日志</p>
+            </div>
+            <div class="drive-toolbar">
+                <select id="drive-scope">
+                    <option value="public">公共文件区</option>
+                    <option value="tenant">租户文件区</option>
+                </select>
+                <select id="drive-tenant" style="display:none"></select>
+                <button id="drive-mkdir-btn" class="btn-secondary" data-manage="1">+ 新建文件夹</button>
+                <button id="drive-upload-btn" class="btn-primary" data-manage="1">+ 上传文件</button>
+                <input type="file" id="drive-file-input" style="display:none">
+            </div>
+        </div>
+    </div>
+
+    <div class="drive-tabs">
+        <div class="drive-tab active" data-tab="files">文件</div>
+        <div class="drive-tab" data-tab="audit">操作日志</div>
+    </div>
+
+    <div id="drive-files-panel">
+        <div class="drive-breadcrumbs" id="drive-breadcrumbs"></div>
+        <div class="table-scroll">
+            <table class="data-table" id="drive-table">
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>大小</th>
+                        <th>修改时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="drive-table-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="drive-audit-panel" style="display:none">
+        <div class="drive-audit-toolbar">
+            <select id="drive-audit-action">
+                <option value="">全部动作</option>
+                <option value="upload">上传</option>
+                <option value="download">下载</option>
+                <option value="mkdir">新建文件夹</option>
+                <option value="rename">重命名</option>
+                <option value="move">移动</option>
+                <option value="delete">删除</option>
+                <option value="preview">预览</option>
+                <option value="list">浏览</option>
+            </select>
+            <button id="drive-audit-refresh" class="btn-secondary">刷新</button>
+        </div>
+        <div class="table-scroll">
+            <table class="data-table" id="drive-audit-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>操作者</th>
+                        <th>来源</th>
+                        <th>区域</th>
+                        <th>动作</th>
+                        <th>路径</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody id="drive-audit-body"></tbody>
+            </table>
+        </div>
+        <div class="drive-pager">
+            <button id="drive-audit-prev" class="btn-secondary">上一页</button>
+            <span id="drive-audit-page"></span>
+            <button id="drive-audit-next" class="btn-secondary">下一页</button>
+        </div>
+    </div>
+</div>
+
+<!-- Text preview modal -->
+<div id="drive-preview-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="drive-preview-title">文件预览</h3>
+            <button id="drive-preview-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <pre id="drive-preview-content"></pre>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/drive.js"></script>
+<script>initDrive();</script>
+{% endblock %}

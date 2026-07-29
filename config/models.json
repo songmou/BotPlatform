@@ -1,4 +1,7 @@
 {
+  "billing": {
+    "currency": "CNY"
+  },
   "profiles": {
     "ollama_local": {
       "enabled": true,

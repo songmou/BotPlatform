@@ -11,9 +11,35 @@ SESSION_MAX_AGE = 86400 * 7
 
 OPEN_PATHS = {"/api/health", "/static", "/login", "/api/auth/login"}
 
+# Panel templates rely on inline scripts/styles and only load local assets,
+# so the policy allows 'unsafe-inline' but pins every source to self.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
 
 def _is_open(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in OPEN_PATHS)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Attach conservative security headers to every panel response."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        return response
 
 
 class SessionAuthMiddleware(BaseHTTPMiddleware):

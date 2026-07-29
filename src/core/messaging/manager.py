@@ -6,7 +6,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 from .contracts import DIRECT, InboundMessage, MessagingAdapter
 from .errors import AuthenticationExpired, MessagingError
@@ -158,8 +158,8 @@ class ChannelManager:
         for adapter in reversed(self.adapters):
             try:
                 adapter.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                LOGGER.warning("关闭消息适配器 %s 失败", adapter.channel_id, exc_info=True)
         for thread in self._threads:
             if thread is not threading.current_thread():
                 thread.join(timeout=5.0)

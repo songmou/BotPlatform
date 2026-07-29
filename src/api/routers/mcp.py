@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
 from src.api.deps import get_config, get_tool_runtime
 from src.api.schemas import McpServerCreate, McpServerOut, McpServerUpdate
+from src.core.config.loader import ConfigError
 from src.core.paths import CONFIG_DIR
 from src.core.tooling.mcp_client import namespaced_name
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
@@ -47,13 +51,18 @@ def _ensure_manager(request: Request):
 
 
 def _sync(request: Request, servers: list) -> None:
-    object.__setattr__(get_config(request), "mcp_servers", servers)
+    """Validate, persist, and apply the new server list to the live config."""
+    try:
+        get_config(request).update_mcp_servers(servers)
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _save(servers)
     manager = _ensure_manager(request)
     if manager is not None:
         try:
             manager.reload(servers)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - config is saved; reload takes effect on restart
+            logger.warning("重载 MCP 服务器连接失败，重启后生效", exc_info=True)
 
 
 def _to_out(item: dict) -> McpServerOut:
@@ -100,7 +109,6 @@ def create_server(body: McpServerCreate, request: Request):
         "enabled": body.enabled,
     }
     servers.append(item)
-    _save(servers)
     _sync(request, servers)
     return _to_out(item)
 
@@ -128,7 +136,6 @@ def update_server(server_id: str, body: McpServerUpdate, request: Request):
                 s["headers"] = body.headers
             if body.enabled is not None:
                 s["enabled"] = body.enabled
-            _save(servers)
             _sync(request, servers)
             return _to_out(s)
     raise HTTPException(status_code=404, detail="MCP 服务不存在")
@@ -140,7 +147,6 @@ def delete_server(server_id: str, request: Request):
     filtered = [s for s in servers if s["id"] != server_id]
     if len(filtered) == len(servers):
         raise HTTPException(status_code=404, detail="MCP 服务不存在")
-    _save(filtered)
     _sync(request, filtered)
     return {"status": "ok"}
 

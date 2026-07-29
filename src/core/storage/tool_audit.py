@@ -12,6 +12,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _like_pattern(fragment: str) -> str:
+    """Build a substring LIKE pattern with %/_/\\ escaped literally."""
+    escaped = (
+        fragment.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return "%" + escaped + "%"
+
+
 class ToolAuditStore:
     """Record and query tool invocation audit entries."""
 
@@ -55,32 +65,43 @@ class ToolAuditStore:
         limit: int = 50,
         tool_name: Optional[str] = None,
         offset: int = 0,
+        status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        conditions = []
+        params: List[Any] = []
+        if tool_name:
+            conditions.append("tool_name LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(tool_name))
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.registry.database.read() as connection:
-            if tool_name:
-                rows = connection.execute(
-                    "SELECT * FROM tool_audit_log"
-                    " WHERE tool_name = ?"
-                    " ORDER BY ts DESC LIMIT ? OFFSET ?",
-                    (tool_name, limit, offset),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM tool_audit_log"
-                    " ORDER BY ts DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
+            rows = connection.execute(
+                "SELECT * FROM tool_audit_log"
+                + where
+                + " ORDER BY ts DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
         return [dict(row) for row in rows]
 
-    def count(self, tool_name: Optional[str] = None) -> int:
+    def count(
+        self,
+        tool_name: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> int:
+        conditions = []
+        params: List[Any] = []
+        if tool_name:
+            conditions.append("tool_name LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(tool_name))
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.registry.database.read() as connection:
-            if tool_name:
-                row = connection.execute(
-                    "SELECT COUNT(*) FROM tool_audit_log WHERE tool_name = ?",
-                    (tool_name,),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT COUNT(*) FROM tool_audit_log"
-                ).fetchone()
+            row = connection.execute(
+                "SELECT COUNT(*) FROM tool_audit_log" + where,
+                params,
+            ).fetchone()
         return int(row[0]) if row else 0

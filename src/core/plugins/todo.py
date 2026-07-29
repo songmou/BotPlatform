@@ -616,7 +616,12 @@ def apply_action(
             "，提醒时间：{}".format(_format_local_time(parsed_reminder, timezone_name))
             if parsed_reminder else ""
         )
-        return OperationResult("success", "已新增待办：{} {}{}{}".format(generated_id, normalized_title, kind, suffix)), True
+        return OperationResult(
+            "success",
+            "已新增待办：{} {}{}{}".format(
+                generated_id, normalized_title, kind, suffix
+            ),
+        ), True
 
     if action == "archive":
         _require_absent("todo_id", todo_id)
@@ -700,7 +705,12 @@ def apply_action(
             if item["reminder_at"] is not None else "，已清除提醒"
         )
         kind = "，一次性任务" if item["is_one_off"] else ""
-        return OperationResult("success", "已更新待办：{} {}{}{}".format(normalized_id, item["title"], kind, suffix)), True
+        return OperationResult(
+            "success",
+            "已更新待办：{} {}{}{}".format(
+                normalized_id, item["title"], kind, suffix
+            ),
+        ), True
 
     _require_absent("title", title)
     if action == "complete":
@@ -788,11 +798,18 @@ class TodoPlugin:
                     },
                     "remind_at": {
                         "type": ["string", "null"],
-                        "description": "add/edit 的一次性提醒时间；使用带时区 ISO 时间，或“5分钟后”。edit 传 null 清除提醒。",
+                        "description": (
+                            "add/edit 的一次性提醒时间；使用带时区 ISO 时间，"
+                            "或“5分钟后”。edit 传 null 清除提醒。"
+                        ),
                     },
                     "is_one_off": {
                         "type": "boolean",
-                        "description": "是否为一次性任务。设置 remind_at 时默认 true；到期提醒成功送达后自动完成。仅当提醒后仍需继续跟进时显式设为 false。",
+                        "description": (
+                            "是否为一次性任务。设置 remind_at 时默认 true；"
+                            "到期提醒成功送达后自动完成。"
+                            "仅当提醒后仍需继续跟进时显式设为 false。"
+                        ),
                     },
                 },
                 ["action"],

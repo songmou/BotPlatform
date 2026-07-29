@@ -14,7 +14,6 @@ import json
 import mimetypes
 import os
 import re
-import sys
 import textwrap
 import time
 import uuid
@@ -592,7 +591,7 @@ def _generate_chinese_story_payload(model, instruction: str, fields: tuple[str, 
         payload = _story_json(first_content)
         _require_chinese_story_payload(payload, fields)
         return payload
-    except PreflightError as first_error:
+    except PreflightError:
         correction = (
             "你刚才的 JSON 未完全使用简体中文。请重新输出同一内容的严格 JSON，"
             "不要保留英文单词、英文姓名、英文风格名或拼音；所有值都必须为简体中文。"

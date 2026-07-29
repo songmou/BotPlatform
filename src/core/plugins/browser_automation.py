@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import ipaddress
+import logging
 import os
 import socket
 import threading
@@ -16,6 +17,8 @@ from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
 from .base import PluginContext, PluginError, PluginToolDefinition
+
+logger = logging.getLogger(__name__)
 
 
 INTERACTIVE_SELECTOR = ", ".join(
@@ -214,14 +217,14 @@ class BrowserSession:
                 continue
             try:
                 item.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("关闭浏览器资源失败", exc_info=True)
         self.page = self.context = self.browser = None
         if self._playwright is not None:
             try:
                 self._playwright.stop()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("停止 Playwright 失败", exc_info=True)
             self._playwright = None
 
     def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
@@ -261,8 +264,8 @@ class _AgentPageController:
         for handle in self.references.values():
             try:
                 handle.dispose()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - handle may already be gone
+                logger.debug("释放页面引用失败", exc_info=True)
         self.references.clear()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -414,8 +417,8 @@ class _ManagedAgentSession:
         self._closed = True
         try:
             self._executor.submit(self._controller.close).result(timeout=10)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - best effort on shutdown
+            logger.warning("关闭浏览器控制器失败", exc_info=True)
         self._executor.shutdown(wait=False)
 
 
@@ -481,7 +484,11 @@ class BrowserAutomationPlugin:
             raise ValueError("browser_automation 包含未知配置：{}".format("、".join(unknown)))
         if "headless" in settings and not isinstance(settings["headless"], bool):
             raise ValueError("browser_automation.headless 必须是布尔值")
-        if "executable_path" in settings and settings["executable_path"] is not None and not isinstance(settings["executable_path"], str):
+        if (
+            "executable_path" in settings
+            and settings["executable_path"] is not None
+            and not isinstance(settings["executable_path"], str)
+        ):
             raise ValueError("browser_automation.executable_path 必须是字符串或 null")
         limits = {
             "navigation_timeout_seconds": (1, 120),

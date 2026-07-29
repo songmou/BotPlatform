@@ -18,6 +18,7 @@ from src.core.modeling.contracts import (
     ModelIdentity,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelUsage,
 )
 
@@ -179,7 +180,10 @@ class OpenAICompatibleAdapter:
                 retryable=True,
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise self._status_error(exc.response.status_code) from exc
+            raise self._status_error(
+                exc.response.status_code,
+                detail_hint=self._error_detail(exc.response),
+            ) from exc
         except httpx.HTTPError as exc:
             raise ModelError(
                 "模型档案 {} 网络连接失败".format(self.identity.profile_id),
@@ -214,6 +218,7 @@ class OpenAICompatibleAdapter:
                 "max_tokens": max_tokens,
             }
         )
+        payload.setdefault("stream_options", {"include_usage": True})
         headers = {
             "Authorization": "Bearer {}".format(self.api_key),
             "Content-Type": "application/json",
@@ -227,6 +232,10 @@ class OpenAICompatibleAdapter:
                 timeout=self.timeout_seconds,
             ) as response:
                 response.raise_for_status()
+                final_usage: Optional[ModelUsage] = None
+                actual_model: Optional[str] = None
+                finish_reason: Optional[str] = None
+                response_id: Optional[str] = None
                 for line in response.iter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -237,13 +246,35 @@ class OpenAICompatibleAdapter:
                         chunk = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
+                    if chunk.get("model"):
+                        actual_model = str(chunk["model"])
+                    if chunk.get("id"):
+                        response_id = str(chunk["id"])
+                    raw_usage = chunk.get("usage")
+                    if isinstance(raw_usage, dict):
+                        final_usage = _openai_usage(raw_usage)
                     choices = chunk.get("choices")
                     if not choices:
                         continue
+                    if choices[0].get("finish_reason"):
+                        finish_reason = str(choices[0]["finish_reason"])
                     delta = choices[0].get("delta") or {}
                     content = delta.get("content")
                     if content:
-                        yield content
+                        yield ModelStreamEvent(text=str(content))
+                yield ModelStreamEvent(
+                    response=ModelResponse(
+                        message=CanonicalMessage("assistant", ""),
+                        actual_model=actual_model or self.model,
+                        usage=final_usage,
+                        request_id=(
+                            response.headers.get("x-request-id")
+                            or response.headers.get("request-id")
+                            or response_id
+                        ),
+                        finish_reason=finish_reason,
+                    )
+                )
         except httpx.TimeoutException as exc:
             raise ModelError(
                 "模型档案 {} 调用超时".format(self.identity.profile_id),
@@ -259,7 +290,24 @@ class OpenAICompatibleAdapter:
                 retryable=True,
             ) from exc
 
-    def _status_error(self, status: int) -> ModelError:
+    @staticmethod
+    def _error_detail(response: httpx.Response) -> Optional[str]:
+        """Best-effort extraction of the server-side error message."""
+        try:
+            data = response.json()
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        error = data.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if not isinstance(message, str) or not message.strip():
+            return None
+        return message.strip()[:200]
+
+    def _status_error(
+        self, status: int, detail_hint: Optional[str] = None
+    ) -> ModelError:
         labels = {
             401: "认证失败",
             402: "账户余额或配额不足",
@@ -268,9 +316,13 @@ class OpenAICompatibleAdapter:
         detail = labels.get(status)
         if detail is None:
             detail = "服务暂不可用" if status >= 500 else "请求失败"
+        if detail_hint and 400 <= status < 500:
+            suffix = "（HTTP {}：{}）".format(status, detail_hint)
+        else:
+            suffix = "（HTTP {}）".format(status)
         return ModelError(
-            "模型档案 {} {}（HTTP {}）".format(
-                self.identity.profile_id, detail, status
+            "模型档案 {} {}{}".format(
+                self.identity.profile_id, detail, suffix
             ),
             provider=self.identity.provider,
             status_code=status,
@@ -321,13 +373,7 @@ class OpenAICompatibleAdapter:
         ):
             raise ValueError("模型没有返回文字、思考或工具调用")
         raw_usage = data.get("usage")
-        usage: Optional[ModelUsage] = None
-        if isinstance(raw_usage, dict):
-            usage = ModelUsage(
-                input_tokens=_optional_int(raw_usage.get("prompt_tokens")),
-                output_tokens=_optional_int(raw_usage.get("completion_tokens")),
-                total_tokens=_optional_int(raw_usage.get("total_tokens")),
-            )
+        usage = _openai_usage(raw_usage) if isinstance(raw_usage, dict) else None
         request_id = (
             response.headers.get("x-request-id")
             or response.headers.get("request-id")
@@ -353,6 +399,33 @@ class OpenAICompatibleAdapter:
 
 def _optional_int(value: Any) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _openai_usage(raw_usage: Dict[str, Any]) -> ModelUsage:
+    prompt_details = raw_usage.get("prompt_tokens_details")
+    completion_details = raw_usage.get("completion_tokens_details")
+    cached = (
+        _optional_int(prompt_details.get("cached_tokens"))
+        if isinstance(prompt_details, dict)
+        else _optional_int(raw_usage.get("prompt_cache_hit_tokens"))
+    )
+    uncached = _optional_int(raw_usage.get("prompt_cache_miss_tokens"))
+    input_tokens = _optional_int(raw_usage.get("prompt_tokens"))
+    if uncached is None and input_tokens is not None and cached is not None:
+        uncached = max(0, input_tokens - cached)
+    reasoning = (
+        _optional_int(completion_details.get("reasoning_tokens"))
+        if isinstance(completion_details, dict)
+        else None
+    )
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=_optional_int(raw_usage.get("completion_tokens")),
+        total_tokens=_optional_int(raw_usage.get("total_tokens")),
+        cached_input_tokens=cached,
+        uncached_input_tokens=uncached,
+        reasoning_output_tokens=reasoning,
+    )
 
 
 def _image_data_url(image_bytes: bytes, provider: str) -> str:

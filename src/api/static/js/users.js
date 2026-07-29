@@ -95,30 +95,33 @@ function initUsers() {
     });
 
     function showTenantDetail(id) {
+        var detailModal = document.getElementById("tenant-detail-modal");
+        var body = document.getElementById("tenant-detail-body");
+        document.getElementById("tenant-detail-title").textContent = "机器人用户详情";
+        body.innerHTML = '<div class="tenant-detail-loading">正在加载用户详情…</div>';
+        detailModal.style.display = "";
         fetch("/api/tenants/" + encodeURIComponent(id))
             .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
             .then(function (t) {
-                var body = document.getElementById("tenant-detail-body");
-                var html = '<div class="detail-grid">' +
-                    "<div><label>租户 ID</label><code class=\"mono\">" + escapeHtml(t.tenant_id) + "</code></div>" +
-                    "<div><label>渠道 / 用户</label>" + escapeHtml(t.bot_id) + " / " + escapeHtml(t.user_id) + "</div>" +
-                    "<div><label>创建时间</label>" + fmtTime(t.created_at) + "</div>" +
-                    "<div><label>消息数 / 最近活跃</label>" + t.message_count + " / " + fmtTime(t.last_active_at) + "</div>" +
-                    "</div>";
-                if (t.schedule_subscriptions.length) {
-                    html += "<h4>定时任务订阅</h4><ul>" + t.schedule_subscriptions.map(function (s) {
-                        return "<li>" + escapeHtml(s.task_id) + (s.enabled ? "（开启）" : "（关闭）") + "</li>";
-                    }).join("") + "</ul>";
-                }
-                if (t.integrations.length) {
-                    html += "<h4>集成</h4><ul>" + t.integrations.map(function (i) {
-                        return "<li>" + escapeHtml(i.integration_id) + "</li>";
-                    }).join("") + "</ul>";
-                }
-                if (t.recent_events.length) {
-                    html += "<h4>最近对话</h4><div class=\"chat-log\">" + t.recent_events.map(function (e) {
+                document.getElementById("tenant-detail-title").textContent =
+                    "机器人用户 · " + t.user_id;
+                var subscriptions = t.schedule_subscriptions.length
+                    ? '<ul class="tenant-detail-list">' + t.schedule_subscriptions.map(function (s) {
+                        return '<li><code>' + escapeHtml(s.task_id) + "</code>" +
+                            '<span class="badge ' + (s.enabled ? "badge-success" : "badge-muted") + '">' +
+                            (s.enabled ? "已开启" : "已关闭") + "</span></li>";
+                    }).join("") + "</ul>"
+                    : '<div class="tenant-section-empty">暂无定时任务订阅</div>';
+                var integrations = t.integrations.length
+                    ? '<ul class="tenant-detail-list">' + t.integrations.map(function (i) {
+                        return "<li><code>" + escapeHtml(i.integration_id) + "</code>" +
+                            "<span>" + escapeHtml(fmtTime(i.updated_at)) + "</span></li>";
+                    }).join("") + "</ul>"
+                    : '<div class="tenant-section-empty">暂无集成</div>';
+                var conversations = t.recent_events.length
+                    ? '<div class="chat-log">' + t.recent_events.map(function (e) {
                         var side = e.role === "user" ? "right" : (e.role === "assistant" ? "left" : "system");
-                        var ts = fmtTime(e.created_at);
+                        var ts = escapeHtml(fmtTime(e.created_at));
                         if (side === "system") {
                             return '<div class="chat-sys">' + escapeHtml(e.content) + "</div>";
                         }
@@ -129,16 +132,55 @@ function initUsers() {
                                 '<span class="chat-time">' + ts + "</span></div>" +
                                 '<div class="chat-text">' + escapeHtml(e.content) + "</div>" +
                             "</div></div>";
-                    }).join("") + "</div>";
-                }
-                body.innerHTML = html;
-                document.getElementById("tenant-detail-modal").style.display = "";
+                    }).join("") + "</div>"
+                    : '<div class="tenant-section-empty tenant-chat-empty">暂无最近对话</div>';
+                body.innerHTML =
+                    '<section class="tenant-summary">' +
+                        '<div class="tenant-identity">' +
+                            '<div><span>渠道</span><strong>' + escapeHtml(t.bot_id) + "</strong></div>" +
+                            '<div><span>用户标识</span><strong>' + escapeHtml(t.user_id) + "</strong></div>" +
+                            '<div class="tenant-id"><span>租户 ID</span><code>' +
+                                escapeHtml(t.tenant_id) + "</code></div>" +
+                        "</div>" +
+                        '<div class="tenant-stat-grid">' +
+                            '<div><span>模型模式</span><strong>' + escapeHtml(t.model_mode) + "</strong></div>" +
+                            '<div><span>消息数</span><strong>' + t.message_count + "</strong></div>" +
+                            '<div><span>创建时间</span><strong>' +
+                                escapeHtml(fmtTime(t.created_at)) + "</strong></div>" +
+                            '<div><span>最近活跃</span><strong>' +
+                                escapeHtml(fmtTime(t.last_active_at)) + "</strong></div>" +
+                        "</div>" +
+                    "</section>" +
+                    '<div class="tenant-detail-layout">' +
+                        '<div class="tenant-side-sections">' +
+                            '<section class="tenant-detail-section"><h4>定时任务订阅</h4>' +
+                                subscriptions + "</section>" +
+                            '<section class="tenant-detail-section"><h4>集成</h4>' +
+                                integrations + "</section>" +
+                        "</div>" +
+                        '<section class="tenant-detail-section tenant-conversation-section">' +
+                            '<div class="tenant-section-title"><h4>最近对话</h4><span>最近 ' +
+                                t.recent_events.length + " 条</span></div>" +
+                            conversations +
+                        "</section>" +
+                    "</div>";
             })
-            .catch(function () { showToast("加载详情失败", "error"); });
+            .catch(function () {
+                body.innerHTML = '<div class="tenant-detail-error">加载用户详情失败，请稍后重试</div>';
+                showToast("加载详情失败", "error");
+            });
     }
 
     document.getElementById("tenant-detail-close").addEventListener("click", function () {
         document.getElementById("tenant-detail-modal").style.display = "none";
+    });
+    document.getElementById("tenant-detail-modal").addEventListener("click", function (evt) {
+        if (evt.target === this) this.style.display = "none";
+    });
+    document.addEventListener("keydown", function (evt) {
+        if (evt.key === "Escape") {
+            document.getElementById("tenant-detail-modal").style.display = "none";
+        }
     });
 
     /* --- Admins tab --- */
@@ -277,6 +319,8 @@ function initUsers() {
         { key: "tenants.delete", label: "删除机器人用户", desc: "清除租户及其全部数据" },
         { key: "panel.read", label: "查看面板配置", desc: "读取模型、智能体等配置" },
         { key: "panel.write", label: "修改面板配置", desc: "编辑模型、智能体、定时任务等" },
+        { key: "model_analytics.read", label: "查看模型分析", desc: "查看用量、成本、质量与预算进度" },
+        { key: "model_analytics.manage", label: "管理模型预算", desc: "创建、修改和删除月度预算" },
         { key: "admins.manage", label: "管理账号与角色", desc: "增删管理员并分配角色权限" }
     ];
 

@@ -14,6 +14,7 @@ from .contracts import (
     ModelRequest,
     ModelResponse,
 )
+from .retry import complete_with_retry
 
 
 FallbackLogger = Callable[[ModelIdentity, ModelIdentity, str], None]
@@ -55,7 +56,11 @@ class ModelSession:
     def complete(self, request: ModelRequest) -> ModelResponse:
         client = self._router.clients[self._profile_id]
         try:
-            return client.complete(request)
+            return complete_with_retry(
+                lambda: client.complete(request),
+                profile_id=self._profile_id,
+                sleep=self._router.retry_sleep,
+            )
         except ModelError as exc:
             if not self._router.can_fail_over(
                 self.mode, self._profile_id, has_image=self.has_image
@@ -66,7 +71,11 @@ class ModelSession:
             self._profile_id = self._router.fallback_profile_id
             target = self._router.clients[self._profile_id]
             self._router.log_fallback(source, target.identity, exc.safe_message)
-            return target.complete(request)
+            return complete_with_retry(
+                lambda: target.complete(request),
+                profile_id=self._profile_id,
+                sleep=self._router.retry_sleep,
+            )
 
     def close(self) -> None:
         return None
@@ -90,6 +99,7 @@ class ModelRouter:
         cooldown_seconds: int = 60,
         fallback_logger: Optional[FallbackLogger] = None,
         monotonic: Callable[[], float] = time.monotonic,
+        retry_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if primary_profile_id not in clients:
             raise ValueError("缺少主模型档案 {}".format(primary_profile_id))
@@ -116,6 +126,7 @@ class ModelRouter:
         self.cooldown_seconds = cooldown_seconds
         self._fallback_logger = fallback_logger
         self._monotonic = monotonic
+        self.retry_sleep = retry_sleep
         self._cooldown_until = 0.0
         self._last_primary_error: Optional[str] = None
         self._lock = threading.RLock()

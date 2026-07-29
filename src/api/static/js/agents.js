@@ -159,6 +159,7 @@ function initAgents() {
         document.getElementById("agent-greeting").value = "";
         document.getElementById("agent-hints").value = "";
         document.getElementById("agent-max-tokens").value = "";
+        document.getElementById("agent-enabled").checked = true;
         resetTempSlider();
         loadModelOptions();
         loadToolOptions();
@@ -175,35 +176,57 @@ function initAgents() {
     function closeModal() { modal.style.display = "none"; }
 
     function loadAgents() {
-        fetch("/api/agents")
-            .then(function (r) { return r.json(); })
-            .then(function (agents) {
-                listEl.innerHTML = agents.map(function (a) {
-                    var caps = a.capabilities.map(function (c) {
-                        return "<li><strong>" + c.name + "</strong>：" + c.description + "</li>";
-                    }).join("");
-                    var tools = a.tools.length ? a.tools.join("、") : "无";
-                    var skills = (a.skills && a.skills.length) ? a.skills.join("、") : "无";
-                    var mcpServers = (a.mcp_servers && a.mcp_servers.length) ? a.mcp_servers.join("、") : "无";
-                    var modelInfo = a.model ? a.model : "跟随默认模型";
-                    return '<details class="agent-card" data-id="' + a.id + '">' +
-                        "<summary>" + a.name + " <small>" + a.role + "</small>" +
-                        '<span class="agent-actions">' +
-                        '<button class="btn-edit" data-action="edit" data-id="' + a.id + '">编辑</button>' +
-                        '<button class="btn-danger" data-action="delete" data-id="' + a.id + '">删除</button>' +
-                        "</span></summary>" +
-                        '<div class="agent-detail">' +
-                        "<p>" + escapeHtml(a.description) + "</p>" +
-                        "<p><strong>模型：</strong>" + escapeHtml(modelInfo) + "</p>" +
-                        (caps ? "<ul>" + caps + "</ul>" : "") +
-                        "<p><strong>工具：</strong>" + escapeHtml(tools) + "</p>" +
-                        "<p><strong>技能：</strong>" + escapeHtml(skills) + "</p>" +
-                        "<p><strong>MCP 服务：</strong>" + escapeHtml(mcpServers) + "</p>" +
-                        "<p><strong>系统提示词：</strong></p>" +
-                        "<pre>" + escapeHtml(a.system_prompt) + "</pre>" +
-                        "</div></details>";
-                }).join("");
-            });
+        Promise.all([
+            fetch("/api/agents").then(function (r) { return r.json(); }),
+            fetch("/api/agents/active").then(function (r) { return r.json(); })
+        ]).then(function (results) {
+            var agents = results[0];
+            var defaultId = results[1].id;
+            listEl.innerHTML = agents.map(function (a) {
+                return agentCardHtml(a, a.id === defaultId);
+            }).join("");
+        });
+    }
+
+    function agentCardHtml(a, isDefault) {
+        var enabled = a.enabled !== false;
+        var badges = "";
+        if (isDefault) badges += '<span class="badge badge-primary">默认</span>';
+        if (!enabled) badges += '<span class="badge badge-fallback">已禁用</span>';
+
+        var caps = a.capabilities || [];
+        var capTags = caps.slice(0, 4).map(function (c) {
+            return '<span class="agent-cap-pill">' + escapeHtml(c.name) + "</span>";
+        }).join("");
+        if (caps.length > 4) {
+            capTags += '<span class="agent-cap-pill agent-cap-more">+' + (caps.length - 4) + "</span>";
+        }
+
+        var modelInfo = a.model ? a.model : "跟随默认模型";
+        var counts = "工具 " + (a.tools || []).length +
+            " · 技能 " + (a.skills || []).length +
+            " · MCP " + (a.mcp_servers || []).length;
+
+        var actions = '<div class="model-card-footer agent-card-actions">';
+        if (!isDefault) {
+            actions += '<button class="btn-secondary" data-action="toggle" data-id="' + a.id + '" data-enabled="' + (enabled ? "1" : "0") + '">' +
+                (enabled ? "禁用" : "启用") + "</button> ";
+        }
+        actions += '<button class="btn-edit" data-action="edit" data-id="' + a.id + '">编辑</button> ';
+        if (!isDefault) {
+            actions += '<button class="btn-danger" data-action="delete" data-id="' + a.id + '">删除</button>';
+        }
+        actions += "</div>";
+
+        return '<div class="agent-card' + (enabled ? "" : " disabled") + '" data-id="' + a.id + '">' +
+            "<h5>" + escapeHtml(a.name) + " " + badges + "</h5>" +
+            '<p class="agent-card-role">' + escapeHtml(a.role || "") + "</p>" +
+            '<p class="agent-card-desc">' + escapeHtml(a.description || "") + "</p>" +
+            (capTags ? '<div class="agent-cap-tags">' + capTags + "</div>" : "") +
+            "<p>模型：" + escapeHtml(modelInfo) + "</p>" +
+            "<p>" + counts + "</p>" +
+            actions +
+            "</div>";
     }
 
     listEl.addEventListener("click", function (e) {
@@ -213,6 +236,21 @@ function initAgents() {
         e.stopPropagation();
         var action = btn.getAttribute("data-action");
         var id = btn.getAttribute("data-id");
+
+        if (action === "toggle") {
+            var nextEnabled = btn.getAttribute("data-enabled") !== "1";
+            fetch("/api/agents/" + id, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ enabled: nextEnabled }),
+            })
+                .then(function (r) {
+                    if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                    showToast((nextEnabled ? "已启用智能体 " : "已禁用智能体 ") + id, "success");
+                    loadAgents();
+                })
+                .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
+        }
 
         if (action === "delete") {
             showConfirm("确定要删除智能体「" + id + "」吗？").then(function (ok) {
@@ -248,6 +286,7 @@ function initAgents() {
                         resetTempSlider();
                     }
                     document.getElementById("agent-max-tokens").value = a.max_tokens || "";
+                    document.getElementById("agent-enabled").checked = a.enabled !== false;
                     loadModelOptions().then(function () {
                         document.getElementById("agent-model").value = a.model || "";
                     });
@@ -278,6 +317,7 @@ function initAgents() {
             greeting_hints: hints,
             temperature: tempVal !== "" ? parseFloat(tempVal) : null,
             max_tokens: maxTokVal ? parseInt(maxTokVal, 10) : null,
+            enabled: document.getElementById("agent-enabled").checked,
             tools: selection.tools,
             skills: selection.skills,
             mcp_servers: selection.mcp_servers,

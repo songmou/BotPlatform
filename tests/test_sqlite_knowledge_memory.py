@@ -6,6 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.memory import MemoryService, ModelMemoryExtractor
@@ -151,6 +152,52 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.index_file(self.tenant, outside)
         self.assertTrue(service.delete(self.tenant.tenant_id, indexed["source_id"]))
+
+    def test_rich_document_indexing_boundary_and_limits(self):
+        import docx
+        from openpyxl import Workbook
+
+        service = KnowledgeService(self.registry, None)
+        workspace = self.registry.tenant_root(self.tenant.tenant_id) / "workspace"
+
+        word_path = workspace / "manual.docx"
+        document = docx.Document()
+        document.add_heading("产品手册", level=1)
+        document.add_paragraph("退货政策支持七天无理由退货。")
+        document.save(str(word_path))
+        indexed = service.index_file(self.tenant, word_path)
+        self.assertEqual(indexed["status"], "pending_embedding")
+        self.assertGreater(indexed["chunks"], 0)
+        results = service.search(self.tenant.tenant_id, "退货政策")
+        self.assertTrue(any("退货" in item["content"] for item in results))
+
+        sheet_path = workspace / "price.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "价格表"
+        sheet.append(["商品", "价格"])
+        sheet.append(["苹果", 5])
+        workbook.save(str(sheet_path))
+        indexed = service.index_file(self.tenant, sheet_path)
+        self.assertGreater(indexed["chunks"], 0)
+        results = service.search(self.tenant.tenant_id, "价格表")
+        self.assertTrue(any("苹果" in item["content"] for item in results))
+
+        # Rich documents outside the tenant workspace stay rejected.
+        outside = Path(self.temp.name) / "outside.docx"
+        document.save(str(outside))
+        with self.assertRaises(ValueError):
+            service.index_file(self.tenant, outside)
+
+        # The dedicated 20 MiB budget applies to rich documents.
+        with patch("src.core.services.knowledge.MAX_DOCUMENT_BYTES", 10):
+            with self.assertRaisesRegex(ValueError, "20 MiB"):
+                service.index_file(self.tenant, word_path)
+
+        unsupported = workspace / "data.csv"
+        unsupported.write_text("a,b", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            service.index_file(self.tenant, unsupported)
 
     def test_embedding_failure_keeps_searchable_chunks(self):
         service = KnowledgeService(self.registry, None)
@@ -430,7 +477,12 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
             "list",
         )
         self.assertIn("SQLite 待办", listed.summary)
-        self.assertFalse((self.registry.tenant_root(self.tenant.tenant_id) / "scripts" / "todo" / "todos.json").exists())
+        self.assertFalse(
+            (
+                self.registry.tenant_root(self.tenant.tenant_id)
+                / "scripts" / "todo" / "todos.json"
+            ).exists()
+        )
 
     def test_tenant_deletion_purges_fts_and_keeps_audit(self):
         service = KnowledgeService(self.registry, None)

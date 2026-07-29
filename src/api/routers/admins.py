@@ -33,6 +33,14 @@ _KNOWN_PERMISSIONS = {
     "panel.read",
     "panel.write",
     "admins.manage",
+    "scripts.read",
+    "scripts.execute",
+    "scripts.manage",
+    "schedules.manage",
+    "model_analytics.read",
+    "model_analytics.manage",
+    "knowledge.read",
+    "knowledge.manage",
 }
 
 

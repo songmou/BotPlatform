@@ -33,6 +33,7 @@ def _to_out(agent) -> AgentOut:
         greeting_hints=list(agent.greeting_hints),
         temperature=agent.temperature,
         max_tokens=agent.max_tokens,
+        enabled=agent.enabled,
     )
 
 
@@ -47,6 +48,7 @@ def _agent_to_dict(agent) -> dict:
         "tools": agent.tools,
         "skills": list(agent.skills),
         "mcp_servers": list(agent.mcp_servers),
+        "enabled": agent.enabled,
     }
     if agent.model:
         data["model"] = agent.model
@@ -130,6 +132,7 @@ def create_agent(body: AgentCreate, request: Request):
         greeting_hints=body.greeting_hints or [],
         temperature=body.temperature,
         max_tokens=body.max_tokens,
+        enabled=body.enabled,
     )
     _save_agent_file(agent_id, _agent_to_dict(preset))
     _update_memory(request, agent_id, preset)
@@ -142,6 +145,8 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
     existing = config.agents.get(agent_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="智能体不存在")
+    if body.enabled is False and agent_id == config.app.default_agent:
+        raise HTTPException(status_code=400, detail="不能禁用默认智能体")
 
     preset = AgentPreset(
         id=agent_id,
@@ -162,6 +167,7 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
         greeting_hints=body.greeting_hints if body.greeting_hints is not None else existing.greeting_hints,
         temperature=body.temperature if body.temperature is not None else existing.temperature,
         max_tokens=body.max_tokens if body.max_tokens is not None else existing.max_tokens,
+        enabled=body.enabled if body.enabled is not None else existing.enabled,
     )
     _save_agent_file(agent_id, _agent_to_dict(preset))
     _update_memory(request, agent_id, preset)

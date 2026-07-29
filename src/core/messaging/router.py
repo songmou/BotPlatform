@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Dict, Iterable, Iterator, Optional
+from typing import Dict, Iterable, Iterator
 
 from .contracts import (
     AttachmentRef,
@@ -25,6 +25,19 @@ class MessageRouter:
         if adapter.channel_id in self._adapters:
             raise ValueError("渠道实例编号重复：{}".format(adapter.channel_id))
         self._adapters[adapter.channel_id] = adapter
+
+    def reset(self, adapters: Iterable[MessagingAdapter] = ()) -> None:
+        """Replace the registered adapters in place.
+
+        Long-lived holders (such as ``NotificationService``) keep their
+        reference to this router across channel re-logins; swapping the
+        adapter set here repoints delivery at the freshly authenticated
+        clients without rebuilding the router. Closing the previous adapters
+        remains the caller's responsibility.
+        """
+        self._adapters = {}
+        for adapter in adapters:
+            self.register(adapter)
 
     def adapter(self, channel_id: str) -> MessagingAdapter:
         try:
