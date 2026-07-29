@@ -337,6 +337,7 @@ function initChat() {
         msg.appendChild(bubble);
         row.appendChild(msg);
         messagesEl.appendChild(row);
+        scrollToBottom();
         return { bubble: bubble, contentEl: contentEl, row: row, msg: msg };
     }
 
@@ -442,6 +443,22 @@ function initChat() {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
+    var IMAGE_URL_RE = /\.(png|jpe?g|gif|webp|bmp|svg)(\?[^\s)"']*)?$/i;
+
+    function inlineImages(el) {
+        el.querySelectorAll("a").forEach(function (a) {
+            var href = a.getAttribute("href") || "";
+            if (!IMAGE_URL_RE.test(href.split("#")[0])) return;
+            var img = document.createElement("img");
+            img.src = href;
+            img.alt = a.textContent || "";
+            a.replaceWith(img);
+        });
+        el.querySelectorAll("img").forEach(function (img) {
+            img.addEventListener("load", scrollToBottom);
+        });
+    }
+
     function streamAssistant(userText, regenerate) {
         sendBtn.disabled = true;
         agentSelectBtn.disabled = true;
@@ -520,7 +537,11 @@ function initChat() {
                 hideWelcome();
                 traceContainer = document.createElement("div");
                 traceContainer.className = "trace-container";
-                messagesEl.appendChild(traceContainer);
+                if (summaryRow && summaryRow.parentElement === messagesEl) {
+                    messagesEl.insertBefore(traceContainer, summaryRow);
+                } else {
+                    messagesEl.appendChild(traceContainer);
+                }
             }
             return traceContainer;
         }
@@ -536,40 +557,8 @@ function initChat() {
                     '<div class="trace-card-body"><pre>' + escapeHtml(ev.content) + '</pre></div>';
                 container.appendChild(card);
                 scrollToBottom();
-            } else if (ev.type === "tool_call") {
-                var container = getTraceContainer();
-                var card = document.createElement("div");
-                card.className = "trace-card tool-card";
-                card.setAttribute("data-tool", ev.name);
-                var argsPreview = "";
-                try { argsPreview = JSON.stringify(ev.arguments, null, 2); } catch (e) { argsPreview = "{}"; }
-                card.innerHTML = '<div class="trace-card-header" onclick="this.parentElement.classList.toggle(\'expanded\')">' +
-                    '<span class="trace-card-icon">🔧</span><span class="trace-card-title">调用工具: ' + escapeHtml(ev.name) + '</span>' +
-                    '<span class="trace-card-status working">执行中...</span>' +
-                    '<span class="trace-card-toggle">▶</span></div>' +
-                    '<div class="trace-card-body"><div class="trace-section"><strong>参数</strong><pre>' + escapeHtml(argsPreview) + '</pre></div>' +
-                    '<div class="trace-section trace-result"></div></div>';
-                container.appendChild(card);
-                scrollToBottom();
-            } else if (ev.type === "tool_result") {
-                var container = getTraceContainer();
-                var cards = container.querySelectorAll('.tool-card[data-tool="' + ev.name + '"]');
-                var card = cards[cards.length - 1];
-                if (card) {
-                    var status = card.querySelector(".trace-card-status");
-                    var resultEl = card.querySelector(".trace-result");
-                    var isOk = ev.result && ev.result.ok !== false;
-                    if (status) {
-                        status.className = "trace-card-status " + (isOk ? "done" : "error");
-                        status.textContent = isOk ? "完成" : "失败";
-                    }
-                    if (resultEl) {
-                        var resultText = "";
-                        try { resultText = JSON.stringify(ev.result, null, 2); } catch (e) { resultText = "{}"; }
-                        resultEl.innerHTML = '<strong>结果</strong><pre>' + escapeHtml(resultText.substring(0, 1000)) + '</pre>';
-                    }
-                }
-                scrollToBottom();
+            } else if (ev.type === "tool_call" || ev.type === "tool_result") {
+                // 工具调用过程不在页面展示
             } else if (ev.type === "sources") {
                 sourcesData = ev.sources || [];
             } else if (ev.type === "plan") {
@@ -664,6 +653,7 @@ function initChat() {
             if (summaryBubble && summaryBubble.parentElement) {
                 summaryBubble.parentElement.classList.remove("streaming");
                 addCodeCopyButtons(streamContentEl || summaryBubble);
+                inlineImages(streamContentEl || summaryBubble);
             }
             if (summaryRow) {
                 var getText = function () { return fullText; };
@@ -705,6 +695,7 @@ function initChat() {
                         lastUserText = m.content;
                     } else {
                         addCodeCopyButtons(refs.bubble);
+                        inlineImages(refs.bubble);
                         var content = m.content;
                         addAssistantActions(refs.row, function () { return content; });
                         lastAssistant = { row: refs.row, text: m.content, userText: lastUserText };

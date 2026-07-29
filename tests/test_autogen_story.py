@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,7 @@ class AutoGenStoryTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.data_root = self.root / "autogen"
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_first_story_state_is_saved_and_loaded(self) -> None:
         with patch.object(monitor, "DATA_ROOT", self.data_root):
             monitor.save_story_state(scene())

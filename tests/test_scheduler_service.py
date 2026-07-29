@@ -246,6 +246,7 @@ class SchedulerServiceTests(unittest.TestCase):
             memory_service=memory_service,
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_recipient_is_atomic_private_and_reloadable(self) -> None:
         self.store.update(self.tenant, "context")
         recipient = self.store.load(self.tenant.tenant_id)

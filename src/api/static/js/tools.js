@@ -476,7 +476,16 @@ function initTools() {
         else { method = "POST"; apiUrl = "/api/mcp"; payload.id = id; }
         fetch(apiUrl, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
             .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); }); return r.json(); })
-            .then(function () { showToast(mcpEditingId ? "已更新 MCP 服务" : "已添加 MCP 服务", "success"); mcpModal.style.display = "none"; loadMcpServers(); })
+            .then(function () {
+                var savedId = mcpEditingId;
+                showToast(mcpEditingId ? "已更新 MCP 服务" : "已添加 MCP 服务", "success");
+                mcpModal.style.display = "none";
+                loadMcpServers();
+                if (savedId && mcpDetailPane.style.display !== "none" &&
+                    currentMcpServer && currentMcpServer.id === savedId) {
+                    openMcpDetail(savedId);
+                }
+            })
             .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
     });
 
@@ -508,6 +517,7 @@ function initTools() {
         mcpEditingId = s.id;
         document.getElementById("mcp-modal-title").textContent = "编辑 MCP 服务";
         document.getElementById("mcp-id-group").style.display = "none";
+        document.getElementById("mcp-id").value = s.id;
         document.getElementById("mcp-name").value = s.name;
         document.getElementById("mcp-transport").value = s.transport;
         document.getElementById("mcp-command").value = s.command || "";
@@ -538,6 +548,7 @@ function initTools() {
         document.querySelectorAll(".mcp-detail-subtab").forEach(function (btn) {
             btn.classList.toggle("active", btn.getAttribute("data-detail-tab") === tab);
         });
+        if (tab === "tools" && currentMcpServer) loadMcpDetailTools(currentMcpServer.id);
     }
 
     function buildMcpConfigJson(s) {
@@ -579,7 +590,6 @@ function initTools() {
             mcpListPane.style.display = "none";
             mcpDetailPane.style.display = "";
             switchMcpDetailTab("overview");
-            loadMcpDetailTools(id);
         });
     }
 

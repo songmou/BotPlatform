@@ -95,7 +95,8 @@ class ToolRuntimeTests(unittest.TestCase):
 
         listed = self.runtime.execute("list_directory", {"path": ".", "depth": 2})
         self.assertTrue(listed.ok)
-        paths = [item["path"] for item in listed.data["items"]]
+        # Normalize separators so the assertion also holds on Windows.
+        paths = [item["path"].replace(os.sep, "/") for item in listed.data["items"]]
         self.assertIn("notes.txt", paths)
         self.assertIn("folder/code.py", paths)
 
@@ -120,6 +121,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsInstance(logs[0][4], int)
         self.assertNotIn(str(result.data), repr(logs[0]))
 
+    @unittest.skipUnless(os.name == "posix", "symlink creation needs privileges on Windows")
     def test_path_escape_symlink_and_sensitive_files_are_rejected(self) -> None:
         outside = Path(self.temp.name) / "outside.txt"
         outside.write_text("secret", encoding="utf-8")
@@ -141,6 +143,7 @@ class ToolRuntimeTests(unittest.TestCase):
             self.runtime.execute("read_text_file", {"path": "large.txt"}).ok
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_confirmed_file_changes_and_trash(self) -> None:
         write_args = {"path": "draft.txt", "content": "hello\n", "mode": "create"}
         preview = self.runtime.preview("write_text_file", write_args)

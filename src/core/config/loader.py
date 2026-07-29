@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
+from src.core.config.mcp_headers import merge_headers
 from src.core.modeling import ModelCapabilities
 from src.core.plugins.registry import (
     known_plugin_ids,
@@ -1297,7 +1298,7 @@ def _load_mcp_servers(path: Path) -> List[Dict[str, Any]]:
     servers = data.get("servers", [])
     if not isinstance(servers, list):
         raise _error(path, "servers", "必须是数组")
-    return servers
+    return merge_headers(servers)
 
 
 def load_project_config(config_dir: Path) -> ProjectConfig:

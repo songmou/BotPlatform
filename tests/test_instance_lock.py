@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from src.core.infrastructure.instance_lock import AlreadyRunning, SingleInstance
 
 
 class SingleInstanceLockTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX advisory locks allow reading a held lock file")
     def test_second_process_reports_owner_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "bot.lock"
@@ -43,6 +45,7 @@ class SingleInstanceLockTests(unittest.TestCase):
             self.assertIn("PID=", result.stdout)
             self.assertIn("启动时间=", result.stdout)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX advisory locks allow reading a held lock file")
     def test_released_and_stale_lock_files_can_be_acquired(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "bot.lock"

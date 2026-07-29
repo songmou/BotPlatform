@@ -56,6 +56,7 @@ class MultiTenantStorageTests(unittest.TestCase):
         self.a = self.registry.resolve("bot", "wechat-a")
         self.b = self.registry.resolve("bot", "wechat-b")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o700/0o600) are asserted")
     def test_identity_state_history_and_deletion_are_isolated(self):
         self.assertNotEqual(self.a.tenant_id, self.b.tenant_id)
         self.assertNotIn("wechat-a", str(self.registry.tenant_root(self.a.tenant_id)))
@@ -95,6 +96,7 @@ class MultiTenantStorageTests(unittest.TestCase):
         recreated = self.registry.resolve("bot", "wechat-a")
         self.assertNotEqual(recreated.tenant_id, old_id)
 
+    @unittest.skipUnless(os.name == "posix", "symlink creation needs privileges on Windows")
     def test_recipient_schedule_and_tool_roots_are_tenant_scoped(self):
         recipients = TenantRecipientStore(self.registry)
         recipients.update(self.a, "context-a")

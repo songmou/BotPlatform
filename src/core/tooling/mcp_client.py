@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 import threading
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,31 @@ DEFAULT_TIMEOUT = 30.0
 def namespaced_name(server_id: str, tool_name: str) -> str:
     """Build the collision-safe tool name exposed to agents."""
     return "{}__{}".format(server_id, tool_name)
+
+
+_DISCONNECT_MARKERS = (
+    "ClosedResourceError",
+    "BrokenResourceError",
+    "EndOfStream",
+    "ConnectionError",
+    "ConnectionResetError",
+)
+
+
+def _is_disconnected(exc: BaseException) -> bool:
+    """Report whether an error means the MCP transport is no longer usable."""
+    stack = [exc]
+    while stack:
+        current = stack.pop()
+        if type(current).__name__ in _DISCONNECT_MARKERS:
+            return True
+        sub = getattr(current, "exceptions", None)
+        if sub:
+            stack.extend(sub)
+        cause = getattr(current, "__cause__", None)
+        if cause is not None:
+            stack.append(cause)
+    return False
 
 
 class _Connection:
@@ -177,18 +203,41 @@ class McpClientManager:
         return None
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+        target = self._resolve_target(name)
+        if target is None:
+            raise RuntimeError("未知 MCP 工具：{}".format(name))
+        server_id, session, real_name = target
+        try:
+            result = self._run(self._call(session, real_name, arguments))
+        except Exception as exc:  # noqa: BLE001 - retried once when disconnected
+            if not _is_disconnected(exc):
+                raise
+            logger.warning("MCP 服务 %s 连接已断开，正在重连", server_id)
+            session, real_name = self._reconnect(server_id, name)
+            result = self._run(self._call(session, real_name, arguments))
+        return self._serialize_result(result)
+
+    def _resolve_target(self, name: str) -> Optional[tuple]:
         with self._lock:
-            target: Optional[Any] = None
             for conn in self._connections.values():
                 tool = conn.tools.get(name)
                 if tool is not None:
-                    target = (conn.session, tool["real_name"])
-                    break
-        if target is None:
-            raise RuntimeError("未知 MCP 工具：{}".format(name))
-        session, real_name = target
-        result = self._run(self._call(session, real_name, arguments))
-        return self._serialize_result(result)
+                    return (conn.server_id, conn.session, tool["real_name"])
+        return None
+
+    def _reconnect(self, server_id: str, name: str) -> tuple:
+        with self._lock:
+            conn = self._connections.get(server_id)
+            if conn is None:
+                raise RuntimeError("MCP 服务 {} 未连接".format(server_id))
+            cfg = dict(conn.cfg)
+            self._disconnect_locked(server_id)
+            self._connect_locked(cfg)
+            conn = self._connections.get(server_id)
+            tool = conn.tools.get(name) if conn is not None else None
+            if conn is None or tool is None:
+                raise RuntimeError("未知 MCP 工具：{}".format(name))
+            return conn.session, tool["real_name"]
 
     # ---- async internals ----
     async def _connection_lifecycle(
@@ -202,7 +251,17 @@ class McpClientManager:
         try:
             async with AsyncExitStack() as stack:
                 transport = cfg.get("transport", "stdio")
-                headers = cfg.get("headers") or None
+                headers = dict(cfg.get("headers") or {})
+                for header_name, env_key in (cfg.get("headers_env") or {}).items():
+                    value = os.getenv(env_key or "")
+                    if not value:
+                        continue
+                    for existing in [
+                        k for k in headers if k.lower() == header_name.lower()
+                    ]:
+                        del headers[existing]
+                    headers[header_name] = value
+                headers = headers or None
                 if transport == "sse":
                     from mcp.client.sse import sse_client
 

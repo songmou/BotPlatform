@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +31,8 @@ from src.api.sse import (
 from src.core.modeling.contracts import CanonicalMessage, GenerationOptions, ModelError, ModelRequest
 from src.core.paths import SYSTEM_DATA_DIR
 from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -399,6 +402,14 @@ def chat(body: ChatRequest, request: Request):
                 yield from stream_final(current_messages)
             else:
                 tool_used = False
+                try:
+                    tool_runtime.bind_tenant(get_registry(request).resolve(WEB_BOT_ID, conv_id))
+                except Exception:
+                    logger.exception(
+                        "Web chat tenant binding failed, aborting tool calls (conv_id=%s)", conv_id
+                    )
+                    yield sse_error("租户绑定失败，无法安全执行工具调用，请稍后重试。")
+                    return
                 for _round in range(max_tool_rounds):
                     current_request = ModelRequest(
                         messages=current_messages,
