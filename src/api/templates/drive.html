@@ -1,68 +1,71 @@
 {% extends "base.html" %}
-{% block title %}网盘 - BotPlatform{% endblock %}
+{% block title %}文件管理 - BotPlatform{% endblock %}
 {% block head %}
-<style>
-.drive-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.drive-breadcrumbs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 12px 0; font-size: 14px; }
-.drive-breadcrumbs a { cursor: pointer; color: var(--primary, #2563eb); text-decoration: none; }
-.drive-breadcrumbs .sep { opacity: .5; }
-.drive-entry-name { cursor: default; display: inline-flex; align-items: center; gap: 6px; }
-.drive-entry-name.folder { cursor: pointer; color: var(--primary, #2563eb); }
-.drive-actions button { margin-right: 4px; }
-.drive-tabs { display: flex; gap: 16px; margin: 20px 0 12px; border-bottom: 1px solid var(--border, #e5e7eb); }
-.drive-tab { padding: 8px 2px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 14px; }
-.drive-tab.active { border-bottom-color: var(--primary, #2563eb); font-weight: 600; }
-.drive-audit-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
-.drive-pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; }
-#drive-preview-content { white-space: pre-wrap; max-height: 60vh; overflow: auto; background: var(--code-bg, #f6f8fa); padding: 12px; border-radius: 6px; font-family: monospace; font-size: 13px; }
-</style>
+<link rel="stylesheet" href="/static/css/drive.css">
 {% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
         <div class="page-header-row">
             <div>
-                <h2>网盘</h2>
+                <h2>文件管理</h2>
                 <p class="page-desc">管理公共文件区与租户独立文件区：支持多级文件夹、上传下载、重命名、移动与删除，所有操作留有审计日志</p>
-            </div>
-            <div class="drive-toolbar">
-                <select id="drive-scope">
-                    <option value="public">公共文件区</option>
-                    <option value="tenant">租户文件区</option>
-                </select>
-                <select id="drive-tenant" style="display:none"></select>
-                <button id="drive-mkdir-btn" class="btn-secondary" data-manage="1">+ 新建文件夹</button>
-                <button id="drive-upload-btn" class="btn-primary" data-manage="1">+ 上传文件</button>
-                <input type="file" id="drive-file-input" style="display:none">
             </div>
         </div>
     </div>
 
-    <div class="drive-tabs">
-        <div class="drive-tab active" data-tab="files">文件</div>
-        <div class="drive-tab" data-tab="audit">操作日志</div>
+    <div class="tab-bar drive-tabs">
+        <button class="tab-btn active" type="button" data-drive-tab="public">公共文件区</button>
+        <button class="tab-btn" type="button" data-drive-tab="tenant">租户文件区</button>
+        <button class="tab-btn" type="button" data-drive-tab="audit">操作日志</button>
     </div>
 
     <div id="drive-files-panel">
-        <div class="drive-breadcrumbs" id="drive-breadcrumbs"></div>
-        <div class="table-scroll">
-            <table class="data-table" id="drive-table">
-                <thead>
-                    <tr>
-                        <th>名称</th>
-                        <th>大小</th>
-                        <th>修改时间</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody id="drive-table-body"></tbody>
-            </table>
+        <div class="drive-panel-toolbar" aria-label="文件操作">
+            <div class="drive-toolbar">
+                <button id="drive-mkdir-btn" class="btn-secondary" data-manage="1">+ 新建文件夹</button>
+                <button id="drive-newfile-btn" class="btn-secondary" data-manage="1">+ 新建文件</button>
+                <button id="drive-upload-btn" class="btn-primary" data-manage="1">+ 上传文件</button>
+                <input type="file" id="drive-file-input" multiple style="display:none">
+            </div>
+        </div>
+        <div class="drive-layout">
+            <div class="drive-sidebar">
+                <select id="drive-tenant" class="drive-select" style="display:none"></select>
+                <div class="drive-tree" id="drive-tree"></div>
+            </div>
+            <div class="drive-main">
+                <div class="drive-main-toolbar">
+                    <div class="drive-breadcrumbs" id="drive-breadcrumbs"></div>
+                    <div class="drive-batch-actions">
+                        <span id="drive-selection-count"></span>
+                        <button id="drive-batch-download" class="btn-secondary" disabled>下载</button>
+                        <button id="drive-batch-knowledge" class="btn-secondary" disabled>加入知识库</button>
+                        <button id="drive-batch-move" class="btn-secondary" data-manage="1" disabled>移动</button>
+                        <button id="drive-batch-delete" class="btn-secondary" data-manage="1" disabled>删除</button>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table" id="drive-table">
+                        <thead>
+                            <tr>
+                                <th class="drive-check-col"><input type="checkbox" id="drive-select-all"></th>
+                                <th>名称</th>
+                                <th>大小</th>
+                                <th>修改时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="drive-table-body"></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
     <div id="drive-audit-panel" style="display:none">
         <div class="drive-audit-toolbar">
-            <select id="drive-audit-action">
+            <select id="drive-audit-action" class="drive-select">
                 <option value="">全部动作</option>
                 <option value="upload">上传</option>
                 <option value="download">下载</option>
@@ -108,11 +111,102 @@
         </div>
         <div class="modal-body">
             <pre id="drive-preview-content"></pre>
+            <div id="drive-preview-markdown" class="drive-markdown" style="display:none"></div>
+            <img id="drive-preview-image" style="display:none" alt="图片预览">
         </div>
     </div>
 </div>
+
+<!-- Shared single-input modal (create folder / rename) -->
+<div id="drive-input-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="drive-input-title">输入</h3>
+            <button id="drive-input-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="drive-input-form" class="modal-body">
+            <div class="form-group">
+                <label id="drive-input-label" for="drive-input-value">名称</label>
+                <input type="text" id="drive-input-value" autocomplete="off">
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="drive-input-cancel" class="btn-secondary">取消</button>
+                <button type="submit" class="btn-primary">确定</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Move target picker modal (folder tree) -->
+<div id="drive-move-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="drive-move-title">移动到</h3>
+            <button id="drive-move-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="drive-move-tree" id="drive-move-tree"></div>
+            <div class="drive-move-hint" id="drive-move-hint">请选择目标目录</div>
+            <div class="modal-footer">
+                <button type="button" id="drive-move-cancel" class="btn-secondary">取消</button>
+                <button type="button" id="drive-move-confirm" class="btn-primary">移动</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Text editor modal (create / edit text files) -->
+<div id="drive-editor-modal" class="modal-overlay" style="display:none">
+    <div class="modal drive-editor-modal">
+        <div class="modal-header">
+            <h3 id="drive-editor-title">编辑文件</h3>
+            <button id="drive-editor-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group" id="drive-editor-name-group">
+                <label for="drive-editor-name">文件名（含扩展名，如 笔记.md）</label>
+                <input type="text" id="drive-editor-name" autocomplete="off" placeholder="如 笔记.md、配置.json">
+            </div>
+            <div class="form-group">
+                <textarea id="drive-editor-content" spellcheck="false"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="drive-editor-cancel" class="btn-secondary">取消</button>
+                <button type="button" id="drive-editor-save" class="btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="drive-knowledge-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>加入知识库</h3>
+            <button id="drive-knowledge-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label for="drive-knowledge-category">目标知识库</label>
+                <select id="drive-knowledge-category" class="drive-select"></select>
+                <small>仅显示与当前网盘范围一致的知识库</small>
+            </div>
+            <div id="drive-knowledge-summary" class="status-card"></div>
+            <div class="modal-footer">
+                <button type="button" id="drive-knowledge-cancel" class="btn-secondary">取消</button>
+                <button type="button" id="drive-knowledge-confirm" class="btn-primary">解析并加入</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Drag-and-drop upload overlay -->
+<div id="drive-drop-overlay" style="display:none">
+    <div class="drive-drop-box">释放以上传到当前目录</div>
+</div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/vendor/marked/marked.umd.js"></script>
+<script src="/static/vendor/dompurify/purify.min.js"></script>
 <script src="/static/js/drive.js"></script>
 <script>initDrive();</script>
 {% endblock %}

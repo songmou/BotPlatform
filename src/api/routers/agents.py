@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.api.deps import get_config
-from src.api.schemas import AgentCreate, AgentOut, AgentUpdate
+from src.api.deps import get_config, require_permission
+from src.api.schemas import (
+    AgentCreate,
+    AgentOut,
+    AgentUpdate,
+    KnowledgeAgentBindingsIn,
+)
 from src.core.config.loader import AgentPreset, Capability
 from src.core.paths import CONFIG_DIR
 
@@ -97,6 +102,41 @@ def active_agent(request: Request):
     return _to_out(config.active_agent)
 
 
+@router.get("/{agent_id}/knowledge-categories")
+def get_agent_knowledge_categories(
+    agent_id: str,
+    request: Request,
+    principal=Depends(require_permission("knowledge.read")),
+):
+    config = get_config(request)
+    if agent_id not in config.agents:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    service = getattr(request.app.state, "knowledge_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="知识库服务不可用")
+    return {"category_ids": service.get_agent_bindings(agent_id)}
+
+
+@router.put("/{agent_id}/knowledge-categories")
+def update_agent_knowledge_categories(
+    agent_id: str,
+    body: KnowledgeAgentBindingsIn,
+    request: Request,
+    principal=Depends(require_permission("knowledge.manage")),
+):
+    config = get_config(request)
+    if agent_id not in config.agents:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    service = getattr(request.app.state, "knowledge_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="知识库服务不可用")
+    try:
+        category_ids = service.set_agent_bindings(agent_id, body.category_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"category_ids": category_ids}
+
+
 @router.get("/{agent_id}", response_model=AgentOut)
 def get_agent(agent_id: str, request: Request):
     config = get_config(request)
@@ -183,4 +223,7 @@ def delete_agent(agent_id: str, request: Request):
         raise HTTPException(status_code=400, detail="不能删除默认智能体")
     _delete_agent_file(agent_id)
     _remove_from_memory(request, agent_id)
+    service = getattr(request.app.state, "knowledge_service", None)
+    if service is not None:
+        service.set_agent_bindings(agent_id, [])
     return {"status": "ok"}

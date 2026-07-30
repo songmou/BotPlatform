@@ -33,6 +33,7 @@ from src.core.storage.schema import (  # noqa: F401
     SCHEMA_V17,
     SCHEMA_V18,
     SCHEMA_V19,
+    SCHEMA_V20,
 )
 
 

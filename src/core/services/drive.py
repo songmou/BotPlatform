@@ -13,11 +13,14 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core.storage.tenants import TenantRegistry, TenantStoreError
+
+logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_PREVIEW_BYTES = 256 * 1024
@@ -55,10 +58,29 @@ class DriveEntry:
 class DriveService:
     """Validated filesystem operations for the drive module."""
 
-    def __init__(self, tenant_registry: TenantRegistry, public_root: Path) -> None:
+    def __init__(
+        self,
+        tenant_registry: TenantRegistry,
+        public_root: Path,
+        knowledge_service: Optional[Any] = None,
+    ) -> None:
         self.registry = tenant_registry
         self.public_root = public_root.resolve()
+        self.knowledge_service = knowledge_service
         _secure_directory(self.public_root)
+
+    def attach_knowledge_service(self, service: Any) -> None:
+        self.knowledge_service = service
+
+    def _notify_knowledge(self, method: str, *args: Any) -> None:
+        service = self.knowledge_service
+        callback = getattr(service, method, None) if service is not None else None
+        if not callable(callback):
+            return
+        try:
+            callback(*args)
+        except Exception:
+            logger.warning("同步网盘知识关联失败：%s", method, exc_info=True)
 
     # ---- path resolution & safety ----
 
@@ -270,13 +292,17 @@ class DriveService:
         if not parent.exists() or not parent.is_dir():
             raise ValueError("目录不存在")
         target = parent / self._validate_name(filename)
+        existed = target.exists()
         if target.is_dir():
             raise ValueError("目标是一个目录，无法覆盖")
         if target.exists() and not overwrite:
             raise ValueError("同名文件已存在，如需覆盖请显式确认")
         target.write_bytes(payload)
         root = self._root(scope, tenant_id)
-        return {"path": self._relative(root, target), "size": len(payload)}
+        relative = self._relative(root, target)
+        if existed:
+            self._notify_knowledge("mark_drive_changed", scope, tenant_id, relative)
+        return {"path": relative, "size": len(payload)}
 
     def rename(
         self, scope: str, tenant_id: Optional[str], path: str, new_name: str
@@ -290,8 +316,13 @@ class DriveService:
         target = source.parent / self._validate_name(new_name)
         if target.exists():
             raise ValueError("同名文件或目录已存在")
+        old_path = self._relative(root, source)
         source.rename(target)
-        return {"path": self._relative(root, target)}
+        new_path = self._relative(root, target)
+        self._notify_knowledge(
+            "move_drive_path", scope, tenant_id, old_path, new_path
+        )
+        return {"path": new_path}
 
     def move(
         self, scope: str, tenant_id: Optional[str], path: str, target_dir: str
@@ -312,8 +343,13 @@ class DriveService:
         destination = destination_dir / source.name
         if destination.exists():
             raise ValueError("目标位置已存在同名文件或目录")
+        old_path = self._relative(root, source)
         shutil.move(str(source), str(destination))
-        return {"path": self._relative(root, destination)}
+        new_path = self._relative(root, destination)
+        self._notify_knowledge(
+            "move_drive_path", scope, tenant_id, old_path, new_path
+        )
+        return {"path": new_path}
 
     def delete(
         self,
@@ -328,10 +364,12 @@ class DriveService:
             raise ValueError("不能删除根目录")
         if not target.exists():
             raise ValueError("文件或目录不存在")
+        relative = self._relative(root, target)
         if target.is_dir():
             if any(target.iterdir()) and not recursive:
                 raise ValueError("目录非空，如需删除请显式确认递归删除")
             shutil.rmtree(str(target))
         else:
             target.unlink()
-        return {"deleted": True, "path": self._relative(root, target)}
+        self._notify_knowledge("mark_drive_deleted", scope, tenant_id, relative)
+        return {"deleted": True, "path": relative}

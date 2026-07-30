@@ -77,7 +77,12 @@ def build_core_services(
         EmbeddingClient(config.embedding) if config.embedding.enabled else None
     )
     knowledge_service = KnowledgeService(tenant_registry, embedding_client)
-    drive_service = DriveService(tenant_registry, data_dir / "public")
+    knowledge_service.bootstrap_agent_bindings(
+        agent.id for agent in config.agents.values() if agent.enabled
+    )
+    drive_service = DriveService(
+        tenant_registry, data_dir / "public", knowledge_service=knowledge_service
+    )
 
     clients: Dict[str, ModelClient] = {}
     warnings: List[str] = []

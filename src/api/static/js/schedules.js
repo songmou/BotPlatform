@@ -73,16 +73,15 @@ function initSchedules() {
                         '<div class="card-header">' +
                         '<div><strong>' + escapeHtml(t.id) + '</strong>' +
                         (t.enabled ? '<span class="badge badge-success">启用</span>' : '<span class="badge badge-muted">禁用</span>') +
-                        '</div>' +
-                        '<div class="card-actions">' +
-                        '<button class="btn-edit" data-action="edit" data-id="' + t.id + '">编辑</button>' +
-                        '<button class="btn-danger" data-action="delete" data-id="' + t.id + '">删除</button>' +
                         '</div></div>' +
                         '<div class="card-body">' +
                         '<p><strong>Cron：</strong><code>' + cronDisplay + '</code></p>' +
                         '<p><strong>动作：</strong>' + (actionLabels[t.action.type] || t.action.type) + '</p>' +
                         '<p><strong>目标：</strong>' + escapeHtml(t.target) + '</p>' +
                         '<p><strong>条件：</strong>' + escapeHtml(condDisplay) + '</p>' +
+                        '</div><div class="card-footer card-actions">' +
+                        '<button class="btn-edit" data-action="edit" data-id="' + t.id + '">编辑</button>' +
+                        '<button class="btn-danger" data-action="delete" data-id="' + t.id + '">删除</button>' +
                         '</div></div>';
                 }).join("");
             });
@@ -316,17 +315,17 @@ function initScriptAutomation() {
                 return '<div class="card"><div class="card-header"><div><strong>' +
                     escapeHtml(item.schedule_id) + '</strong><span class="badge ' +
                     (item.enabled ? "badge-success" : "badge-muted") + '">' +
-                    (item.enabled ? "启用" : "停用") + '</span></div><div class="card-actions">' +
-                    '<button class="btn-edit" data-script-schedule-action="edit" data-id="' +
-                    item.schedule_id + '">编辑</button><button class="btn-secondary" data-script-schedule-action="' +
-                    (item.enabled ? "disable" : "enable") + '" data-id="' + item.schedule_id + '">' +
-                    (item.enabled ? "停用" : "重新授权") + '</button><button class="btn-danger" data-script-schedule-action="delete" data-id="' +
-                    item.schedule_id + '">删除</button></div></div><div class="card-body"><p>脚本：<code>' +
+                    (item.enabled ? "启用" : "停用") + '</span></div></div><div class="card-body"><p>脚本：<code>' +
                     escapeHtml(item.script_id) + '</code></p><p>Cron：<code>' +
                     escapeHtml(item.crons.join("；")) + '</code></p><p>授权版本：<code>' +
                     escapeHtml((item.authorized_sha256 || "").slice(0, 12)) +
                     '</code></p><p>最近状态：' + escapeHtml(item.last_status || "尚未运行") +
-                    "</p></div></div>";
+                    '</p></div><div class="card-footer card-actions">' +
+                    '<button class="btn-edit" data-script-schedule-action="edit" data-id="' +
+                    item.schedule_id + '">编辑</button><button class="btn-secondary" data-script-schedule-action="' +
+                    (item.enabled ? "disable" : "enable") + '" data-id="' + item.schedule_id + '">' +
+                    (item.enabled ? "停用" : "重新授权") + '</button><button class="btn-danger" data-script-schedule-action="delete" data-id="' +
+                    item.schedule_id + '">删除</button></div></div>';
             }).join("");
             list._items = items;
         }).catch(function (error) {

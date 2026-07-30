@@ -748,8 +748,18 @@ class ToolRuntime:
     def _tool_knowledge_search(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         tenant = self._knowledge_tenant()
         limit = self._integer(arguments, "limit", 6, 1, 20)
+        category_ids = arguments.get("category_ids")
+        if category_ids is not None and (
+            not isinstance(category_ids, list)
+            or any(not isinstance(value, str) for value in category_ids)
+        ):
+            raise ToolError("category_ids 必须是字符串数组")
         return {"results": self.knowledge_service.search(
-            tenant.tenant_id, self._string(arguments, "query"), limit
+            tenant.tenant_id,
+            self._string(arguments, "query"),
+            limit,
+            agent_id=self._audit_context.agent_id or None,
+            category_ids=category_ids,
         )}
 
     def _tool_knowledge_list(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:

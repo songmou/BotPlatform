@@ -131,10 +131,6 @@
     color: var(--text-muted);
 }
 
-.table-scroll {
-    overflow-x: auto;
-}
-
 #model-runs-body tr {
     cursor: pointer;
 }

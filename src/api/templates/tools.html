@@ -108,15 +108,18 @@
                 </div>
             </div>
         </div>
-        <div id="builtin-tools-list" class="builtin-tools-grid"></div>
+        <div id="builtin-category-tabs" class="tab-bar builtin-category-tabs"
+             role="tablist" aria-label="内置工具分类"></div>
+        <div id="builtin-tools-list" class="builtin-tools-grid"
+             role="tabpanel" aria-live="polite"></div>
     </div>
 
-    <!-- 工具执行审计 -->
+    <!-- 执行审计 -->
     <div class="tools-pane" id="tools-pane-audit" style="display:none">
         <div class="page-header">
             <div class="page-header-row">
                 <div>
-                    <h2>工具执行审计</h2>
+                    <h2>执行审计</h2>
                     <p class="page-desc">用于安全追踪与故障排查；不保存原始参数或工具输出正文，仅记录工具名称、状态、耗时、参数哈希与输出大小</p>
                 </div>
             </div>

@@ -18,6 +18,15 @@
       }
     },
     {
+      "id": "web_research",
+      "enabled": true,
+      "settings": {
+        "timeout_seconds": 20,
+        "max_results": 8,
+        "max_content_chars": 8000
+      }
+    },
+    {
       "id": "codex_tasks",
       "enabled": true,
       "settings": {

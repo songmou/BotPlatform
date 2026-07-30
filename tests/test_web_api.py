@@ -8,6 +8,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
+from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
 from src.core.modeling import (
@@ -739,16 +740,65 @@ class WebApiTest(unittest.TestCase):
         self.assertIn('data-scripts-tab="catalog"', scripts.text)
         self.assertIn('data-scripts-tab="runs"', scripts.text)
         self.assertIn("script-settings-modal", scripts.text)
+        self.assertIn('href="/scripts" class="nav-sub-item active"', scripts.text)
+        self.assertIn('nav-item nav-group-toggle active', scripts.text)
 
         tools = self.client.get("/tools")
         self.assertEqual(tools.status_code, 200)
-        self.assertIn("工具执行审计", tools.text)
+        self.assertIn("执行审计", tools.text)
         self.assertIn("audit-filter-status", tools.text)
+        tool_menu_labels = [
+            "内置工具",
+            "插件工具",
+            "Skill 技能",
+            "MCP 服务",
+            "运维脚本",
+            "执行审计",
+        ]
+        tool_menu_positions = [
+            tools.text.index(">{}<".format(label)) for label in tool_menu_labels
+        ]
+        self.assertEqual(tool_menu_positions, sorted(tool_menu_positions))
+        section_positions = [
+            tools.text.index(
+                '<div class="nav-section-label">{}</div>'.format(label)
+            )
+            for label in ("工作台", "智能能力", "内容资源", "运营", "系统")
+        ]
+        self.assertEqual(section_positions, sorted(section_positions))
 
         users = self.client.get("/users")
         self.assertEqual(users.status_code, 200)
+        self.assertIn("用户与权限 - BotPlatform", users.text)
         self.assertIn("tenant-detail-modal", users.text)
         self.assertIn("tenant-detail-title", users.text)
+
+    def test_management_layout_structure(self):
+        tools = self.client.get("/tools")
+        self.assertEqual(tools.status_code, 200)
+        tools_dom = BeautifulSoup(tools.text, "html.parser")
+        category_tabs = tools_dom.select_one("#builtin-category-tabs")
+        self.assertIsNotNone(category_tabs)
+        self.assertEqual(category_tabs.get("role"), "tablist")
+        builtin_list = tools_dom.select_one("#builtin-tools-list")
+        self.assertIsNotNone(builtin_list)
+        self.assertEqual(builtin_list.get("role"), "tabpanel")
+
+        sidebar_actions = tools_dom.select_one(".sidebar-user > .sidebar-user-actions")
+        self.assertIsNotNone(sidebar_actions)
+        self.assertIsNotNone(sidebar_actions.select_one("#theme-toggle[aria-label='切换主题']"))
+        self.assertIsNotNone(sidebar_actions.select_one("#logout-btn[aria-label='退出登录']"))
+
+        drive = self.client.get("/drive")
+        self.assertEqual(drive.status_code, 200)
+        drive_dom = BeautifulSoup(drive.text, "html.parser")
+        files_panel = drive_dom.select_one("#drive-files-panel")
+        self.assertIsNotNone(files_panel.select_one(".drive-panel-toolbar .drive-toolbar"))
+        self.assertIsNotNone(files_panel.select_one("#drive-mkdir-btn"))
+        self.assertIsNotNone(files_panel.select_one("#drive-newfile-btn"))
+        self.assertIsNotNone(files_panel.select_one("#drive-upload-btn"))
+        self.assertIsNone(drive_dom.select_one(".page-header .drive-toolbar"))
+        self.assertIsNone(drive_dom.select_one("#drive-audit-panel .drive-toolbar"))
 
     def test_page_models(self):
         response = self.client.get("/models", params=self._auth_params())

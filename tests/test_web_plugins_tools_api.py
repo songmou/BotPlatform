@@ -91,6 +91,11 @@ class PluginsToolsApiTest(WebApiTestBase):
         tools = response.json()
         names = {t["name"] for t in tools}
         self.assertIn("run_command", names)
+        categories = list(dict.fromkeys(t["category"] for t in tools))
+        self.assertEqual(
+            categories,
+            ["知识库", "文件系统", "系统信息", "命令执行", "脚本"],
+        )
         run_command = next(t for t in tools if t["name"] == "run_command")
         # No tool runtime injected -> unavailable but enabled by default.
         self.assertFalse(run_command["available"])

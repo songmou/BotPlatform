@@ -383,13 +383,56 @@ class MeOut(BaseModel):
 
 
 class KnowledgeTextIn(BaseModel):
-    tenant_id: str
+    tenant_id: Optional[str] = None
     name: str
     content: str
+    category_id: Optional[str] = None
 
 
 class KnowledgeReindexIn(BaseModel):
     tenant_id: str
+    category_ids: Optional[List[str]] = None
+
+
+class KnowledgeCategoryCreateIn(BaseModel):
+    scope: str
+    name: str
+    description: str = ""
+    tenant_id: Optional[str] = None
+
+
+class KnowledgeCategoryUpdateIn(BaseModel):
+    name: str
+    description: str = ""
+
+
+class KnowledgeDriveImportIn(BaseModel):
+    category_id: str
+    scope: str
+    tenant_id: Optional[str] = None
+    paths: List[str]
+
+
+class KnowledgeRefreshIn(BaseModel):
+    source_ids: List[str]
+
+
+class KnowledgeMoveIn(BaseModel):
+    source_ids: List[str]
+    target_category_id: str
+
+
+class KnowledgeEmbeddingConfigIn(BaseModel):
+    id: str
+    enabled: bool
+    base_url: str
+    model: str
+    dimensions: int
+    timeout_seconds: float
+
+
+class KnowledgeAgentBindingsIn(BaseModel):
+    category_ids: List[str]
 
 
 class DriveEntryOut(BaseModel):

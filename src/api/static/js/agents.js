@@ -42,6 +42,7 @@ function initAgents() {
         mcp: document.getElementById("tools-mcp")
     };
     var toolKinds = ["builtin", "plugin", "skill", "mcp"];
+    var knowledgeContainer = document.getElementById("tools-knowledge");
 
     function toolCardHtml(value, label, description, kind) {
         var desc = description
@@ -95,12 +96,16 @@ function initAgents() {
             fetch("/api/tools").then(function (r) { return r.json(); }),
             fetch("/api/plugins").then(function (r) { return r.json(); }),
             fetch("/api/skills").then(function (r) { return r.json(); }),
-            fetch("/api/mcp").then(function (r) { return r.json(); })
+            fetch("/api/mcp").then(function (r) { return r.json(); }),
+            fetch("/api/knowledge/categories").then(function (r) {
+                return r.ok ? r.json() : { categories: [] };
+            })
         ]).then(function (results) {
             var builtinTools = results[0] || [];
             var plugins = results[1] || [];
             var skills = results[2] || [];
             var servers = results[3] || [];
+            var categories = (results[4] && results[4].categories) || [];
 
             renderCheckboxes(toolContainers.builtin, builtinTools.map(function (t) {
                 return { value: t.name, label: t.name, description: t.description };
@@ -116,11 +121,42 @@ function initAgents() {
                 return { value: m.id, label: m.name + (m.enabled ? "" : "（已禁用）"), description: mcpTransportLabel(m.transport) };
             }), "mcp");
 
+            var groups = {};
+            categories.forEach(function (category) {
+                var key = category.scope === "public"
+                    ? "公共知识库"
+                    : "租户 " + String(category.tenant_id || "").slice(0, 8);
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(category);
+            });
+            var groupNames = Object.keys(groups);
+            knowledgeContainer.innerHTML = groupNames.length ? groupNames.map(function (name) {
+                return '<div class="tool-plugin-group"><div class="tool-plugin-name">' +
+                    escapeHtml(name) + '</div><div class="tool-checkboxes tool-checkboxes-nested">' +
+                    groups[name].map(function (category) {
+                        return toolCardHtml(
+                            category.category_id,
+                            category.name,
+                            category.description || (category.scope === "public" ? "公共" : "租户私有"),
+                            "knowledge"
+                        );
+                    }).join("") + "</div></div>";
+            }).join("") : '<div class="tool-empty">暂无知识库</div>';
+
             toolKinds.forEach(updateCount);
+            updateKnowledgeCount();
         });
     }
 
-    function setToolSelection(agent) {
+    function updateKnowledgeCount() {
+        var checked = knowledgeContainer.querySelectorAll("input:checked").length;
+        document.getElementById("tools-knowledge-count").textContent =
+            checked ? "（已选 " + checked + "）" : "";
+    }
+
+    knowledgeContainer.addEventListener("change", updateKnowledgeCount);
+
+    function setToolSelection(agent, categoryIds) {
         var toolSet = {}, skillSet = {}, mcpSet = {};
         (agent.tools || []).forEach(function (n) { toolSet[n] = true; });
         (agent.skills || []).forEach(function (n) { skillSet[n] = true; });
@@ -133,6 +169,12 @@ function initAgents() {
             });
             updateCount(kind);
         });
+        var categorySet = {};
+        (categoryIds || []).forEach(function (id) { categorySet[id] = true; });
+        knowledgeContainer.querySelectorAll("input").forEach(function (box) {
+            box.checked = !!categorySet[box.value];
+        });
+        updateKnowledgeCount();
     }
 
     function collectSelection() {
@@ -146,7 +188,14 @@ function initAgents() {
         toolContainers.skill.querySelectorAll("input:checked").forEach(function (b) { skills.push(b.value); });
         var mcpServers = [];
         toolContainers.mcp.querySelectorAll("input:checked").forEach(function (b) { mcpServers.push(b.value); });
-        return { tools: tools, skills: skills, mcp_servers: mcpServers };
+        var knowledgeCategories = [];
+        knowledgeContainer.querySelectorAll("input:checked").forEach(function (b) {
+            knowledgeCategories.push(b.value);
+        });
+        return {
+            tools: tools, skills: skills, mcp_servers: mcpServers,
+            knowledge_category_ids: knowledgeCategories
+        };
     }
 
     document.getElementById("create-agent-btn").addEventListener("click", function () {
@@ -290,8 +339,12 @@ function initAgents() {
                     loadModelOptions().then(function () {
                         document.getElementById("agent-model").value = a.model || "";
                     });
-                    loadToolOptions().then(function () {
-                        setToolSelection(a);
+                    Promise.all([
+                        loadToolOptions(),
+                        fetch("/api/agents/" + encodeURIComponent(id) + "/knowledge-categories")
+                            .then(function (r) { return r.ok ? r.json() : { category_ids: [] }; })
+                    ]).then(function (results) {
+                        setToolSelection(a, results[1].category_ids || []);
                     });
                     openModal();
                 });
@@ -341,6 +394,19 @@ function initAgents() {
         })
             .then(function (r) {
                 if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                return r.json();
+            })
+            .then(function (saved) {
+                return fetch("/api/agents/" + encodeURIComponent(saved.id) + "/knowledge-categories", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ category_ids: selection.knowledge_category_ids })
+                }).then(function (r) {
+                    if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                    return saved;
+                });
+            })
+            .then(function () {
                 showToast(editingId ? "已保存修改" : "已创建智能体", "success");
                 closeModal();
                 loadAgents();
@@ -348,4 +414,3 @@ function initAgents() {
             .catch(function (err) { showToast("保存失败：" + err.message, "error"); });
     });
 }
-

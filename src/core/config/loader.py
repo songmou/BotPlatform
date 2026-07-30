@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -764,8 +764,11 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
     return profiles
 
 
-def _load_embedding(path: Path) -> EmbeddingProfile:
-    data = _load_json(path)
+def validate_embedding_profile(
+    data: Dict[str, Any], source: Path
+) -> EmbeddingProfile:
+    """Validate one embedding profile using the project config rules."""
+    path = Path(source)
     _reject_unknown(data, {"id", "enabled", "base_url", "model", "dimensions", "timeout_seconds"}, path)
     profile_id = _required_string(data, "id", path)
     enabled = data.get("enabled")
@@ -777,10 +780,20 @@ def _load_embedding(path: Path) -> EmbeddingProfile:
     timeout_seconds = _model_number(data, "timeout_seconds", "timeout_seconds", path)
     if timeout_seconds <= 0 or timeout_seconds > 600:
         raise _error(path, "timeout_seconds", "必须在 0 到 600 之间")
+    return EmbeddingProfile(profile_id, enabled, base_url, model, dimensions, timeout_seconds)
+
+
+def _load_embedding(path: Path) -> EmbeddingProfile:
+    profile = validate_embedding_profile(_load_json(path), path)
     override_url = os.getenv("OLLAMA_BASE_URL")
     if override_url:
-        base_url = _validate_model_url(override_url, "base_url（OLLAMA_BASE_URL）", path)
-    return EmbeddingProfile(profile_id, enabled, base_url, model, dimensions, timeout_seconds)
+        return replace(
+            profile,
+            base_url=_validate_model_url(
+                override_url, "base_url（OLLAMA_BASE_URL）", path
+            ),
+        )
+    return profile
 
 
 def _load_agent(path: Path) -> AgentPreset:

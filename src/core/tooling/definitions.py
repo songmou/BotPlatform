@@ -55,9 +55,21 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
     },
     "knowledge_search": {
-        "description": "检索当前用户的私人知识库。",
+        "description": "检索当前智能体已绑定、且当前用户可见的知识库。",
         "parameters": _object_schema(
-            {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}},
+            {
+                "query": {"type": "string"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                },
+                "category_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                },
+            },
             ["query"],
         ),
     },

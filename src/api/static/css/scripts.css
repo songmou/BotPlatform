@@ -4,8 +4,7 @@
 .script-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    grid-auto-rows: 1fr;
-    gap: 16px;
+    gap: var(--card-gap);
     align-items: stretch;
 }
 
@@ -14,7 +13,7 @@
     flex-direction: column;
     min-width: 0;
     height: 100%;
-    padding: 18px 20px 14px;
+    padding: var(--card-padding);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg);
@@ -45,11 +44,6 @@
     color: var(--text-secondary);
     line-height: 1.5;
     margin-bottom: 12px;
-    min-height: 39px;
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
 }
 
 .script-meta {
@@ -87,8 +81,6 @@
     flex-wrap: wrap;
     gap: 6px;
     margin-bottom: 4px;
-    max-height: 48px;
-    overflow: hidden;
 }
 
 .param-chip {

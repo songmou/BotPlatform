@@ -85,6 +85,10 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.drive_audit_store = drive_audit_store
     app.state.secure_cookies = secure_cookies
     app.state.owns_services = owns_services
+    if drive_service is not None and knowledge_service is not None:
+        attach = getattr(drive_service, "attach_knowledge_service", None)
+        if callable(attach):
+            attach(knowledge_service)
 
     app.add_middleware(SessionAuthMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)

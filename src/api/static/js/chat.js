@@ -748,8 +748,17 @@ function initChat() {
                 sourcesEl.className = "msg-sources";
                 sourcesEl.innerHTML = '<span class="msg-sources-label">参考来源：</span>' +
                     sourcesData.map(function (s) {
-                        var label = s.name + (s.heading ? " · " + s.heading : "");
-                        return '<span class="msg-source-item">' + escapeHtml(label) + '</span>';
+                        var label = "[" + Number(s.citation || 0) + "] " +
+                            (s.category_name ? s.category_name + " / " : "") +
+                            (s.source_name || s.name || "") +
+                            (s.heading ? " · " + s.heading : "");
+                        if (s.download_url) {
+                            return '<a class="msg-source-item" href="' +
+                                escapeHtml(s.download_url) + '">' +
+                                escapeHtml(label) + "</a>";
+                        }
+                        return '<span class="msg-source-item">' +
+                            escapeHtml(label) + "</span>";
                     }).join("");
                 summaryRow.appendChild(sourcesEl);
             }

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from unittest.mock import patch
+
 from tests._web_api_base import WebApiTestBase
 
 
@@ -55,6 +58,61 @@ class KnowledgeApiTest(WebApiTestBase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), {"sources": []})
+
+    def test_categories_report_embedding_disabled(self):
+        response = self.client.get("/api/knowledge/categories")
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertFalse(data["embedding_enabled"])
+        # The seeded public default category is renamed by schema V21.
+        names = {item["name"] for item in data["categories"]}
+        self.assertIn("默认知识库", names)
+
+    def test_embedding_config_can_be_read_and_saved_for_restart(self):
+        path = self.data_root / "embeddings.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "id": "bge_m3_local",
+                    "enabled": False,
+                    "base_url": "http://127.0.0.1:11434",
+                    "model": "bge-m3",
+                    "dimensions": 1024,
+                    "timeout_seconds": 60,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch("src.api.routers.knowledge.EMBEDDINGS_FILE", path):
+            response = self.client.get("/api/knowledge/embedding-config")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertFalse(response.json()["runtime_enabled"])
+
+            response = self.client.put(
+                "/api/knowledge/embedding-config",
+                json={
+                    "id": "text_embedding",
+                    "enabled": True,
+                    "base_url": "https://embedding.example.com",
+                    "model": "text-embedding-v1",
+                    "dimensions": 1536,
+                    "timeout_seconds": 45,
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["restart_required"])
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["id"], "text_embedding")
+            self.assertEqual(saved["dimensions"], 1536)
+
+            invalid = self.client.put(
+                "/api/knowledge/embedding-config",
+                json={
+                    **saved,
+                    "base_url": "http://embedding.example.com",
+                },
+            )
+            self.assertEqual(invalid.status_code, 400, invalid.text)
 
     def test_unknown_tenant_404(self):
         response = self.client.get(
@@ -156,6 +214,71 @@ class KnowledgeApiTest(WebApiTestBase):
             ).status_code,
             403,
         )
+
+    def test_category_crud_agent_binding_and_non_empty_conflict(self):
+        created = self.client.post(
+            "/api/knowledge/categories",
+            json={
+                "scope": "tenant",
+                "tenant_id": self.tenant.tenant_id,
+                "name": "产品知识",
+                "description": "产品领域",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        category_id = created.json()["category_id"]
+        agent_id = next(iter(self.config.agents))
+        bound = self.client.put(
+            "/api/agents/{}/knowledge-categories".format(agent_id),
+            json={"category_ids": [category_id]},
+        )
+        self.assertEqual(bound.status_code, 200, bound.text)
+        self.assertEqual(bound.json()["category_ids"], [category_id])
+
+        added = self.client.post(
+            "/api/knowledge/text",
+            json={
+                "tenant_id": self.tenant.tenant_id,
+                "category_id": category_id,
+                "name": "手册",
+                "content": "产品知识内容",
+            },
+        )
+        self.assertEqual(added.status_code, 200, added.text)
+        conflict = self.client.delete(
+            "/api/knowledge/categories/{}".format(category_id)
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+
+    def test_import_public_drive_file_and_query_links(self):
+        category = self.client.post(
+            "/api/knowledge/categories",
+            json={"scope": "public", "name": "公共资料", "description": ""},
+        ).json()
+        public_file = self.service.public_root / "notice.md"
+        public_file.write_text("公共通知内容", encoding="utf-8")
+        imported = self.client.post(
+            "/api/knowledge/from-drive",
+            json={
+                "category_id": category["category_id"],
+                "scope": "public",
+                "paths": ["notice.md"],
+            },
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertTrue(imported.json()["items"][0]["ok"])
+        source_id = imported.json()["items"][0]["source_id"]
+        preview = self.client.get(
+            "/api/knowledge/source-preview/{}".format(source_id)
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["content"], "公共通知内容")
+        links = self.client.get(
+            "/api/knowledge/drive-links",
+            params={"scope": "public", "path": "notice.md"},
+        )
+        self.assertEqual(links.status_code, 200, links.text)
+        self.assertEqual(links.json()["links"][0]["category_name"], "公共资料")
         self.assertEqual(
             self.viewer_client.post(
                 "/api/knowledge/text",

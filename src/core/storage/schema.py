@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 19
+LATEST_SCHEMA_VERSION = 21
 
 
 SCHEMA_V1 = r"""
@@ -844,6 +844,213 @@ CREATE INDEX IF NOT EXISTS ix_drive_audit_ts ON drive_audit_log(ts);
 """
 
 
+# V20: scoped knowledge categories, agent bindings, and drive-backed sources.
+SCHEMA_V20 = r"""
+CREATE TABLE IF NOT EXISTS knowledge_categories (
+    category_id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL CHECK (scope IN ('public', 'tenant')),
+    tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (scope = 'public' AND tenant_id IS NULL)
+        OR (scope = 'tenant' AND tenant_id IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_knowledge_categories_public_name
+    ON knowledge_categories(name) WHERE scope = 'public';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_knowledge_categories_tenant_name
+    ON knowledge_categories(tenant_id, name) WHERE scope = 'tenant';
+
+INSERT OR IGNORE INTO knowledge_categories(
+    category_id, scope, tenant_id, name, description, created_at, updated_at
+) VALUES (
+    'public-default', 'public', NULL, '公共知识库', '平台公共知识',
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+);
+
+INSERT OR IGNORE INTO knowledge_categories(
+    category_id, scope, tenant_id, name, description, created_at, updated_at
+)
+SELECT
+    'tenant-default-' || tenant_id,
+    'tenant',
+    tenant_id,
+    '默认知识库',
+    '由升级迁移生成的默认知识库',
+    MIN(created_at),
+    MAX(updated_at)
+FROM knowledge_sources
+GROUP BY tenant_id;
+
+CREATE TABLE knowledge_sources_v20 (
+    source_id TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE RESTRICT,
+    tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL CHECK (source_type IN ('text', 'file')),
+    name TEXT NOT NULL,
+    relative_path TEXT,
+    drive_scope TEXT CHECK (drive_scope IN ('public', 'tenant')),
+    drive_tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    drive_path TEXT,
+    file_size INTEGER,
+    file_mtime_ns INTEGER,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'ready', 'pending_embedding', 'stale_modified',
+            'source_missing', 'failed'
+        )
+    ),
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+INSERT INTO knowledge_sources_v20(
+    source_id, category_id, tenant_id, source_type, name, relative_path,
+    drive_scope, drive_tenant_id, drive_path, file_size, file_mtime_ns,
+    content_hash, status, last_error, created_at, updated_at
+)
+SELECT
+    source_id,
+    'tenant-default-' || tenant_id,
+    tenant_id,
+    source_type,
+    name,
+    relative_path,
+    CASE WHEN source_type = 'file' THEN 'tenant' ELSE NULL END,
+    CASE WHEN source_type = 'file' THEN tenant_id ELSE NULL END,
+    CASE
+        WHEN source_type = 'file' AND relative_path IS NOT NULL
+        THEN 'workspace/' || relative_path
+        ELSE NULL
+    END,
+    NULL,
+    NULL,
+    content_hash,
+    status,
+    NULL,
+    created_at,
+    updated_at
+FROM knowledge_sources;
+
+CREATE TABLE knowledge_chunks_v20 (
+    chunk_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES knowledge_sources_v20(source_id) ON DELETE CASCADE,
+    category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE CASCADE,
+    tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    heading TEXT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    locator TEXT,
+    UNIQUE (source_id, position)
+);
+
+INSERT INTO knowledge_chunks_v20(
+    chunk_id, source_id, category_id, tenant_id, position, heading,
+    content, content_hash, locator
+)
+SELECT
+    c.chunk_id,
+    c.source_id,
+    s.category_id,
+    c.tenant_id,
+    c.position,
+    c.heading,
+    c.content,
+    c.content_hash,
+    c.locator
+FROM knowledge_chunks c
+JOIN knowledge_sources_v20 s ON s.source_id = c.source_id;
+
+CREATE TABLE knowledge_embeddings_v20 (
+    chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks_v20(chunk_id) ON DELETE CASCADE,
+    model_id TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+INSERT INTO knowledge_embeddings_v20
+SELECT chunk_id, model_id, dimensions, vector, content_hash, created_at
+FROM knowledge_embeddings;
+
+DROP TABLE knowledge_embeddings;
+DROP TABLE knowledge_chunks;
+DROP TABLE knowledge_sources;
+DROP TABLE knowledge_fts;
+
+ALTER TABLE knowledge_sources_v20 RENAME TO knowledge_sources;
+ALTER TABLE knowledge_chunks_v20 RENAME TO knowledge_chunks;
+ALTER TABLE knowledge_embeddings_v20 RENAME TO knowledge_embeddings;
+
+CREATE INDEX ix_knowledge_sources_category
+    ON knowledge_sources(category_id, updated_at DESC);
+CREATE INDEX ix_knowledge_sources_tenant
+    ON knowledge_sources(tenant_id, updated_at DESC);
+CREATE UNIQUE INDEX ux_knowledge_sources_text_name
+    ON knowledge_sources(category_id, name) WHERE source_type = 'text';
+CREATE UNIQUE INDEX ux_knowledge_sources_drive_path
+    ON knowledge_sources(
+        category_id, drive_scope, COALESCE(drive_tenant_id, ''), drive_path
+    ) WHERE source_type = 'file';
+CREATE INDEX ix_knowledge_sources_drive
+    ON knowledge_sources(drive_scope, drive_tenant_id, drive_path);
+CREATE INDEX ix_knowledge_chunks_category
+    ON knowledge_chunks(category_id, source_id, position);
+CREATE INDEX ix_knowledge_chunks_tenant
+    ON knowledge_chunks(tenant_id, source_id, position);
+
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+    chunk_id UNINDEXED,
+    category_id UNINDEXED,
+    tenant_id UNINDEXED,
+    heading,
+    content,
+    tokenize='trigram'
+);
+INSERT INTO knowledge_fts(chunk_id, category_id, tenant_id, heading, content)
+SELECT chunk_id, category_id, COALESCE(tenant_id, ''), heading, content
+FROM knowledge_chunks;
+
+CREATE TABLE IF NOT EXISTS agent_knowledge_categories (
+    agent_id TEXT NOT NULL,
+    category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS ix_agent_knowledge_categories_category
+    ON agent_knowledge_categories(category_id, agent_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_bootstrap_state (
+    key TEXT PRIMARY KEY,
+    completed_at TEXT NOT NULL
+);
+"""
+
+
+# V21: rename the seeded public default category so the category picker no
+# longer duplicates the "公共知识库" scope label. Guarded by NOT EXISTS to
+# respect the unique public-name index when users already created one.
+SCHEMA_V21 = r"""
+UPDATE knowledge_categories SET
+    name = '默认知识库',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE category_id = 'public-default'
+    AND scope = 'public'
+    AND name = '公共知识库'
+    AND NOT EXISTS (
+        SELECT 1 FROM knowledge_categories
+        WHERE scope = 'public' AND name = '默认知识库'
+    );
+"""
+
+
 # Versions applied as plain SQL scripts. 12 and 13 are intentionally absent:
 # they require Python-side logic and run via dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
@@ -864,4 +1071,6 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     17: SCHEMA_V17,
     18: SCHEMA_V18,
     19: SCHEMA_V19,
+    20: SCHEMA_V20,
+    21: SCHEMA_V21,
 }

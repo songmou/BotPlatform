@@ -32,6 +32,16 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIsNotNone(table)
             self.assertEqual(version, LATEST_SCHEMA_VERSION)
 
+    def test_v21_renames_seeded_public_default_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "botplatform.sqlite3")
+            with database.read() as connection:
+                name = connection.execute(
+                    "SELECT name FROM knowledge_categories "
+                    "WHERE category_id='public-default'"
+                ).fetchone()[0]
+            self.assertEqual(name, "默认知识库")
+
     def test_v12_repairs_intermediate_outbox_schema_without_losing_rows(
         self,
     ) -> None:

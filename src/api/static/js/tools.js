@@ -16,6 +16,10 @@ function initTools() {
     var auditLimit = 20;
     var auditSearchTimer = null;
     var auditRequestSeq = 0;
+    var allBuiltinTools = [];
+    var builtinCategory = "全部";
+    var builtinTabsEl = document.getElementById("builtin-category-tabs");
+    var builtinListEl = document.getElementById("builtin-tools-list");
 
     var validTabs = ["skills", "mcp", "plugins", "builtin", "audit"];
     function switchTab() {
@@ -46,6 +50,27 @@ function initTools() {
 
     searchInput.addEventListener("input", renderPlugins);
     filterSelect.addEventListener("change", renderPlugins);
+    builtinTabsEl.addEventListener("click", function (event) {
+        var tab = event.target.closest("[data-tool-category]");
+        if (!tab) return;
+        builtinCategory = tab.getAttribute("data-tool-category");
+        renderBuiltinCategoryTabs();
+        renderBuiltinTools();
+    });
+    builtinTabsEl.addEventListener("keydown", function (event) {
+        if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) === -1) return;
+        var tabs = Array.prototype.slice.call(builtinTabsEl.querySelectorAll("[role='tab']"));
+        var current = tabs.indexOf(document.activeElement);
+        if (current === -1) return;
+        event.preventDefault();
+        var next = current;
+        if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+        if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+        if (event.key === "Home") next = 0;
+        if (event.key === "End") next = tabs.length - 1;
+        tabs[next].focus();
+        tabs[next].click();
+    });
 
     document.getElementById("plugin-modal-close").addEventListener("click", closeModal);
     document.getElementById("plugin-modal-cancel").addEventListener("click", closeModal);
@@ -216,68 +241,117 @@ function initTools() {
         openModal();
     }
 
+    function builtinCategories() {
+        var seen = {};
+        return allBuiltinTools.reduce(function (categories, tool) {
+            if (!seen[tool.category]) {
+                seen[tool.category] = true;
+                categories.push(tool.category);
+            }
+            return categories;
+        }, []);
+    }
+
+    function renderBuiltinCategoryTabs() {
+        var categories = ["全部"].concat(builtinCategories());
+        if (categories.indexOf(builtinCategory) === -1) builtinCategory = "全部";
+        builtinTabsEl.innerHTML = categories.map(function (category, index) {
+            var count = category === "全部"
+                ? allBuiltinTools.length
+                : allBuiltinTools.filter(function (tool) { return tool.category === category; }).length;
+            var active = category === builtinCategory;
+            return '<button id="builtin-category-tab-' + index + '" class="tab-btn' +
+                (active ? " active" : "") + '" type="button" role="tab" data-tool-category="' +
+                escapeHtml(category) + '" aria-selected="' + (active ? "true" : "false") +
+                '" aria-controls="builtin-tools-list" tabindex="' + (active ? "0" : "-1") + '">' +
+                escapeHtml(category) + '<span class="builtin-tab-count">' + count + "</span></button>";
+        }).join("");
+        var activeIndex = categories.indexOf(builtinCategory);
+        builtinListEl.setAttribute("aria-labelledby", "builtin-category-tab-" + activeIndex);
+    }
+
+    function renderBuiltinTools() {
+        var countEl = document.getElementById("builtin-tools-count");
+        countEl.textContent = "（" + allBuiltinTools.length + "）";
+        if (!allBuiltinTools.length) {
+            builtinListEl.innerHTML = '<p class="text-muted">暂无内置工具</p>';
+            return;
+        }
+
+        var visibleTools = builtinCategory === "全部"
+            ? allBuiltinTools
+            : allBuiltinTools.filter(function (tool) { return tool.category === builtinCategory; });
+        var categories = {};
+        visibleTools.forEach(function (tool) {
+            if (!categories[tool.category]) categories[tool.category] = [];
+            categories[tool.category].push(tool);
+        });
+
+        builtinListEl.innerHTML = Object.keys(categories).map(function (category) {
+            var items = categories[category].map(function (tool) {
+                var badges = tool.available
+                    ? '<span class="badge badge-success">可用</span>'
+                    : '<span class="badge badge-muted">不可用</span>';
+                if (tool.requires_approval) {
+                    badges += ' <span class="badge badge-warning">需审批</span>';
+                }
+                var toggle = '<label class="switch-label">' +
+                    '<input type="checkbox" class="tool-toggle" data-tool="' + escapeHtml(tool.name) + '"' +
+                    (tool.enabled ? " checked" : "") + ">" +
+                    '<span class="switch switch-sm"></span>' +
+                    "</label>";
+                return '<div class="builtin-tool-item">' +
+                    '<div class="builtin-tool-header">' +
+                        '<code class="builtin-tool-name">' + escapeHtml(tool.name) + "</code>" +
+                        '<div class="builtin-tool-badges">' + toggle + badges + "</div>" +
+                    "</div>" +
+                    '<p class="builtin-tool-desc">' + escapeHtml(tool.description) + "</p>" +
+                "</div>";
+            }).join("");
+            var title = builtinCategory === "全部"
+                ? '<div class="builtin-tool-category-title">' + escapeHtml(category) + "</div>"
+                : "";
+            return '<div class="builtin-tool-category">' + title +
+                '<div class="builtin-tool-items">' + items + "</div></div>";
+        }).join("");
+
+        builtinListEl.querySelectorAll(".tool-toggle").forEach(function (checkbox) {
+            checkbox.addEventListener("change", function () {
+                var toolName = this.getAttribute("data-tool");
+                var enabled = this.checked;
+                fetch("/api/tools/" + encodeURIComponent(toolName), {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ enabled: enabled }),
+                })
+                    .then(function (response) {
+                        if (!response.ok) {
+                            return response.json().then(function (data) { throw new Error(data.detail); });
+                        }
+                        showToast(enabled ? "已启用 " + toolName : "已禁用 " + toolName, "success");
+                        loadBuiltinTools();
+                    })
+                    .catch(function (error) {
+                        showToast("操作失败：" + error.message, "error");
+                        renderBuiltinTools();
+                    });
+            });
+        });
+    }
+
     function loadBuiltinTools() {
         fetch("/api/tools")
-            .then(function (r) { return r.json(); })
+            .then(function (response) {
+                if (!response.ok) throw new Error("请求失败");
+                return response.json();
+            })
             .then(function (tools) {
-                var container = document.getElementById("builtin-tools-list");
-                var countEl = document.getElementById("builtin-tools-count");
-                if (!tools.length) {
-                    container.innerHTML = '<p class="text-muted">暂无内置工具</p>';
-                    return;
-                }
-                countEl.textContent = "（" + tools.length + "）";
-
-                var categories = {};
-                tools.forEach(function (t) {
-                    if (!categories[t.category]) categories[t.category] = [];
-                    categories[t.category].push(t);
-                });
-
-                container.innerHTML = Object.keys(categories).map(function (cat) {
-                    var items = categories[cat].map(function (t) {
-                        var badges = t.available
-                            ? '<span class="badge badge-success">可用</span>'
-                            : '<span class="badge badge-muted">不可用</span>';
-                        if (t.requires_approval) {
-                            badges += ' <span class="badge badge-warning">需审批</span>';
-                        }
-                        var toggle = '<label class="switch-label">' +
-                            '<input type="checkbox" class="tool-toggle" data-tool="' + escapeHtml(t.name) + '"' +
-                            (t.enabled ? " checked" : "") + ">" +
-                            '<span class="switch switch-sm"></span>' +
-                            "</label>";
-                        return '<div class="builtin-tool-item">' +
-                            '<div class="builtin-tool-header">' +
-                                '<code class="builtin-tool-name">' + escapeHtml(t.name) + "</code>" +
-                                '<div class="builtin-tool-badges">' + toggle + badges + "</div>" +
-                            "</div>" +
-                            '<p class="builtin-tool-desc">' + escapeHtml(t.description) + "</p>" +
-                        "</div>";
-                    }).join("");
-                    return '<div class="builtin-tool-category">' +
-                        '<div class="builtin-tool-category-title">' + escapeHtml(cat) + "</div>" +
-                        '<div class="builtin-tool-items">' + items + "</div>" +
-                    "</div>";
-                }).join("");
-
-                container.querySelectorAll(".tool-toggle").forEach(function (cb) {
-                    cb.addEventListener("change", function () {
-                        var toolName = this.getAttribute("data-tool");
-                        var enabled = this.checked;
-                        fetch("/api/tools/" + encodeURIComponent(toolName), {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ enabled: enabled }),
-                        })
-                            .then(function (r) {
-                                if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-                                showToast(enabled ? "已启用 " + toolName : "已禁用 " + toolName, "success");
-                                loadBuiltinTools();
-                            })
-                            .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
-                    });
-                });
+                allBuiltinTools = tools;
+                renderBuiltinCategoryTabs();
+                renderBuiltinTools();
+            })
+            .catch(function (error) {
+                showToast("加载内置工具失败：" + error.message, "error");
             });
     }
 
