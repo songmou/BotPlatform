@@ -163,7 +163,11 @@ def create_agent(body: AgentCreate, request: Request):
         role=body.role.strip(),
         description=body.description.strip(),
         system_prompt=body.system_prompt,
-        capabilities=[Capability(name=c.name, description=c.description) for c in body.capabilities],
+        capabilities=(
+            [Capability(name=c.name, description=c.description) for c in body.capabilities]
+            if body.capabilities
+            else [Capability(name="通用对话", description="回答问题并协助完成任务。")]
+        ),
         tools=body.tools,
         skills=body.skills,
         mcp_servers=body.mcp_servers,
@@ -196,7 +200,7 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
         system_prompt=body.system_prompt if body.system_prompt is not None else existing.system_prompt,
         capabilities=(
             [Capability(name=c.name, description=c.description) for c in body.capabilities]
-            if body.capabilities is not None
+            if body.capabilities
             else existing.capabilities
         ),
         tools=body.tools if body.tools is not None else existing.tools,

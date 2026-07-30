@@ -1131,5 +1131,316 @@ class KnowledgeApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
 
+class AgentWriteApiTest(unittest.TestCase):
+    """Write-path tests for /api/agents (create/update)."""
+
+    def setUp(self):
+        import src.api.routers.agents as agents_module
+        from pathlib import Path
+
+        # Reuse the exact same app/auth fixture as WebApiTest.
+        WebApiTest.setUp(self)
+
+        # Isolate agent JSON persistence so tests never touch config/agents/.
+        self._agents_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._agents_dir.cleanup)
+        agents_patcher = patch.object(
+            agents_module, "AGENTS_DIR", Path(self._agents_dir.name)
+        )
+        agents_patcher.start()
+        self.addCleanup(agents_patcher.stop)
+
+    _auth_params = WebApiTest._auth_params
+
+    def test_create_agent_and_read_back(self):
+        body = {
+            "id": "coder",
+            "name": "编码助手",
+            "role": "coder",
+            "description": "帮助编写代码",
+            "system_prompt": "你是编码助手。",
+            "capabilities": [{"name": "写代码", "description": "编写 Python 代码"}],
+            "tools": ["read_file"],
+        }
+        response = self.client.post("/api/agents", params=self._auth_params(), json=body)
+        self.assertEqual(response.status_code, 201, response.text)
+        data = response.json()
+        self.assertEqual(data["id"], "coder")
+        self.assertEqual(data["name"], "编码助手")
+        self.assertEqual(data["role"], "coder")
+        self.assertEqual(data["system_prompt"], "你是编码助手。")
+        self.assertEqual(
+            data["capabilities"],
+            [{"name": "写代码", "description": "编写 Python 代码"}],
+        )
+        self.assertEqual(data["tools"], ["read_file"])
+
+        # Read back through GET to confirm in-memory registration.
+        response = self.client.get("/api/agents/coder", params=self._auth_params())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["name"], "编码助手")
+
+    def test_update_agent_capabilities_non_empty(self):
+        response = self.client.put(
+            "/api/agents/general",
+            params=self._auth_params(),
+            json={"capabilities": [{"name": "翻译", "description": "中英互译"}]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["capabilities"],
+            [{"name": "翻译", "description": "中英互译"}],
+        )
+
+    def test_update_agent_empty_capabilities_keeps_existing(self):
+        # Current implementation contract: `if body.capabilities:` treats an
+        # empty list as falsy, so [] is ignored and capabilities keep old values.
+        response = self.client.put(
+            "/api/agents/general",
+            params=self._auth_params(),
+            json={"capabilities": []},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["capabilities"],
+            [{"name": "对话", "description": "通用对话"}],
+        )
+
+    def test_update_agent_omitted_capabilities_keeps_existing(self):
+        response = self.client.put(
+            "/api/agents/general",
+            params=self._auth_params(),
+            json={"name": "新名字"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["name"], "新名字")
+        self.assertEqual(
+            data["capabilities"],
+            [{"name": "对话", "description": "通用对话"}],
+        )
+
+
+class McpApiTest(unittest.TestCase):
+    """CRUD tests for /api/mcp with the config file redirected to a temp path."""
+
+    def setUp(self):
+        import src.api.routers.mcp as mcp_module
+        import src.core.config.mcp_headers as mcp_headers_module
+        from pathlib import Path
+
+        # Reuse the exact same app/auth fixture as WebApiTest. tool_runtime is
+        # None in this fixture, so _sync() skips the runtime manager reload.
+        WebApiTest.setUp(self)
+
+        # Redirect MCP_FILE to a temp file so config/mcp_servers.json is untouched.
+        self._mcp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._mcp_dir.cleanup)
+        self.mcp_file = Path(self._mcp_dir.name) / "mcp_servers.json"
+        mcp_patcher = patch.object(mcp_module, "MCP_FILE", self.mcp_file)
+        mcp_patcher.start()
+        self.addCleanup(mcp_patcher.stop)
+
+        self.mcp_headers_file = Path(self._mcp_dir.name) / "mcp_headers.json"
+        headers_patcher = patch.object(
+            mcp_headers_module, "MCP_HEADERS_FILE", self.mcp_headers_file
+        )
+        headers_patcher.start()
+        self.addCleanup(headers_patcher.stop)
+
+    _auth_params = WebApiTest._auth_params
+
+    def _create_stdio_server(self, server_id="local_fs"):
+        return self.client.post(
+            "/api/mcp",
+            params=self._auth_params(),
+            json={
+                "id": server_id,
+                "name": "本地文件",
+                "transport": "stdio",
+                "command": "python",
+                "args": ["-m", "some_server"],
+            },
+        )
+
+    def test_list_servers_initially_empty(self):
+        response = self.client.get("/api/mcp", params=self._auth_params())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_create_stdio_server(self):
+        response = self._create_stdio_server()
+        self.assertEqual(response.status_code, 201, response.text)
+        data = response.json()
+        self.assertEqual(data["id"], "local_fs")
+        self.assertEqual(data["transport"], "stdio")
+        self.assertEqual(data["command"], "python")
+        self.assertEqual(data["args"], ["-m", "some_server"])
+        self.assertTrue(data["enabled"])
+
+        response = self.client.get("/api/mcp", params=self._auth_params())
+        self.assertEqual(len(response.json()), 1)
+
+    def test_create_streamablehttp_server(self):
+        response = self.client.post(
+            "/api/mcp",
+            params=self._auth_params(),
+            json={
+                "id": "remote_api",
+                "name": "远程服务",
+                "transport": "streamablehttp",
+                "url": "https://example.com/mcp",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        data = response.json()
+        self.assertEqual(data["transport"], "streamablehttp")
+        self.assertEqual(data["url"], "https://example.com/mcp")
+
+    def test_create_streamablehttp_without_url_rejected(self):
+        response = self.client.post(
+            "/api/mcp",
+            params=self._auth_params(),
+            json={"id": "remote_api", "name": "远程服务", "transport": "streamablehttp"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_partial_preserves_unsubmitted_keys(self):
+        import json as json_module
+
+        # A partial update must preserve known fields that were not submitted;
+        # update_server mutates the stored dict in place.
+        self.mcp_file.write_text(
+            json_module.dumps(
+                {
+                    "servers": [
+                        {
+                            "id": "local_fs",
+                            "name": "本地文件",
+                            "transport": "stdio",
+                            "command": "python",
+                            "args": ["-m", "server"],
+                            "env": {},
+                            "enabled": True,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        response = self.client.put(
+            "/api/mcp/local_fs",
+            params=self._auth_params(),
+            json={"name": "新名字"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["name"], "新名字")
+
+        saved = json_module.loads(self.mcp_file.read_text(encoding="utf-8"))["servers"]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["name"], "新名字")
+        self.assertEqual(saved[0]["args"], ["-m", "server"])
+        self.assertEqual(saved[0]["command"], "python")
+
+    def test_update_missing_server_404(self):
+        response = self.client.put(
+            "/api/mcp/nonexistent",
+            params=self._auth_params(),
+            json={"name": "x"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_server_then_404(self):
+        response = self._create_stdio_server()
+        self.assertEqual(response.status_code, 201, response.text)
+
+        response = self.client.delete("/api/mcp/local_fs", params=self._auth_params())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+        response = self.client.delete("/api/mcp/local_fs", params=self._auth_params())
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.get("/api/mcp", params=self._auth_params())
+        self.assertEqual(response.json(), [])
+
+    def _create_http_server_with_headers(self):
+        return self.client.post(
+            "/api/mcp",
+            params=self._auth_params(),
+            json={
+                "id": "remote_api",
+                "name": "远程服务",
+                "transport": "streamablehttp",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer secret-token"},
+            },
+        )
+
+    def test_headers_stored_outside_config(self):
+        import json as json_module
+
+        response = self._create_http_server_with_headers()
+        self.assertEqual(response.status_code, 201, response.text)
+
+        saved = json_module.loads(self.mcp_file.read_text(encoding="utf-8"))["servers"]
+        self.assertEqual(saved[0]["headers"], {})
+        self.assertNotIn("secret-token", self.mcp_file.read_text(encoding="utf-8"))
+
+        self.assertIn(
+            "secret-token", self.mcp_headers_file.read_text(encoding="utf-8")
+        )
+
+        response = self.client.get("/api/mcp", params=self._auth_params())
+        self.assertEqual(
+            response.json()[0]["headers"],
+            {"Authorization": "Bearer secret-token"},
+        )
+
+    def test_update_headers_replaces_secret(self):
+        self._create_http_server_with_headers()
+        response = self.client.put(
+            "/api/mcp/remote_api",
+            params=self._auth_params(),
+            json={"headers": {"Authorization": "Bearer new-token"}},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        content = self.mcp_headers_file.read_text(encoding="utf-8")
+        self.assertIn("new-token", content)
+        self.assertNotIn("secret-token", content)
+
+        response = self.client.get("/api/mcp", params=self._auth_params())
+        self.assertEqual(
+            response.json()[0]["headers"], {"Authorization": "Bearer new-token"}
+        )
+
+    def test_update_without_headers_preserves_secret(self):
+        self._create_http_server_with_headers()
+        response = self.client.put(
+            "/api/mcp/remote_api",
+            params=self._auth_params(),
+            json={"name": "新名字"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        response = self.client.get("/api/mcp", params=self._auth_params())
+        self.assertEqual(
+            response.json()[0]["headers"],
+            {"Authorization": "Bearer secret-token"},
+        )
+
+    def test_delete_server_removes_secret(self):
+        from src.core.config.mcp_headers import load_headers
+
+        self._create_http_server_with_headers()
+        response = self.client.delete(
+            "/api/mcp/remote_api", params=self._auth_params()
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(load_headers("remote_api"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

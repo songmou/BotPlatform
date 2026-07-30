@@ -10,7 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from src.core.config.loader import ModelPricing, ModelProfile, ProjectConfig
+from src.core.config.loader import ModelProfile, ProjectConfig
 from src.core.modeling import (
     ModelCallContext,
     ModelError,

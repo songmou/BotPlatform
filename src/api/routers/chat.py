@@ -46,6 +46,8 @@ from src.core.services.agent_tools import build_system_prompt, resolve_tool_name
 from src.core.storage.tenants import TenantContext
 from src.core.tooling.models import ToolAuditContext
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 logger = logging.getLogger(__name__)

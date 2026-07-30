@@ -266,6 +266,38 @@ class ConfigLoaderTests(unittest.TestCase):
             self.assertEqual(config.skills[0]["id"], "greeting_skill")
             self.assertEqual(config.mcp_servers[0]["id"], "echo")
 
+    def test_mcp_server_headers_merged_from_secret_store(self) -> None:
+        import src.core.config.mcp_headers as mcp_headers
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "mcp_servers.json", {
+                "servers": [
+                    {
+                        "id": "remote_api",
+                        "name": "远程服务",
+                        "transport": "streamablehttp",
+                        "url": "https://example.com/mcp",
+                        "headers": {},
+                        "enabled": True,
+                    }
+                ]
+            })
+            headers_file = Path(directory) / "mcp_headers.json"
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["mcp_servers"] = ["remote_api"]
+            self.save_json(agent_path, agent_data)
+            with patch.object(mcp_headers, "MCP_HEADERS_FILE", headers_file):
+                mcp_headers.save_headers(
+                    "remote_api", {"Authorization": "Bearer secret-token"}
+                )
+                config = load_project_config(config_dir)
+            self.assertEqual(
+                config.mcp_servers[0]["headers"],
+                {"Authorization": "Bearer secret-token"},
+            )
+
     def test_unknown_skill_reference_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)

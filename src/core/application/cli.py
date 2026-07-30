@@ -393,21 +393,22 @@ def run_codex_hook_command(
 
 
 def _load_model_env() -> None:
-    """Load API keys from data/system/model.env if present."""
+    """Load API keys from data/system/model.env and mcp.env if present."""
     import os
 
-    env_file = SYSTEM_DATA_DIR / "model.env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for name in ("model.env", "mcp.env"):
+        env_file = SYSTEM_DATA_DIR / name
+        if not env_file.exists():
             continue
-        if "=" in line:
-            key, _, value = line.partition("=")
-            key, value = key.strip(), value.strip()
-            if key and value and not os.environ.get(key):
-                os.environ[key] = value
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key and value and not os.environ.get(key):
+                    os.environ[key] = value
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

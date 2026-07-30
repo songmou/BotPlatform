@@ -22,9 +22,11 @@ BotPlatform 是一个微信（iLink）AI 机器人，外加一个 FastAPI Web �
 - 使用标准库 `unittest`，**不是** pytest。运行：`python -m unittest discover -s tests -v`。
 - CI 在 Python 3.10 和 3.12（ubuntu）上运行同一命令。测试无需真实 API Key、Ollama、微信或个人数据。
 - 部分测试仅适用于 POSIX，在 Windows 上会失败（如 `folder/code.py` 这类路径分隔符断言，以及 `0o600`/`0o700` 权限检查）。这些 Windows 失败属于环境问题，并非回归 —— 请以 CI 目标环境的行为为准。
+- **任何代码变更完成后，必须运行与改动相关的测试**（全量 `python -m unittest discover -s tests -v`，或聚焦的单模块如 `python -m unittest tests.test_web_api`），并在回复中给出结果。若测试失败，先修复再收尾；环境性失败需注明并以 CI 行为为准。
 
 ## 密钥与数据
 - `DEEPSEEK_API_KEY` 存放于 `data/system/model.env`（必须是 `0600` 权限，且仅含单个密钥）。微信登录凭证为 `data/system/credentials.json`。
+- MCP 请求头密钥（如 Authorization）存于 `data/system/mcp_headers.json`（由 `src/core/config/mcp_headers.py` 经 KeychainService 管理）；`config/mcp_servers.json` 中的 `headers` 永远写入空值，读取时自动合并。
 - 切勿提交、记录密钥，也不要把密钥写入 `config/*.json`。`data/` 已在 gitignore 中。
 
 ## 约定
