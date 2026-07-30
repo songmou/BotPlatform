@@ -414,7 +414,7 @@ class ToolAgentLoopTests(unittest.TestCase):
                 CanonicalMessage("assistant", "已取消创建文件。"),
             ]
         )
-        pending = service.chat("user", "创建文件")
+        service.chat("user", "创建文件")
         final = service.resolve_pending_approval("user", False)
         self.assertEqual(final.text, "已取消创建文件。")
         self.assertFalse((self.root / "denied.txt").exists())

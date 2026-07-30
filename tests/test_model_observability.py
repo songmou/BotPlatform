@@ -45,7 +45,10 @@ class FakeClient:
 class ObservabilityTests(unittest.TestCase):
     def test_success_and_failure_log_only_metadata(self) -> None:
         logs = []
-        logger = lambda *values: logs.append(values)
+
+        def logger(*values):
+            logs.append(values)
+
         request = ModelRequest(messages=[CanonicalMessage("user", "private prompt")])
         ObservedModelClient(FakeClient(), logger).complete(request)
         self.assertEqual(logs[0][1], "actual")

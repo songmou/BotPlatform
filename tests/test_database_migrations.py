@@ -17,6 +17,31 @@ from src.core.storage.database import (
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_latest_schema_has_proactive_context_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "botplatform.sqlite3")
+            with database.read() as connection:
+                table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='conversation_delivery_receipts'"
+                ).fetchone()
+                version = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+
+            self.assertIsNotNone(table)
+            self.assertEqual(version, LATEST_SCHEMA_VERSION)
+
+    def test_v21_renames_seeded_public_default_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "botplatform.sqlite3")
+            with database.read() as connection:
+                name = connection.execute(
+                    "SELECT name FROM knowledge_categories "
+                    "WHERE category_id='public-default'"
+                ).fetchone()[0]
+            self.assertEqual(name, "默认知识库")
+
     def test_v12_repairs_intermediate_outbox_schema_without_losing_rows(
         self,
     ) -> None:
@@ -291,6 +316,22 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("confirmed_at", memory_columns)
             self.assertIn("content_hash", soul_columns)
             self.assertIn("last_scanned_event_id", soul_columns)
+
+    def test_v19_creates_drive_audit_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "botplatform.sqlite3")
+            with database.read() as connection:
+                table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='drive_audit_log'"
+                ).fetchone()
+                version = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+
+            self.assertIsNotNone(table)
+            self.assertGreaterEqual(version, 19)
+            self.assertEqual(version, LATEST_SCHEMA_VERSION)
 
     def test_v11_creates_admin_tables_with_builtin_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

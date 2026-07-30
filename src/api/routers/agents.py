@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.api.deps import get_config
-from src.api.schemas import AgentCreate, AgentOut, AgentUpdate
+from src.api.deps import get_config, require_permission
+from src.api.schemas import (
+    AgentCreate,
+    AgentOut,
+    AgentUpdate,
+    KnowledgeAgentBindingsIn,
+)
 from src.core.config.loader import AgentPreset, Capability
 from src.core.paths import CONFIG_DIR
 
@@ -33,6 +38,7 @@ def _to_out(agent) -> AgentOut:
         greeting_hints=list(agent.greeting_hints),
         temperature=agent.temperature,
         max_tokens=agent.max_tokens,
+        enabled=agent.enabled,
     )
 
 
@@ -47,6 +53,7 @@ def _agent_to_dict(agent) -> dict:
         "tools": agent.tools,
         "skills": list(agent.skills),
         "mcp_servers": list(agent.mcp_servers),
+        "enabled": agent.enabled,
     }
     if agent.model:
         data["model"] = agent.model
@@ -95,6 +102,41 @@ def active_agent(request: Request):
     return _to_out(config.active_agent)
 
 
+@router.get("/{agent_id}/knowledge-categories")
+def get_agent_knowledge_categories(
+    agent_id: str,
+    request: Request,
+    principal=Depends(require_permission("knowledge.read")),
+):
+    config = get_config(request)
+    if agent_id not in config.agents:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    service = getattr(request.app.state, "knowledge_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="知识库服务不可用")
+    return {"category_ids": service.get_agent_bindings(agent_id)}
+
+
+@router.put("/{agent_id}/knowledge-categories")
+def update_agent_knowledge_categories(
+    agent_id: str,
+    body: KnowledgeAgentBindingsIn,
+    request: Request,
+    principal=Depends(require_permission("knowledge.manage")),
+):
+    config = get_config(request)
+    if agent_id not in config.agents:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    service = getattr(request.app.state, "knowledge_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="知识库服务不可用")
+    try:
+        category_ids = service.set_agent_bindings(agent_id, body.category_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"category_ids": category_ids}
+
+
 @router.get("/{agent_id}", response_model=AgentOut)
 def get_agent(agent_id: str, request: Request):
     config = get_config(request)
@@ -134,6 +176,7 @@ def create_agent(body: AgentCreate, request: Request):
         greeting_hints=body.greeting_hints or [],
         temperature=body.temperature,
         max_tokens=body.max_tokens,
+        enabled=body.enabled,
     )
     _save_agent_file(agent_id, _agent_to_dict(preset))
     _update_memory(request, agent_id, preset)
@@ -146,6 +189,8 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
     existing = config.agents.get(agent_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="智能体不存在")
+    if body.enabled is False and agent_id == config.app.default_agent:
+        raise HTTPException(status_code=400, detail="不能禁用默认智能体")
 
     preset = AgentPreset(
         id=agent_id,
@@ -166,6 +211,7 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
         greeting_hints=body.greeting_hints if body.greeting_hints is not None else existing.greeting_hints,
         temperature=body.temperature if body.temperature is not None else existing.temperature,
         max_tokens=body.max_tokens if body.max_tokens is not None else existing.max_tokens,
+        enabled=body.enabled if body.enabled is not None else existing.enabled,
     )
     _save_agent_file(agent_id, _agent_to_dict(preset))
     _update_memory(request, agent_id, preset)
@@ -181,4 +227,7 @@ def delete_agent(agent_id: str, request: Request):
         raise HTTPException(status_code=400, detail="不能删除默认智能体")
     _delete_agent_file(agent_id)
     _remove_from_memory(request, agent_id)
+    service = getattr(request.app.state, "knowledge_service", None)
+    if service is not None:
+        service.set_agent_bindings(agent_id, [])
     return {"status": "ok"}

@@ -8,12 +8,14 @@ from .base import PlatformPlugin, PluginContext
 from .browser_automation import BrowserAutomationPlugin
 from .codex_tasks import CodexTasksPlugin
 from .todo import TodoPlugin
+from .web_research import WebResearchPlugin
 
 
 PLUGIN_TYPES = {
     BrowserAutomationPlugin.id: BrowserAutomationPlugin,
     CodexTasksPlugin.id: CodexTasksPlugin,
     TodoPlugin.id: TodoPlugin,
+    WebResearchPlugin.id: WebResearchPlugin,
 }
 
 

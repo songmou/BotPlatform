@@ -6,9 +6,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.api.auth import SESSION_COOKIE, SESSION_MAX_AGE
-from src.api.deps import get_admin_auth, get_admin_role_store, get_principal
+from src.api.deps import get_admin_auth, get_principal
 from src.api.schemas import AdminRoleOut, AdminUserOut, LoginRequest, MeOut
-from src.core.services.auth import AuthError
+from src.core.services.auth import AuthError, LoginThrottled
 
 router = APIRouter(tags=["auth"])
 
@@ -46,6 +46,8 @@ def login(body: LoginRequest, request: Request):
             ip=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
         )
+    except LoginThrottled as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     payload = MeOut(
@@ -58,6 +60,7 @@ def login(body: LoginRequest, request: Request):
         token,
         httponly=True,
         samesite="lax",
+        secure=bool(getattr(request.app.state, "secure_cookies", False)),
         max_age=SESSION_MAX_AGE,
         path="/",
     )

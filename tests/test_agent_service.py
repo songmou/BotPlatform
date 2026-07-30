@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -17,6 +18,7 @@ from src.core.modeling import (
     ModelRouter,
     ModelResponse,
 )
+from src.core.storage.tenants import ConversationStore, TenantRegistry
 
 
 class FakeOllama:
@@ -110,6 +112,34 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(
             scheduled_messages[0].content,
             self.config.agents["translator"].system_prompt,
+        )
+
+    def test_proactive_message_is_visible_to_the_next_chat_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = TenantRegistry(Path(temporary) / "data")
+            tenant = registry.resolve("bot", "user")
+            conversations = ConversationStore(registry, max_messages=12)
+            conversations.record_outbound_message(
+                tenant.tenant_id,
+                "【待办提醒】提交周报",
+                delivery_key="notification:test",
+            )
+            service = AgentService(
+                self.ollama,
+                self.config.app,
+                self.config.agents,
+                conversation_store=conversations,
+            )
+
+            service.chat(tenant, "这个提醒是几点触发的？")
+
+        self.assertIn(
+            CanonicalMessage("assistant", "【待办提醒】提交周报"),
+            self.ollama.calls[-1].messages,
+        )
+        self.assertEqual(
+            self.ollama.calls[-1].messages[-1],
+            CanonicalMessage("user", "这个提醒是几点触发的？"),
         )
 
     def test_clear_and_help(self) -> None:

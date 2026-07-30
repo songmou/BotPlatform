@@ -198,7 +198,7 @@ class UserManagementApiTest(unittest.TestCase):
     def test_users_page_renders(self):
         response = self.client.get("/users")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("用户管理", response.text)
+        self.assertIn("用户与权限", response.text)
 
 
 if __name__ == "__main__":

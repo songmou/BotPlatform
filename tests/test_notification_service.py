@@ -13,6 +13,7 @@ from src.core.integrations.ilink import (
     SessionExpired,
 )
 from src.core.integrations.images import ImageSource, ImageSourceError
+from src.core.modeling import CanonicalMessage
 from src.core.plugins.codex_tasks import CodexTaskStore
 from src.core.services.notification import (
     NotificationCredentialsError,
@@ -25,7 +26,7 @@ from src.core.services.notification import (
     NotificationService,
     TenantRecipientStore,
 )
-from src.core.storage.tenants import TenantRegistry
+from src.core.storage.tenants import ConversationStore, TenantRegistry
 
 
 class FakeILink:
@@ -58,7 +59,7 @@ class NotificationServiceTests(unittest.TestCase):
         self.credentials = Credentials("token", "https://gateway", "bot", "owner")
         self.clients = []
 
-    def service(self, credentials=None, failure=None):
+    def service(self, credentials=None, failure=None, conversation_store=None):
         selected_credentials = self.credentials if credentials is None else credentials
 
         def factory(_credentials):
@@ -71,7 +72,61 @@ class NotificationServiceTests(unittest.TestCase):
             recipient_store=self.store,
             client_factory=factory,
             image_loader=FakeImageLoader(),
+            conversation_store=conversation_store,
         )
+
+    def test_delivered_notification_joins_context_and_is_idempotent(self) -> None:
+        self.store.update(self.tenant, "context-token")
+        conversations = ConversationStore(self.registry, max_messages=4)
+        service = self.service(conversation_store=conversations)
+
+        service.send_text_to_tenant(
+            self.tenant.tenant_id,
+            "插件主动推送",
+            idempotency_key="notification-one",
+        )
+        service.send_text_to_tenant(
+            self.tenant.tenant_id,
+            "插件主动推送",
+            idempotency_key="notification-one",
+        )
+
+        self.assertEqual(
+            conversations.load_context(self.tenant.tenant_id),
+            [CanonicalMessage("assistant", "插件主动推送")],
+        )
+        with self.registry.database.read() as connection:
+            events = connection.execute(
+                "SELECT role, content, event_type FROM conversation_events "
+                "WHERE tenant_id=?",
+                (self.tenant.tenant_id,),
+            ).fetchall()
+            receipts = connection.execute(
+                "SELECT delivery_key FROM conversation_delivery_receipts "
+                "WHERE tenant_id=?",
+                (self.tenant.tenant_id,),
+            ).fetchall()
+        self.assertEqual(
+            [tuple(row) for row in events],
+            [("assistant", "插件主动推送", "notification")],
+        )
+        self.assertEqual(
+            [tuple(row) for row in receipts],
+            [("notification:notification-one",)],
+        )
+
+    def test_failed_notification_does_not_join_context(self) -> None:
+        self.store.update(self.tenant, "context-token")
+        conversations = ConversationStore(self.registry, max_messages=4)
+        service = self.service(
+            failure=ILinkError("send failed"),
+            conversation_store=conversations,
+        )
+
+        with self.assertRaises(NotificationDeliveryError):
+            service.send_text_to_tenant(self.tenant.tenant_id, "未送达")
+
+        self.assertEqual(conversations.load_context(self.tenant.tenant_id), [])
 
     def test_sends_literal_text_to_recent_recipient_and_closes_client(self) -> None:
         self.store.update(self.tenant, "context-token")

@@ -546,11 +546,11 @@ class MainBotTests(unittest.TestCase):
 
     def test_notify_command_returns_before_model_initialization(self) -> None:
         with patch.object(main_module, "run_notify_command", return_value=0) as notify:
-            with patch.object(bootstrap_module, "create_model_client") as create_model:
+            with patch.object(bootstrap_module, "build_core_services") as build_services:
                 result = main_module.main(["notify", "--user", "tenant-a", "--message", "告警"])
         self.assertEqual(result, 0)
         notify.assert_called_once()
-        create_model.assert_not_called()
+        build_services.assert_not_called()
 
     def test_duplicate_main_exits_before_bot_initialization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

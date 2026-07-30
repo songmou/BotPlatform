@@ -16,7 +16,7 @@ BotPlatform 是一个微信（iLink）AI 机器人，外加一个 FastAPI Web �
 ## 配置：无热重载，冻结数据类
 - 修改 `config/*.json` 中的任何内容都需要完整重启进程 —— 没有热重载。
 - 改完代码后，务必确认已真正杀掉旧进程再重启（同端口上残留的旧服务是常见坑）。`web.py`/`uvicorn` 运行时不带 `--reload`。
-- `ProjectConfig` 及所有配置数据类都是 `@dataclass(frozen=True)`。若要就地更新某个运行时字段（例如 API 写入后刷新 `config.mcp_servers`/`config.skills`），请使用 `object.__setattr__(config, "field", value)` —— 直接赋值会抛出 `FrozenInstanceError`。
+- `ProjectConfig` 及所有配置数据类都是 `@dataclass(frozen=True)`。若要在运行时更新 `config.skills`/`config.mcp_servers`（例如 API 写入后刷新），必须调用 `config.update_skills(...)` / `config.update_mcp_servers(...)` —— 它们会先用 loader 的校验规则验证，再就地替换列表内容（引用不变，持有者自动可见）。禁止用 `object.__setattr__` 绕过冻结校验；直接赋值会抛出 `FrozenInstanceError`。
 
 ## 测试
 - 使用标准库 `unittest`，**不是** pytest。运行：`python -m unittest discover -s tests -v`。

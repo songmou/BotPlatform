@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import threading
 import time
 import unittest
 from contextlib import contextmanager
@@ -14,6 +13,7 @@ from src.core.messaging import (
     ChannelAddressStore,
     ChannelCapabilities,
     ChannelManager,
+    DeliveryEndpoint,
     InboundMessage,
     MessageInboxStore,
     MessageRouter,
@@ -101,6 +101,25 @@ class MessagingTests(unittest.TestCase):
         self.assertEqual(reclaimed["inbox_id"], claimed["inbox_id"])
         store.finish(int(reclaimed["inbox_id"]), "done")
         self.assertIsNone(store.claim())
+
+    def test_router_reset_repoints_long_lived_reference_to_new_adapters(self):
+        old_adapter = FakeAdapter("wechat-main")
+        router = MessageRouter([old_adapter])
+        endpoint = DeliveryEndpoint(
+            channel_id="wechat-main",
+            platform="fake",
+            account_id="bot",
+            conversation_type=DIRECT,
+            conversation_id="user",
+            recipient_id="user",
+        )
+        new_adapter = FakeAdapter("wechat-main")
+        router.reset([new_adapter])
+        router.send(endpoint, OutboundMessage(text="重连后消息"))
+        self.assertEqual(old_adapter.sent, [])
+        self.assertEqual(len(new_adapter.sent), 1)
+        with self.assertRaises(ValueError):
+            router.reset([FakeAdapter("dup"), FakeAdapter("dup")])
 
     def test_wechat_adapter_normalizes_and_keeps_protocol_context_private(self):
         client = FakeILinkClient()

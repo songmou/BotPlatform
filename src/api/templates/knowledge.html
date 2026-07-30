@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}知识库 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/knowledge.css">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <h2>知识库</h2>
+        <p class="page-desc">管理公共与私有知识库、关联网盘原文件，并配置向量化服务</p>
+    </div>
+
+    <div class="tab-bar knowledge-tabs" role="tablist" aria-label="知识库视图">
+        <button class="tab-btn active" type="button" data-knowledge-tab="public"
+                role="tab" aria-selected="true">公共知识</button>
+        <button class="tab-btn" type="button" data-knowledge-tab="tenant"
+                role="tab" aria-selected="false">私有知识</button>
+        <button class="tab-btn" type="button" data-knowledge-tab="embedding"
+                role="tab" aria-selected="false">向量配置</button>
+    </div>
+
+    <div id="knowledge-library-panel">
+        <input type="hidden" id="knowledge-scope" value="public">
+        <div id="knowledge-status" class="status-card" style="display:none"></div>
+        <div id="knowledge-embedding-notice" class="status-card" style="display:none">
+            向量化服务当前未启用。新增知识将保持“等待向量化”，检索仅使用全文匹配；
+            请在“向量配置”中启用并完整重启服务，再补齐存量向量。
+        </div>
+
+        <div class="knowledge-context-bar">
+            <div class="knowledge-toolbar-group">
+                <span class="knowledge-group-label">当前知识库</span>
+                <select id="knowledge-tenant" aria-label="租户"></select>
+                <select id="knowledge-category" aria-label="知识库"></select>
+            </div>
+            <div class="knowledge-toolbar-group knowledge-library-actions" aria-label="知识库管理">
+                <button id="knowledge-category-add" class="btn-secondary">+ 新建库</button>
+                <button id="knowledge-category-edit" class="btn-secondary">编辑</button>
+                <button id="knowledge-category-delete" class="btn-danger">删除</button>
+            </div>
+        </div>
+
+        <div class="knowledge-action-card">
+            <div class="knowledge-search-bar">
+                <input type="text" id="knowledge-search-input" placeholder="输入关键词测试当前知识库">
+                <button id="knowledge-search-btn" class="btn-secondary">检索测试</button>
+            </div>
+            <div class="knowledge-action-row">
+                <div class="knowledge-toolbar-group">
+                    <span class="knowledge-group-label">筛选与批量处理</span>
+                    <select id="knowledge-status-filter">
+                        <option value="">全部状态</option>
+                        <option value="ready">已就绪</option>
+                        <option value="pending_embedding">等待向量化</option>
+                        <option value="stale_modified">源文件已修改</option>
+                        <option value="source_missing">源文件已删除</option>
+                        <option value="failed">处理失败</option>
+                    </select>
+                    <span id="knowledge-selection-count" class="text-muted"></span>
+                    <button id="knowledge-refresh-selected" class="btn-secondary" disabled>刷新所选</button>
+                    <select id="knowledge-move-target"><option value="">移动到…</option></select>
+                    <button id="knowledge-move-selected" class="btn-secondary" disabled>移动</button>
+                </div>
+                <div class="knowledge-toolbar-group knowledge-create-actions">
+                    <span class="knowledge-group-label">新增来源</span>
+                    <button id="knowledge-add-text-btn" class="btn-secondary">录入文本</button>
+                    <button id="knowledge-from-drive-btn" class="btn-secondary">从网盘选择</button>
+                    <button id="knowledge-upload-btn" class="btn-primary">上传文档</button>
+                    <input type="file" id="knowledge-file-input" style="display:none"
+                           accept=".txt,.md,.markdown,.pdf,.docx,.xlsx,.pptx">
+                </div>
+            </div>
+            <div class="knowledge-maintenance-row">
+                <span class="knowledge-group-label">索引维护</span>
+                <span class="text-muted">源文件变化后可刷新所选；启用向量服务后可补齐当前库。</span>
+                <button id="knowledge-reindex-btn" class="btn-secondary">补齐当前库向量</button>
+            </div>
+        </div>
+        <div id="knowledge-search-results"></div>
+
+        <div class="table-scroll">
+            <table class="data-table" id="knowledge-table">
+                <thead>
+                    <tr>
+                        <th><input type="checkbox" id="knowledge-select-all" aria-label="全选"></th>
+                        <th>名称</th>
+                        <th>来源</th>
+                        <th>状态</th>
+                        <th>分块数</th>
+                        <th>更新时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="knowledge-table-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="knowledge-embedding-panel" style="display:none">
+        <div class="knowledge-config-layout">
+            <form id="knowledge-embedding-form" class="knowledge-config-card">
+                <div class="knowledge-config-heading">
+                    <div>
+                        <h3>向量化服务</h3>
+                        <p class="text-muted">用于生成知识分块向量，提升语义检索效果。</p>
+                    </div>
+                    <label class="knowledge-switch">
+                        <input type="checkbox" id="knowledge-embedding-enabled">
+                        <span>启用</span>
+                    </label>
+                </div>
+                <div class="knowledge-form-grid">
+                    <div class="form-group">
+                        <label for="knowledge-embedding-id">配置 ID</label>
+                        <input id="knowledge-embedding-id" required maxlength="64"
+                               placeholder="如 bge_m3_local">
+                    </div>
+                    <div class="form-group">
+                        <label for="knowledge-embedding-model">模型名称</label>
+                        <input id="knowledge-embedding-model" required placeholder="如 bge-m3">
+                    </div>
+                    <div class="form-group knowledge-form-wide">
+                        <label for="knowledge-embedding-url">服务地址</label>
+                        <input type="url" id="knowledge-embedding-url" required
+                               placeholder="http://127.0.0.1:11434">
+                        <small>远程地址必须使用 HTTPS；仅本机回环地址可使用 HTTP。</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="knowledge-embedding-dimensions">向量维度</label>
+                        <input type="number" id="knowledge-embedding-dimensions" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="knowledge-embedding-timeout">超时时间（秒）</label>
+                        <input type="number" id="knowledge-embedding-timeout"
+                               min="0.1" max="600" step="0.1" required>
+                    </div>
+                </div>
+                <div class="knowledge-config-footer">
+                    <span id="knowledge-embedding-runtime" class="text-muted"></span>
+                    <button type="submit" class="btn-primary">保存配置</button>
+                </div>
+            </form>
+            <aside class="knowledge-config-note">
+                <h4>生效说明</h4>
+                <p>配置写入 <code>config/embeddings.json</code>，不会热重载。</p>
+                <p>保存后请完整停止旧进程并重新启动服务。重启后回到知识库，使用“补齐当前库向量”处理存量知识。</p>
+            </aside>
+        </div>
+    </div>
+</div>
+
+<div id="knowledge-preview-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3 id="knowledge-preview-title">原文件预览</h3>
+            <button id="knowledge-preview-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="knowledge-preview-meta" class="text-muted"></div>
+            <pre id="knowledge-preview-content"></pre>
+        </div>
+    </div>
+</div>
+
+<div id="knowledge-category-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="knowledge-category-modal-title">新建知识库</h3>
+            <button id="knowledge-category-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="knowledge-category-form" class="modal-body">
+            <div class="form-group">
+                <label for="knowledge-category-name">名称</label>
+                <input id="knowledge-category-name" maxlength="100" required>
+            </div>
+            <div class="form-group">
+                <label for="knowledge-category-description">描述</label>
+                <textarea id="knowledge-category-description" rows="4" maxlength="500"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="knowledge-category-cancel" class="btn-secondary">取消</button>
+                <button type="submit" class="btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div id="knowledge-text-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>录入文本知识</h3>
+            <button id="knowledge-text-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="knowledge-text-form" class="modal-body">
+            <div class="form-group">
+                <label for="knowledge-text-name">知识名称</label>
+                <input type="text" id="knowledge-text-name" required placeholder="如 产品FAQ">
+            </div>
+            <div class="form-group">
+                <label for="knowledge-text-content">内容（最多 20000 字符）</label>
+                <textarea id="knowledge-text-content" rows="10" required></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="knowledge-text-modal-cancel" class="btn-secondary">取消</button>
+                <button type="submit" class="btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div id="knowledge-drive-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3>从网盘选择文件</h3>
+            <button id="knowledge-drive-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="knowledge-drive-path" class="knowledge-drive-path">根目录</div>
+            <div id="knowledge-drive-list" class="knowledge-drive-list"></div>
+            <div class="modal-footer">
+                <button type="button" id="knowledge-drive-cancel" class="btn-secondary">取消</button>
+                <button type="button" id="knowledge-drive-import" class="btn-primary">加入当前知识库</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/knowledge.js"></script>
+<script>initKnowledge();</script>
+{% endblock %}

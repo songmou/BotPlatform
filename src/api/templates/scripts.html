@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}运维脚本 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/scripts.css">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>运维脚本</h2>
+                <p class="page-desc">集中管理受信任脚本，并追踪每次执行状态与日志</p>
+            </div>
+            <div class="page-header-actions">
+                <button id="script-settings-btn" class="btn-secondary">安全设置</button>
+                <button id="create-script-btn" class="btn-primary">+ 注册脚本</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-bar scripts-tabs" role="tablist" aria-label="运维脚本视图">
+        <button class="tab-btn active" type="button" data-scripts-tab="catalog" role="tab">脚本库</button>
+        <button class="tab-btn" type="button" data-scripts-tab="runs" role="tab">运行记录</button>
+    </div>
+
+    <section id="scripts-pane-catalog" class="scripts-pane active" data-scripts-pane="catalog">
+        <div class="scripts-toolbar">
+            <label class="scripts-search">
+                <span>搜索脚本</span>
+                <input id="script-search" type="search" placeholder="名称、ID 或描述">
+            </label>
+            <label>
+                <span>状态</span>
+                <select id="script-filter-status">
+                    <option value="">全部状态</option>
+                    <option value="enabled">已启用</option>
+                    <option value="disabled">已停用</option>
+                </select>
+            </label>
+        </div>
+        <div id="script-list" class="script-grid" aria-live="polite"></div>
+    </section>
+
+    <section id="scripts-pane-runs" class="scripts-pane" data-scripts-pane="runs" style="display:none">
+        <div class="runs-header">
+            <div>
+                <h3>运行记录</h3>
+                <p class="page-desc">运行中任务每 5 秒自动刷新，日志默认折叠</p>
+            </div>
+            <div class="runs-toolbar">
+                <label>
+                    <span>机器人用户</span>
+                    <select id="script-run-tenant"></select>
+                </label>
+                <label>
+                    <span>状态</span>
+                    <select id="script-run-status">
+                        <option value="">全部状态</option>
+                        <option value="running">运行中</option>
+                        <option value="success">成功</option>
+                        <option value="failed">失败</option>
+                        <option value="cancelled">已取消</option>
+                    </select>
+                </label>
+                <button id="refresh-runs-btn" class="btn-secondary" type="button">刷新</button>
+            </div>
+        </div>
+        <div id="script-run-list" class="run-list" aria-live="polite"></div>
+    </section>
+</div>
+
+<div id="script-settings-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <div>
+                <h3>脚本安全设置</h3>
+                <p class="modal-subtitle">仅允许注册这些根目录下的脚本，修改后会改变安全边界</p>
+            </div>
+            <button id="script-settings-close" class="modal-close-btn" type="button">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label for="script-roots">允许根目录（每行一个绝对目录）</label>
+                <textarea id="script-roots" rows="6" placeholder="/opt/botplatform/scripts"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button id="script-settings-cancel" class="btn-secondary" type="button">取消</button>
+                <button id="save-script-roots" class="btn-primary" type="button">保存设置</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="script-params-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3 id="script-params-title">参数定义</h3>
+            <button id="script-params-close" class="modal-close-btn" type="button">&times;</button>
+        </div>
+        <div class="modal-body">
+            <pre id="script-params-content" class="script-params-json"></pre>
+        </div>
+    </div>
+</div>
+
+<div id="script-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="script-modal-title">注册脚本</h3>
+            <button id="script-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="script-form" class="modal-body">
+            <div class="form-group" id="script-id-group">
+                <label for="script-id">脚本 ID</label>
+                <input id="script-id" required pattern="^[a-z][a-z0-9_]{0,63}$">
+            </div>
+            <div class="form-group"><label for="script-name">名称</label><input id="script-name" required></div>
+            <div class="form-group"><label for="script-description">描述</label><textarea id="script-description" rows="2"></textarea></div>
+            <div class="form-group"><label for="script-entrypoint">绝对入口路径</label><input id="script-entrypoint" required></div>
+            <div class="form-row">
+                <div class="form-group"><label for="script-runtime">运行方式</label><select id="script-runtime"><option value="executable">可执行文件</option><option value="python">Python</option></select></div>
+                <div class="form-group"><label for="script-timeout">超时（秒）</label><input id="script-timeout" type="number" min="1" max="3600" value="900"></div>
+            </div>
+            <div class="form-group"><label for="script-working-directory">工作目录（留空使用入口目录）</label><input id="script-working-directory"></div>
+            <div class="form-group"><label for="script-concurrency">并发范围</label><select id="script-concurrency"><option value="global">全局互斥</option><option value="tenant">按用户互斥</option></select></div>
+            <div class="form-group"><label for="script-env">允许环境变量（每行一个名称）</label><textarea id="script-env" rows="2"></textarea></div>
+            <div class="form-group"><label for="script-parameters">参数定义（JSON 对象）</label><textarea id="script-parameters" rows="8" class="code-input">{}</textarea></div>
+            <label class="checkbox-label"><input id="script-enabled" type="checkbox" checked> 启用</label>
+            <div class="modal-footer"><button type="button" id="script-modal-cancel" class="btn-secondary">取消</button><button id="script-save-button" class="btn-primary" type="submit">保存并信任当前版本</button></div>
+        </form>
+    </div>
+</div>
+
+<div id="script-run-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header"><h3 id="script-run-title">执行脚本</h3><button id="script-run-close" class="modal-close-btn">&times;</button></div>
+        <form id="script-run-form" class="modal-body">
+            <div id="script-run-fields"></div>
+            <div id="script-run-hint" class="run-version-hint"></div>
+            <div class="modal-footer"><button type="button" id="script-run-cancel" class="btn-secondary">取消</button><button class="btn-danger" type="submit">确认执行</button></div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/scripts.js"></script>
+<script>initScripts();</script>
+{% endblock %}

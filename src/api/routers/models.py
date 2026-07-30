@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, HTTPException, Request
 
-from src.api.deps import get_config, get_router
+from src.api.deps import get_config, get_model_analytics_store, get_router
 from src.api.schemas import (
     ModelCreate,
     ModelProfileOut,
@@ -15,10 +17,12 @@ from src.api.schemas import (
     ModelSwitchRequest,
     ModelUpdate,
 )
-from src.core.config.loader import ModelProfile
+from src.core.config.loader import ModelPricing, ModelProfile
 from src.core.modeling import ModelCapabilities
 from src.core.modeling.factory import create_model_client
 from src.core.paths import CONFIG_DIR
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -31,6 +35,8 @@ def _profile_to_out(profile: ModelProfile, model_router) -> ModelProfileOut:
         enabled=profile.enabled,
         type=profile.type,
         provider=profile.provider,
+        base_url=profile.base_url,
+        api_key_env=profile.api_key_env,
         model=profile.model,
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
@@ -40,6 +46,19 @@ def _profile_to_out(profile: ModelProfile, model_router) -> ModelProfileOut:
             "vision": profile.capabilities.vision,
             "reasoning": profile.capabilities.reasoning,
         },
+        billing_currency=profile.billing_currency,
+        pricing=(
+            {
+                "input_per_million": profile.pricing.input_per_million,
+                "cached_input_per_million": profile.pricing.cached_input_per_million,
+                "output_per_million": profile.pricing.output_per_million,
+                "reasoning_output_per_million": (
+                    profile.pricing.reasoning_output_per_million
+                ),
+            }
+            if profile.pricing
+            else None
+        ),
         is_primary=(profile.id == model_router.primary_profile_id),
         is_fallback=(profile.id == model_router.fallback_profile_id),
     )
@@ -59,6 +78,10 @@ def _save_models_json(data: dict) -> None:
 
 def _make_profile(profile_id: str, data: dict) -> ModelProfile:
     caps = data.get("capabilities", {})
+    models_json = _load_models_json()
+    currency = (models_json.get("billing") or {}).get("currency", "CNY")
+    pricing_data = data.get("pricing")
+    pricing = ModelPricing(**pricing_data) if pricing_data else None
     return ModelProfile(
         id=profile_id,
         enabled=data.get("enabled", True),
@@ -77,7 +100,46 @@ def _make_profile(profile_id: str, data: dict) -> ModelProfile:
         api_key_env=data.get("api_key_env"),
         request_extra=data.get("request_extra", {}),
         assistant_passthrough_fields=data.get("assistant_passthrough_fields", []),
+        billing_currency=currency,
+        pricing=pricing,
     )
+
+
+def _validated_pricing(raw):
+    if raw is None:
+        return None
+    allowed = {
+        "input_per_million",
+        "cached_input_per_million",
+        "output_per_million",
+        "reasoning_output_per_million",
+    }
+    if not isinstance(raw, dict) or set(raw) - allowed:
+        raise HTTPException(status_code=400, detail="模型计价字段无效")
+    if raw.get("input_per_million") is None or raw.get("output_per_million") is None:
+        raise HTTPException(status_code=400, detail="模型计价必须包含普通输入和普通输出价格")
+    normalized = {}
+    for key in allowed:
+        value = raw.get(key)
+        if value is None and key in {
+            "cached_input_per_million",
+            "reasoning_output_per_million",
+        }:
+            normalized[key] = None
+            continue
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            raise HTTPException(status_code=400, detail="模型价格必须是非负十进制数")
+        if not amount.is_finite() or amount < 0:
+            raise HTTPException(status_code=400, detail="模型价格必须是非负十进制数")
+        normalized[key] = format(amount, "f")
+    return normalized
+
+
+def _client_logger(request: Request):
+    store = get_model_analytics_store(request)
+    return store.record_model_call if store is not None else None
 
 
 @router.get("", response_model=list[ModelProfileOut])
@@ -151,6 +213,8 @@ def create_model(body: ModelCreate, request: Request):
     }
     if body.api_key_env:
         data["api_key_env"] = body.api_key_env
+    if body.pricing is not None:
+        data["pricing"] = _validated_pricing(body.pricing)
 
     models_json = _load_models_json()
     models_json["profiles"][profile_id] = data
@@ -161,10 +225,10 @@ def create_model(body: ModelCreate, request: Request):
 
     if body.enabled:
         try:
-            client = create_model_client(profile)
+            client = create_model_client(profile, logger=_client_logger(request))
             model_router.clients[profile_id] = client
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - profile is saved; client stays offline
+            logger.warning("创建模型客户端 %s 失败", profile_id, exc_info=True)
 
     return _profile_to_out(profile, model_router)
 
@@ -203,6 +267,18 @@ def update_model(profile_id: str, body: ModelUpdate, request: Request):
         data["request_extra"] = existing.request_extra
     if existing.assistant_passthrough_fields:
         data["assistant_passthrough_fields"] = existing.assistant_passthrough_fields
+    pricing_supplied = "pricing" in body.model_fields_set
+    if pricing_supplied and body.pricing is not None:
+        data["pricing"] = _validated_pricing(body.pricing)
+    elif not pricing_supplied and existing.pricing is not None:
+        data["pricing"] = {
+            "input_per_million": existing.pricing.input_per_million,
+            "cached_input_per_million": existing.pricing.cached_input_per_million,
+            "output_per_million": existing.pricing.output_per_million,
+            "reasoning_output_per_million": (
+                existing.pricing.reasoning_output_per_million
+            ),
+        }
 
     models_json = _load_models_json()
     models_json["profiles"][profile_id] = data
@@ -214,10 +290,10 @@ def update_model(profile_id: str, body: ModelUpdate, request: Request):
     model_router.clients.pop(profile_id, None)
     if profile.enabled:
         try:
-            client = create_model_client(profile)
+            client = create_model_client(profile, logger=_client_logger(request))
             model_router.clients[profile_id] = client
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - profile is saved; client stays offline
+            logger.warning("重建模型客户端 %s 失败", profile_id, exc_info=True)
 
     return _profile_to_out(profile, model_router)
 

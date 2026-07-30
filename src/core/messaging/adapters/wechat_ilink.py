@@ -7,7 +7,7 @@ import json
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator
 
 from src.core.integrations.ilink import (
     ILinkAPIError,

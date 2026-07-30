@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +26,8 @@ from src.core.modeling import (
     ModelRouter,
 )
 from src.core.storage.tenants import TenantRegistry
+
+logger = logging.getLogger(__name__)
 
 
 MEMORY_KINDS = {"preference", "identity", "goal", "constraint"}
@@ -380,14 +384,6 @@ class MemoryService:
                     "AND content=? AND status IN ('active', 'pending') "
                     "ORDER BY updated_at DESC LIMIT 1",
                     (tenant_id, key, candidate["content"]),
-                ).fetchone()
-                current = connection.execute(
-                    "SELECT memory_id, content, status, evidence_type "
-                    "FROM memory_items WHERE tenant_id=? AND normalized_key=? "
-                    "AND status IN ('active', 'pending') "
-                    "ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, "
-                    "updated_at DESC LIMIT 1",
-                    (tenant_id, key),
                 ).fetchone()
                 if matching:
                     if matching["status"] == "pending" and status == "active":
@@ -830,8 +826,10 @@ class MemoryService:
                     "UPDATE soul_profiles SET dirty=1, last_error=? WHERE tenant_id=?",
                     (str(error)[:1000], tenant_id),
                 )
-        except Exception:
-            pass
+        except sqlite3.Error:
+            # Persisting the error marker is best effort; the original
+            # failure was already surfaced to the caller.
+            logger.warning("记录记忆错误状态失败：租户=%s", tenant_id, exc_info=True)
 
     def _record_extraction_error(self, tenant_id: str, message: str) -> None:
         try:
@@ -841,8 +839,8 @@ class MemoryService:
                     "UPDATE soul_profiles SET last_error=? WHERE tenant_id=?",
                     (message[:1000], tenant_id),
                 )
-        except Exception:
-            pass
+        except sqlite3.Error:
+            logger.warning("记录抽取错误状态失败：租户=%s", tenant_id, exc_info=True)
 
     def rebuild_soul(
         self, tenant_id: str, force_compact: bool = False

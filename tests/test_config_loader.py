@@ -168,6 +168,38 @@ class ConfigLoaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "Agent id 重复.*general"):
                 load_project_config(config_dir)
 
+    def test_agent_enabled_defaults_true_and_flag_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "agents" / "translator.json"
+            data = self.load_json(path)
+            data["enabled"] = False
+            self.save_json(path, data)
+            config = load_project_config(config_dir)
+            # Field missing on disk -> enabled by default.
+            self.assertTrue(config.agents["general"].enabled)
+            self.assertFalse(config.agents["translator"].enabled)
+
+    def test_agent_enabled_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "agents" / "general.json"
+            data = self.load_json(path)
+            data["enabled"] = 1
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "enabled.*布尔值"):
+                load_project_config(config_dir)
+
+    def test_disabled_default_agent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "agents" / "general.json"
+            data = self.load_json(path)
+            data["enabled"] = False
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "默认 Agent general 必须启用"):
+                load_project_config(config_dir)
+
     def test_invalid_timezone_and_cron_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
@@ -209,11 +241,14 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_agent_skills_and_mcp_servers_load(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            self.save_json(config_dir / "skills.json", {
-                "skills": [
-                    {"id": "greeting_skill", "name": "问候", "prompt": "保持礼貌。", "enabled": True}
-                ]
-            })
+            # Prepend the fixture skill so existing agent skill references
+            # (writer, coder, ...) still resolve against the copied config.
+            skills_data = self.load_json(config_dir / "skills.json")
+            skills_data["skills"].insert(
+                0,
+                {"id": "greeting_skill", "name": "问候", "prompt": "保持礼貌。", "enabled": True},
+            )
+            self.save_json(config_dir / "skills.json", skills_data)
             self.save_json(config_dir / "mcp_servers.json", {
                 "servers": [
                     {"id": "echo", "name": "Echo", "transport": "stdio", "command": "echo", "enabled": True}
@@ -282,6 +317,75 @@ class ConfigLoaderTests(unittest.TestCase):
             self.save_json(agent_path, agent_data)
             with self.assertRaisesRegex(ConfigError, "未知 MCP 服务.*missing_server"):
                 load_project_config(config_dir)
+
+    def test_invalid_skill_and_mcp_entries_are_rejected_at_load_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "skills.json", {
+                "skills": [{"id": "Bad-Id", "name": "问候"}]
+            })
+            with self.assertRaisesRegex(ConfigError, r"skills\[0\].id"):
+                load_project_config(config_dir)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "mcp_servers.json", {
+                "servers": [{"id": "echo", "name": "Echo", "transport": "stdio"}]
+            })
+            with self.assertRaisesRegex(ConfigError, "command.*stdio"):
+                load_project_config(config_dir)
+
+    def test_runtime_updates_validate_and_mutate_lists_in_place(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        skills_ref = config.skills
+        servers_ref = config.mcp_servers
+        config.update_skills(
+            [{"id": "greeting_skill", "name": "问候", "prompt": "保持礼貌。", "enabled": True}]
+        )
+        config.update_mcp_servers(
+            [{"id": "echo", "name": "Echo", "transport": "stdio", "command": "echo", "enabled": True}]
+        )
+        # In-place mutation keeps every holder of the original list up to date.
+        self.assertIs(config.skills, skills_ref)
+        self.assertIs(config.mcp_servers, servers_ref)
+        self.assertEqual([entry["id"] for entry in skills_ref], ["greeting_skill"])
+        self.assertEqual([entry["id"] for entry in servers_ref], ["echo"])
+
+    def test_runtime_updates_reject_invalid_entries_without_side_effects(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        skills_before = list(config.skills)
+        servers_before = list(config.mcp_servers)
+
+        invalid_skill_lists = [
+            [{"id": "Bad-Id", "name": "问候"}],
+            [{"id": "dup", "name": "甲"}, {"id": "dup", "name": "乙"}],
+            [{"id": "ok_skill", "name": "问候", "surprise": 1}],
+            [{"id": "ok_skill", "name": "问候", "enabled": "yes"}],
+            [{"id": "ok_skill", "name": " "}],
+        ]
+        for skills in invalid_skill_lists:
+            with self.subTest(skills=skills):
+                with self.assertRaises(ConfigError):
+                    config.update_skills(skills)
+
+        invalid_server_lists = [
+            [{"id": "echo", "name": "Echo", "transport": "stdio"}],
+            [{"id": "echo", "name": "Echo", "transport": "carrier_pigeon", "command": "x"}],
+            [{"id": "echo", "name": "Echo", "transport": "sse"}],
+            [{"id": "echo", "name": "Echo", "transport": "stdio", "command": "x", "args": [1]}],
+            [
+                {"id": "echo", "name": "Echo", "transport": "stdio", "command": "x"},
+                {"id": "echo", "name": "Echo2", "transport": "stdio", "command": "y"},
+            ],
+        ]
+        for servers in invalid_server_lists:
+            with self.subTest(servers=servers):
+                with self.assertRaises(ConfigError):
+                    config.update_mcp_servers(servers)
+
+        # Failed updates must leave the live lists untouched.
+        self.assertEqual(config.skills, skills_before)
+        self.assertEqual(config.mcp_servers, servers_before)
 
     def test_image_schedule_supports_local_path_url_and_optional_caption(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

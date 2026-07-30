@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import shutil
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -238,51 +239,105 @@ class ConversationStore:
     def __init__(self, registry: TenantRegistry, max_messages: int) -> None:
         self.registry = registry
         self.max_messages = max_messages
+        self._locks: Dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+
+    def lock_for(self, tenant_id: str) -> threading.RLock:
+        """Share one tenant lock across chat turns and proactive deliveries."""
+        with self._locks_guard:
+            return self._locks.setdefault(tenant_id, threading.RLock())
 
     def load_context(self, tenant_id: str) -> List[CanonicalMessage]:
-        with self.registry.database.read() as connection:
-            rows = connection.execute(
-                "SELECT role, content FROM conversation_context_messages "
-                "WHERE tenant_id=? ORDER BY message_id DESC LIMIT ?",
-                (tenant_id, self.max_messages),
-            ).fetchall()
+        with self.lock_for(tenant_id):
+            with self.registry.database.read() as connection:
+                rows = connection.execute(
+                    "SELECT role, content FROM conversation_context_messages "
+                    "WHERE tenant_id=? ORDER BY message_id DESC LIMIT ?",
+                    (tenant_id, self.max_messages),
+                ).fetchall()
         return [CanonicalMessage(str(row["role"]), str(row["content"])) for row in reversed(rows)]
 
     def save_context(self, tenant_id: str, messages: Iterable[CanonicalMessage]) -> None:
         kept = list(messages)[-self.max_messages :]
         now = _utc_now()
-        with self.registry.database.transaction(immediate=True) as connection:
-            connection.execute(
-                "DELETE FROM conversation_context_messages WHERE tenant_id=?", (tenant_id,)
-            )
-            connection.executemany(
-                "INSERT INTO conversation_context_messages(tenant_id, role, content, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                [(tenant_id, item.role, item.content, now) for item in kept],
-            )
+        with self.lock_for(tenant_id):
+            with self.registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "DELETE FROM conversation_context_messages WHERE tenant_id=?", (tenant_id,)
+                )
+                connection.executemany(
+                    "INSERT INTO conversation_context_messages(tenant_id, role, content, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(tenant_id, item.role, item.content, now) for item in kept],
+                )
+
+    def record_outbound_message(
+        self,
+        tenant_id: str,
+        content: str,
+        *,
+        image: bool = False,
+        delivery_key: str = "",
+    ) -> bool:
+        """Add a delivered proactive message to short-term and durable history."""
+        if not isinstance(content, str) or not content.strip():
+            raise TenantStoreError("主动消息上下文格式无效")
+        now = _utc_now()
+        with self.lock_for(tenant_id):
+            with self.registry.database.transaction(immediate=True) as connection:
+                if delivery_key:
+                    inserted = connection.execute(
+                        "INSERT OR IGNORE INTO conversation_delivery_receipts"
+                        "(delivery_key, tenant_id, recorded_at) VALUES (?, ?, ?)",
+                        (delivery_key, tenant_id, now),
+                    )
+                    if inserted.rowcount == 0:
+                        return False
+                connection.execute(
+                    "INSERT INTO conversation_context_messages"
+                    "(tenant_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                    (tenant_id, content, now),
+                )
+                connection.execute(
+                    "DELETE FROM conversation_context_messages "
+                    "WHERE tenant_id=? AND message_id NOT IN ("
+                    "SELECT message_id FROM conversation_context_messages "
+                    "WHERE tenant_id=? ORDER BY message_id DESC LIMIT ?"
+                    ")",
+                    (tenant_id, tenant_id, self.max_messages),
+                )
+                connection.execute(
+                    "INSERT INTO conversation_events"
+                    "(tenant_id, role, content, image, event_type, created_at) "
+                    "VALUES (?, 'assistant', ?, ?, 'notification', ?)",
+                    (tenant_id, content, int(image), now),
+                )
+        return True
 
     def append_transcript(self, tenant_id: str, role: str, content: str, image: bool = False) -> None:
         if role not in {"user", "assistant", "system"} or not isinstance(content, str):
             raise TenantStoreError("永久对话记录格式无效")
-        with self.registry.database.transaction() as connection:
-            connection.execute(
-                "INSERT INTO conversation_events"
-                "(tenant_id, role, content, image, event_type, created_at) "
-                "VALUES (?, ?, ?, ?, 'message', ?)",
-                (tenant_id, role, content, int(image), _utc_now()),
-            )
+        with self.lock_for(tenant_id):
+            with self.registry.database.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO conversation_events"
+                    "(tenant_id, role, content, image, event_type, created_at) "
+                    "VALUES (?, ?, ?, ?, 'message', ?)",
+                    (tenant_id, role, content, int(image), _utc_now()),
+                )
 
     def clear_context(self, tenant_id: str) -> None:
-        with self.registry.database.transaction(immediate=True) as connection:
-            connection.execute(
-                "DELETE FROM conversation_context_messages WHERE tenant_id=?", (tenant_id,)
-            )
-            connection.execute(
-                "INSERT INTO conversation_events"
-                "(tenant_id, role, content, image, event_type, created_at) "
-                "VALUES (?, 'system', ?, 0, 'context_cleared', ?)",
-                (tenant_id, "用户清除了当前对话上下文。", _utc_now()),
-            )
+        with self.lock_for(tenant_id):
+            with self.registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "DELETE FROM conversation_context_messages WHERE tenant_id=?", (tenant_id,)
+                )
+                connection.execute(
+                    "INSERT INTO conversation_events"
+                    "(tenant_id, role, content, image, event_type, created_at) "
+                    "VALUES (?, 'system', ?, 0, 'context_cleared', ?)",
+                    (tenant_id, "用户清除了当前对话上下文。", _utc_now()),
+                )
 
 
 class SettingsStore:

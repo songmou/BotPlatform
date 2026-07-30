@@ -23,6 +23,10 @@ from src.core.services.notification import (
 )
 from src.core.services.memory import MemoryService
 from src.core.services.script import ScriptService
+from src.core.services.script_schedule import (
+    ScriptScheduleService,
+    TenantScriptSchedule,
+)
 from src.core.storage.tenants import ScheduleStore, TenantContext, TenantRegistry
 
 
@@ -47,6 +51,7 @@ class SchedulerService:
         plugins: Optional[List[PlatformPlugin]] = None,
         memory_service: Optional[MemoryService] = None,
         notification_service: Optional[NotificationService] = None,
+        script_schedule_service: Optional[ScriptScheduleService] = None,
     ) -> None:
         self.credentials = credentials
         self.tasks = tasks or []
@@ -65,6 +70,7 @@ class SchedulerService:
         self.logger = logger
         self.now_provider = now_provider
         self.script_service = script_service
+        self.script_schedule_service = script_schedule_service
         self.tenant_registry = tenant_registry
         self.schedule_store = schedule_store
         self.memory_service = memory_service
@@ -85,6 +91,17 @@ class SchedulerService:
         else:
             self.notification_service = None
         self._started = False
+        self._script_schedule_job_ids: set[str] = set()
+        if self.script_schedule_service is not None:
+            self.script_schedule_service.set_reload_callback(
+                self.reload_script_schedules
+            )
+        if self.script_service is not None:
+            add_listener = getattr(
+                self.script_service, "add_completion_listener", None
+            )
+            if callable(add_listener):
+                add_listener(self._on_script_run_complete)
 
     @property
     def enabled_count(self) -> int:
@@ -149,6 +166,7 @@ class SchedulerService:
                 max_instances=1,
                 misfire_grace_time=3600,
             )
+        self._register_script_schedules()
         self.scheduler.start()
         self._started = True
 
@@ -163,6 +181,7 @@ class SchedulerService:
         if not self._started:
             return
         self.scheduler.remove_all_jobs()
+        self._script_schedule_job_ids.clear()
         for task in self.tasks:
             if not task.enabled:
                 continue
@@ -180,6 +199,120 @@ class SchedulerService:
                     max_instances=1,
                     misfire_grace_time=1,
                 )
+        self._register_script_schedules()
+
+    @staticmethod
+    def _script_schedule_job_id(item: TenantScriptSchedule, index: int) -> str:
+        return "tenant-script:{}:{}:{}".format(
+            item.tenant_id, item.schedule_id, index + 1
+        )
+
+    def _register_script_schedules(self) -> None:
+        if self.script_schedule_service is None or self.script_service is None:
+            return
+        for item in self.script_schedule_service.store.enabled():
+            try:
+                current_hash = self.script_service.current_hash(item.script_id)
+                if current_hash != item.authorized_sha256:
+                    raise ValueError("脚本版本已变化，原定时授权失效")
+            except Exception as exc:
+                self._pause_script_schedule(item, str(exc))
+                continue
+            for index, cron in enumerate(item.crons):
+                job_id = self._script_schedule_job_id(item, index)
+                self.scheduler.add_job(
+                    self.run_script_schedule,
+                    trigger=CronTrigger.from_crontab(
+                        cron, timezone=self.timezone_name
+                    ),
+                    args=[item.tenant_id, item.schedule_id],
+                    id=job_id,
+                    replace_existing=True,
+                    coalesce=True,
+                    max_instances=1,
+                    misfire_grace_time=30,
+                )
+                self._script_schedule_job_ids.add(job_id)
+
+    def reload_script_schedules(self) -> None:
+        if not self._started:
+            return
+        for job_id in list(self._script_schedule_job_ids):
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception:
+                pass
+        self._script_schedule_job_ids.clear()
+        self._register_script_schedules()
+
+    def run_script_schedule(self, tenant_id: str, schedule_id: str) -> bool:
+        if self.script_schedule_service is None or self.script_service is None:
+            return False
+        item = self.script_schedule_service.store.get(tenant_id, schedule_id)
+        if item is None or not item.enabled:
+            return False
+        try:
+            current_hash = self.script_service.current_hash(item.script_id)
+            if current_hash != item.authorized_sha256:
+                raise ValueError("脚本版本已变化，原定时授权失效")
+            tenant = self.tenant_registry.get(tenant_id)
+            if tenant is None:
+                raise ValueError("租户不存在")
+            recipient = self.recipient_store.load(tenant_id)
+            result = self.script_service.submit(
+                tenant,
+                item.script_id,
+                item.parameters,
+                trigger="tenant_schedule:{}".format(schedule_id),
+                recipient=recipient,
+            )
+            status = str(result.get("status", "running"))
+            self.script_schedule_service.store.mark_run(
+                tenant_id, schedule_id, str(result.get("run_id", "")), status
+            )
+            self.logger(
+                schedule_id,
+                "跳过" if status == "skipped" else "已提交",
+                "脚本={}，任务={}".format(
+                    item.script_id, result.get("run_id", "-")
+                ),
+                tenant_id,
+            )
+            return status != "skipped"
+        except Exception as exc:
+            self._pause_script_schedule(item, str(exc))
+            self.reload_script_schedules()
+            return False
+
+    def _pause_script_schedule(
+        self, item: TenantScriptSchedule, detail: str
+    ) -> None:
+        reason = "脚本计划已暂停：{}".format(detail)
+        self.script_schedule_service.store.disable(
+            item.tenant_id, item.schedule_id, reason
+        )
+        if self.notification_service is not None:
+            self.notification_service.enqueue_text_to_tenant(
+                item.tenant_id,
+                "【定时脚本】计划 {} 已暂停。\n{}".format(
+                    item.schedule_id, detail
+                ),
+                source_type="schedule",
+                source_key="script-schedule:{}:paused".format(item.schedule_id),
+            )
+        self.logger(item.schedule_id, "失败", reason, item.tenant_id)
+
+    def _on_script_run_complete(self, run) -> None:
+        prefix = "tenant_schedule:"
+        if (
+            self.script_schedule_service is None
+            or not run.trigger.startswith(prefix)
+        ):
+            return
+        schedule_id = run.trigger[len(prefix):]
+        self.script_schedule_service.store.mark_run(
+            run.tenant_id, schedule_id, run.run_id, run.status
+        )
 
     def run_task(self, task: ScheduledTask) -> bool:
         tenants = self.schedule_store.enabled_tenants(task.id)
@@ -323,10 +456,13 @@ class SchedulerService:
             return self.agent_service.generate(
                 task.action.agent_id or "", task.action.prompt or ""
             ) if self.agent_service else ""
+        chat_options = {"agent_id": task.action.agent_id or None}
+        if hasattr(self.agent_service, "model_analytics_store"):
+            chat_options["source"] = "schedule"
         outcome = self.agent_service.chat(
             tenant,
             task.action.prompt or "",
-            agent_id=task.action.agent_id or None,
+            **chat_options,
         )
         if hasattr(outcome, "approval_id"):
             return "定时任务触发了一个需要确认的操作，请在对话中回复确认或取消：\n\n" + outcome.text

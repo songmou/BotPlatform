@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Web management panel entry point."""
+"""Web management panel entry point.
+
+Default mode runs the WeChat bot and the web panel in one process sharing a
+single service graph; ``--panel-only`` keeps the previous panel-only mode.
+"""
 
 from __future__ import annotations
 
@@ -27,30 +31,28 @@ def _load_model_env() -> None:
                     os.environ[key] = value
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="BotPlatform Web 管理面板")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8080, help="监听端口 (默认 8080)")
-    args = parser.parse_args()
+def _load_tool_states(data_dir):
+    """Read persisted per-tool enable/disable switches, tolerating bad JSON."""
+    tool_state_path = data_dir / "tool_state.json"
+    if not tool_state_path.exists():
+        return {}
+    try:
+        import json as _json
 
-    _load_model_env()
+        return _json.loads(
+            tool_state_path.read_text(encoding="utf-8")
+        ).get("tools", {})
+    except Exception as exc:
+        print(
+            "警告：解析 {} 失败，已忽略工具开关状态：{}".format(tool_state_path, exc),
+            file=sys.stderr,
+        )
+        return {}
 
-    from src.core.config.loader import ConfigError, load_project_config
-    from src.core.paths import CONFIG_DIR, DATA_DIR
-    from src.core.modeling.factory import create_model_client
-    from src.core.modeling.router import ModelRouter
-    from src.core.storage.tenants import ConversationStore, TenantRegistry, ScheduleStore
-    from src.core.integrations.embeddings import EmbeddingClient
-    from src.core.services.knowledge import KnowledgeService
-    from src.core.services.agent import AgentService
-    from src.core.services.notification import TenantRecipientStore
-    from src.core.services.scheduler import SchedulerService
-    from src.core.storage.tool_audit import ToolAuditStore
-    from src.core.tooling import ToolRuntime
-    from src.core.plugins.registry import build_plugins
-    from src.core.plugins.base import PluginContext
-    from src.core.paths import PROJECT_ROOT, SYSTEM_DATA_DIR
-    from src.api.app import create_app
+
+def _build_admin_auth(registry):
+    """Create admin auth stores and bootstrap the default admin account."""
+    from src.core.paths import SYSTEM_DATA_DIR
     from src.core.services.auth import AdminAuthService
     from src.core.storage.admin_users import (
         AdminRoleStore,
@@ -59,53 +61,252 @@ def main() -> int:
         load_or_create_session_secret,
     )
 
+    admin_user_store = AdminUserStore(registry.database)
+    admin_role_store = AdminRoleStore(registry.database)
+    admin_session_store = AdminSessionStore(
+        registry.database, load_or_create_session_secret(SYSTEM_DATA_DIR)
+    )
+    admin_auth = AdminAuthService(
+        admin_user_store, admin_role_store, admin_session_store, SYSTEM_DATA_DIR
+    )
+    initial_password = admin_auth.bootstrap_default_admin()
+    return admin_auth, admin_user_store, admin_role_store, initial_password
+
+
+def _print_panel_banner(args, initial_password) -> None:
+    from src.core.paths import SYSTEM_DATA_DIR
+
+    print("Web 管理面板已启动：http://{}:{}".format(args.host, args.port))
+    if initial_password:
+        print(
+            "已生成默认管理员账号 admin，初始密码：{}".format(initial_password),
+            file=sys.stderr,
+        )
+        print(
+            "初始密码已保存到 {}，请登录后立即修改并删除该文件。".format(
+                SYSTEM_DATA_DIR / "admin_initial_password"
+            ),
+            file=sys.stderr,
+        )
+    print("浏览器打开 http://{}:{}/login 登录".format(args.host, args.port))
+
+
+def _run_combined(args) -> int:
+    """Run the WeChat bot (main thread) plus the panel (uvicorn thread)."""
+    import threading
+
+    from src.api.app import create_app
+    from src.core.application.bootstrap import (
+        _install_sigterm_handler,
+        build_bot_runtime,
+        run_channel_loop,
+    )
+    from src.core.application.services import build_core_services
+    from src.core.config.loader import ConfigError, load_project_config
+    from src.core.infrastructure.instance_lock import (
+        AlreadyRunning,
+        SingleInstanceLock,
+    )
+    from src.core.infrastructure.logging import log_model_call, log_model_fallback
+    from src.core.modeling import ModelError
+    from src.core.paths import CONFIG_DIR, DATA_DIR, INSTANCE_LOCK_PATH
+    from src.core.storage.tenants import TenantStoreError
+    from src.core.storage.tool_audit import ToolAuditStore
+    from src.core.storage.drive_audit import DriveAuditStore
+
+    instance_lock = SingleInstanceLock(INSTANCE_LOCK_PATH)
+    try:
+        instance_lock.acquire()
+    except AlreadyRunning as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print("启动失败：无法获取机器人运行锁：{}".format(exc), file=sys.stderr)
+        return 1
+
+    try:
+        try:
+            config = load_project_config(CONFIG_DIR)
+        except ConfigError as exc:
+            print("配置错误：{}".format(exc), file=sys.stderr)
+            return 1
+
+        try:
+            services = build_core_services(
+                config,
+                DATA_DIR,
+                model_call_logger=log_model_call,
+                fallback_logger=log_model_fallback,
+                strict_models=False,
+            )
+        except TenantStoreError as exc:
+            print("租户数据加载失败：{}".format(exc), file=sys.stderr)
+            return 1
+        except ModelError as exc:
+            print("错误：{}".format(exc), file=sys.stderr)
+            print(
+                "提示：将 DEEPSEEK_API_KEY=你的密钥 写入 data/system/model.env",
+                file=sys.stderr,
+            )
+            return 1
+        for warning in services.model_warnings:
+            print("警告：{}".format(warning), file=sys.stderr)
+
+        try:
+            registry = services.tenant_registry
+            (
+                admin_auth,
+                admin_user_store,
+                admin_role_store,
+                initial_password,
+            ) = _build_admin_auth(registry)
+            tool_audit_store = ToolAuditStore(registry)
+            drive_audit_store = DriveAuditStore(registry)
+            runtime = build_bot_runtime(
+                config,
+                services,
+                tool_audit_store=tool_audit_store,
+                tool_states=_load_tool_states(DATA_DIR),
+                drive_audit_store=drive_audit_store,
+            )
+        except (ModelError, ValueError) as exc:
+            services.close()
+            print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
+            return 1
+
+        try:
+            app = create_app(
+                config,
+                services.model_router,
+                registry,
+                services.conversation_store,
+                tool_runtime=runtime.tool_runtime,
+                knowledge_service=services.knowledge_service,
+                drive_service=services.drive_service,
+                drive_audit_store=drive_audit_store,
+                plugin_context=runtime.plugin_context,
+                scheduler=runtime.scheduler,
+                tool_audit_store=tool_audit_store,
+                model_analytics_store=services.model_analytics_store,
+                admin_auth=admin_auth,
+                admin_user_store=admin_user_store,
+                admin_role_store=admin_role_store,
+                script_service=runtime.script_service,
+                script_registry=runtime.external_script_registry,
+                script_schedule_service=runtime.script_schedule_service,
+                secure_cookies=args.behind_https,
+                owns_services=False,
+            )
+
+            import uvicorn
+
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    app, host=args.host, port=args.port, log_level="warning"
+                )
+            )
+            # uvicorn skips signal handler installation off the main thread,
+            # so KeyboardInterrupt/SIGTERM stay with the channel loop below.
+            server_thread = threading.Thread(
+                target=server.run, name="web-panel", daemon=True
+            )
+            server_thread.start()
+            _print_panel_banner(args, initial_password)
+
+            _install_sigterm_handler()
+            try:
+                services.model_router.ensure_ready()
+            except ModelError as exc:
+                print(
+                    "警告：模型暂不可用，机器人将降级运行：{}".format(exc),
+                    file=sys.stderr,
+                )
+            runtime.start()
+            try:
+                return run_channel_loop(runtime, config)
+            finally:
+                server.should_exit = True
+                server_thread.join(timeout=5.0)
+        finally:
+            runtime.shutdown()
+            services.close()
+    finally:
+        instance_lock.release()
+
+
+def _run_panel_only(args) -> int:
+    """Previous behaviour: web panel without the WeChat message channels."""
+    from src.core.application.services import build_core_services
+    from src.core.config.loader import ConfigError, load_project_config
+    from src.core.modeling import ModelError
+    from src.core.paths import CONFIG_DIR, DATA_DIR
+    from src.core.services.agent import AgentService
+    from src.core.services.scheduler import SchedulerService
+    from src.core.services.script import ScriptService
+    from src.core.services.script_registry import ExternalScriptRegistry
+    from src.core.services.script_schedule import ScriptScheduleService
+    from src.core.storage.tenants import TenantStoreError
+    from src.core.storage.tool_audit import ToolAuditStore
+    from src.core.storage.drive_audit import DriveAuditStore
+    from src.core.tooling import ToolRuntime
+    from src.core.plugins.registry import build_plugins
+    from src.core.plugins.base import PluginContext
+    from src.core.paths import PROJECT_ROOT, SYSTEM_DATA_DIR
+    from src.api.app import create_app
+
     try:
         config = load_project_config(CONFIG_DIR)
     except ConfigError as exc:
         print("配置错误：{}".format(exc), file=sys.stderr)
         return 1
 
-    clients = {}
-    for profile_id, profile in config.models.items():
-        if profile.enabled:
-            try:
-                clients[profile_id] = create_model_client(profile)
-            except Exception as exc:
-                print("警告：模型 {} 初始化失败：{}".format(profile_id, exc), file=sys.stderr)
-
-    if not clients:
-        print("错误：没有可用的模型档案，请检查 config/models.json 和 API Key 配置", file=sys.stderr)
+    try:
+        services = build_core_services(config, DATA_DIR, strict_models=False)
+    except TenantStoreError as exc:
+        print("租户数据加载失败：{}".format(exc), file=sys.stderr)
+        return 1
+    except ModelError as exc:
+        print("错误：{}".format(exc), file=sys.stderr)
         print("提示：将 DEEPSEEK_API_KEY=你的密钥 写入 data/system/model.env", file=sys.stderr)
         return 1
+    for warning in services.model_warnings:
+        print("警告：{}".format(warning), file=sys.stderr)
 
-    primary = config.app.active_model
-    fallback = config.app.fallback_model
-    if primary not in clients:
-        primary = next(iter(clients))
-        print("提示：主模型不可用，已切换到 {}".format(primary), file=sys.stderr)
-    if fallback not in clients:
-        fallback = primary
+    model_router = services.model_router
+    registry = services.tenant_registry
+    conversation_store = services.conversation_store
+    knowledge_service = services.knowledge_service
+    model_analytics_store = services.model_analytics_store
+    schedule_store = services.schedule_store
+    recipient_store = services.recipient_store
 
-    model_router = ModelRouter(
-        clients,
-        primary_profile_id=primary,
-        fallback_profile_id=fallback,
-        local_profile_id=config.app.local_model or None,
-        flash_profile_id=config.app.flash_model or None,
-        pro_profile_id=config.app.pro_model or None,
-        vision_profile_id=config.app.vision_model or None,
-        cooldown_seconds=config.app.fallback_cooldown_seconds,
+    credentials = None
+    try:
+        from src.core.application.bot import load_credentials
+        credentials = load_credentials()
+    except Exception as exc:
+        print(
+            "警告：加载微信登录凭证失败，定时任务将无法推送微信消息：{}".format(exc),
+            file=sys.stderr,
+        )
+
+    external_script_registry = ExternalScriptRegistry(
+        SYSTEM_DATA_DIR / "script_registry.json",
+        SYSTEM_DATA_DIR / "scripts.env",
     )
-
-    registry = TenantRegistry(DATA_DIR)
-    conversation_store = ConversationStore(registry, max_messages=config.app.history_rounds * 2)
-
-    embedding_client = (
-        EmbeddingClient(config.embedding)
-        if config.embedding.enabled
-        else None
+    script_service = ScriptService(
+        config.scripts,
+        credentials,
+        recipient_store,
+        PROJECT_ROOT,
+        registry,
+        external_registry=external_script_registry,
     )
-    knowledge_service = KnowledgeService(registry, embedding_client)
+    script_schedule_service = ScriptScheduleService(
+        registry,
+        script_service,
+        config.app.timezone,
+    )
 
     plugin_context = PluginContext(
         project_root=PROJECT_ROOT,
@@ -118,15 +319,8 @@ def main() -> int:
     )
 
     tool_audit_store = ToolAuditStore(registry)
-
-    tool_states = {}
-    tool_state_path = DATA_DIR / "tool_state.json"
-    if tool_state_path.exists():
-        try:
-            import json as _json
-            tool_states = _json.loads(tool_state_path.read_text(encoding="utf-8")).get("tools", {})
-        except Exception:
-            tool_states = {}
+    drive_audit_store = DriveAuditStore(registry)
+    tool_states = _load_tool_states(DATA_DIR)
 
     mcp_manager = None
     if config.tools.enabled and config.mcp_servers:
@@ -143,16 +337,18 @@ def main() -> int:
             tenant_registry=registry,
             knowledge_service=knowledge_service,
             plugins=platform_plugins,
+            script_service=script_service,
+            script_schedule_service=script_schedule_service,
             tool_audit_store=tool_audit_store,
             tool_states=tool_states,
             mcp_manager=mcp_manager,
+            drive_service=services.drive_service,
+            drive_audit_store=drive_audit_store,
         )
         if config.tools.enabled
         else None
     )
 
-    schedule_store = ScheduleStore(registry)
-    recipient_store = TenantRecipientStore(registry)
     agent_service = AgentService(
         model_router,
         config.app,
@@ -160,15 +356,9 @@ def main() -> int:
         tool_runtime=tool_runtime,
         conversation_store=conversation_store,
         knowledge_service=knowledge_service,
+        model_analytics_store=model_analytics_store,
         skills=config.skills,
     )
-
-    credentials = None
-    try:
-        from src.core.application.bot import load_credentials
-        credentials = load_credentials()
-    except Exception:
-        credentials = None
 
     scheduler = SchedulerService(
         credentials=credentials,
@@ -176,52 +366,66 @@ def main() -> int:
         timezone_name=config.app.timezone,
         agent_service=agent_service,
         recipient_store=recipient_store,
+        script_service=script_service,
+        script_schedule_service=script_schedule_service,
         tenant_registry=registry,
         schedule_store=schedule_store,
         plugins=platform_plugins,
     )
     scheduler.start()
 
-    admin_user_store = AdminUserStore(registry.database)
-    admin_role_store = AdminRoleStore(registry.database)
-    admin_session_store = AdminSessionStore(
-        registry.database, load_or_create_session_secret(SYSTEM_DATA_DIR)
+    admin_auth, admin_user_store, admin_role_store, initial_password = (
+        _build_admin_auth(registry)
     )
-    admin_auth = AdminAuthService(
-        admin_user_store, admin_role_store, admin_session_store, SYSTEM_DATA_DIR
-    )
-    initial_password = admin_auth.bootstrap_default_admin()
 
     app = create_app(
         config, model_router, registry, conversation_store,
         tool_runtime=tool_runtime,
         knowledge_service=knowledge_service,
+        drive_service=services.drive_service,
+        drive_audit_store=drive_audit_store,
         plugin_context=plugin_context,
         scheduler=scheduler,
         tool_audit_store=tool_audit_store,
+        model_analytics_store=model_analytics_store,
         admin_auth=admin_auth,
         admin_user_store=admin_user_store,
         admin_role_store=admin_role_store,
+        script_service=script_service,
+        script_registry=external_script_registry,
+        script_schedule_service=script_schedule_service,
+        secure_cookies=args.behind_https,
     )
 
-    print("Web 管理面板已启动：http://{}:{}".format(args.host, args.port))
-    if initial_password:
-        print(
-            "已生成默认管理员账号 admin，初始密码：{}".format(initial_password),
-            file=sys.stderr,
-        )
-        print(
-            "初始密码已保存到 {}，请登录后立即修改并删除该文件。".format(
-                SYSTEM_DATA_DIR / "admin_initial_password"
-            ),
-            file=sys.stderr,
-        )
-    print("浏览器打开 http://{}:{}/login 登录".format(args.host, args.port))
+    _print_panel_banner(args, initial_password)
 
     import uvicorn
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="BotPlatform Web 管理面板")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="监听端口 (默认 8080)")
+    parser.add_argument(
+        "--behind-https",
+        action="store_true",
+        help="部署在 HTTPS 反向代理之后时启用，会给会话 Cookie 加 Secure 标记",
+    )
+    parser.add_argument(
+        "--panel-only",
+        action="store_true",
+        help="仅启动 Web 管理面板，不启动微信消息渠道",
+    )
+    args = parser.parse_args()
+
+    _load_model_env()
+
+    if args.panel_only:
+        return _run_panel_only(args)
+    return _run_combined(args)
 
 
 if __name__ == "__main__":

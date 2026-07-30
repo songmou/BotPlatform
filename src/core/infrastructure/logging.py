@@ -75,6 +75,10 @@ def log_model_call(
     usage: Optional[ModelUsage],
     tool_call_count: int,
     request_id: Optional[str],
+    context=None,
+    finish_reason: Optional[str] = None,
+    first_token_seconds: Optional[float] = None,
+    error: Optional[BaseException] = None,
 ) -> None:
     """Log model metadata without prompts, images, credentials, or reasoning."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -85,7 +89,10 @@ def log_model_call(
         "-" if not usage or usage.output_tokens is None else str(usage.output_tokens)
     )
     print(
-        "[{}] 模型调用 | 提供商={} | 档案={} | 模型={} | 状态={} | 耗时={:.3f}s | 输入={}tok | 输出={}tok | 工具调用={} | 请求={}".format(
+        (
+            "[{}] 模型调用 | 提供商={} | 档案={} | 模型={} | 状态={} | 耗时={:.3f}s"
+            " | 输入={}tok | 输出={}tok | 工具调用={} | 请求={}"
+        ).format(
             timestamp,
             identity.provider,
             identity.profile_id,

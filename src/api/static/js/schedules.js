@@ -38,6 +38,8 @@ function initSchedules() {
         document.getElementById("action-agent-group").style.display = type === "agent_prompt" ? "" : "none";
         document.getElementById("action-script-group").style.display = type === "script" ? "" : "none";
         document.getElementById("action-plugin-group").style.display = type === "plugin" ? "" : "none";
+        document.getElementById("action-parameters-group").style.display =
+            (type === "script" || type === "plugin") ? "" : "none";
     }
 
     document.getElementById("schedule-condition-enabled").addEventListener("change", function () {
@@ -71,16 +73,15 @@ function initSchedules() {
                         '<div class="card-header">' +
                         '<div><strong>' + escapeHtml(t.id) + '</strong>' +
                         (t.enabled ? '<span class="badge badge-success">启用</span>' : '<span class="badge badge-muted">禁用</span>') +
-                        '</div>' +
-                        '<div class="card-actions">' +
-                        '<button class="btn-edit" data-action="edit" data-id="' + t.id + '">编辑</button>' +
-                        '<button class="btn-danger" data-action="delete" data-id="' + t.id + '">删除</button>' +
                         '</div></div>' +
                         '<div class="card-body">' +
                         '<p><strong>Cron：</strong><code>' + cronDisplay + '</code></p>' +
                         '<p><strong>动作：</strong>' + (actionLabels[t.action.type] || t.action.type) + '</p>' +
                         '<p><strong>目标：</strong>' + escapeHtml(t.target) + '</p>' +
                         '<p><strong>条件：</strong>' + escapeHtml(condDisplay) + '</p>' +
+                        '</div><div class="card-footer card-actions">' +
+                        '<button class="btn-edit" data-action="edit" data-id="' + t.id + '">编辑</button>' +
+                        '<button class="btn-danger" data-action="delete" data-id="' + t.id + '">删除</button>' +
                         '</div></div>';
                 }).join("");
             });
@@ -125,6 +126,8 @@ function initSchedules() {
                     document.getElementById("action-script-id").value = t.action.script_id || "";
                     document.getElementById("action-plugin-id").value = t.action.plugin_id || "";
                     document.getElementById("action-tool-name").value = t.action.tool_name || "";
+                    document.getElementById("action-parameters").value =
+                        JSON.stringify(t.action.parameters || {}, null, 2);
                     if (t.condition) {
                         document.getElementById("schedule-condition-enabled").checked = true;
                         document.getElementById("condition-fields").style.display = "";
@@ -155,9 +158,21 @@ function initSchedules() {
             action.prompt = document.getElementById("action-prompt").value.trim();
         } else if (actionType === "script") {
             action.script_id = document.getElementById("action-script-id").value.trim();
+            try {
+                action.parameters = JSON.parse(document.getElementById("action-parameters").value || "{}");
+            } catch (e) {
+                showToast("动作参数不是有效 JSON", "error");
+                return;
+            }
         } else if (actionType === "plugin") {
             action.plugin_id = document.getElementById("action-plugin-id").value.trim();
             action.tool_name = document.getElementById("action-tool-name").value.trim();
+            try {
+                action.parameters = JSON.parse(document.getElementById("action-parameters").value || "{}");
+            } catch (e) {
+                showToast("动作参数不是有效 JSON", "error");
+                return;
+            }
         }
 
         var condition = null;
@@ -200,4 +215,202 @@ function initSchedules() {
             })
             .catch(function (err) { showToast("保存失败：" + err.message, "error"); });
     });
+}
+
+function initScriptAutomation() {
+    var tenants = [];
+    var scripts = [];
+    var editingId = null;
+    var modal = document.getElementById("script-schedule-modal");
+    var tenantSelect = document.getElementById("script-schedule-tenant");
+    var scriptSelect = document.getElementById("script-schedule-script");
+
+    function request(url, options) {
+        return fetch(url, options).then(function (response) {
+            if (!response.ok) {
+                return response.json().then(function (body) {
+                    throw new Error(body.detail || "请求失败");
+                });
+            }
+            return response.json();
+        });
+    }
+
+    function renderParameters(values) {
+        var selected = scripts.find(function (item) { return item.id === scriptSelect.value; });
+        var specs = selected ? selected.parameters || {} : {};
+        values = values || {};
+        document.getElementById("script-schedule-parameters").innerHTML =
+            Object.keys(specs).map(function (name) {
+                var spec = specs[name];
+                var id = "schedule-param-" + name;
+                if (spec.type === "boolean") {
+                    return '<div class="form-group"><label class="checkbox-label"><input id="' + id +
+                        '" type="checkbox" data-schedule-param="' + escapeHtml(name) +
+                        '" data-type="boolean"' + (values[name] ? " checked" : "") + "> " +
+                        escapeHtml(name) + "</label></div>";
+                }
+                if (spec.choices && spec.choices.length) {
+                    return '<div class="form-group"><label for="' + id + '">' + escapeHtml(name) +
+                        '</label><select id="' + id + '" data-schedule-param="' + escapeHtml(name) +
+                        '" data-type="' + escapeHtml(spec.type) + '"><option value="">不传</option>' +
+                        spec.choices.map(function (choice) {
+                            return '<option value="' + escapeHtml(choice) + '"' +
+                                (values[name] === choice ? " selected" : "") + ">" +
+                                escapeHtml(choice) + "</option>";
+                        }).join("") + "</select></div>";
+                }
+                var inputType = spec.type === "date" ? "date" : (spec.type === "integer" ? "number" : "text");
+                return '<div class="form-group"><label for="' + id + '">' + escapeHtml(name) +
+                    '</label><input id="' + id + '" type="' + inputType +
+                    '" data-schedule-param="' + escapeHtml(name) + '" data-type="' +
+                    escapeHtml(spec.type) + '" value="' + escapeHtml(values[name] == null ? "" : String(values[name])) +
+                    '"' + (spec.required ? " required" : "") + "></div>";
+            }).join("");
+    }
+
+    function collectParameters() {
+        var result = {};
+        document.querySelectorAll("[data-schedule-param]").forEach(function (input) {
+            var name = input.getAttribute("data-schedule-param");
+            var type = input.getAttribute("data-type");
+            if (type === "boolean") result[name] = input.checked;
+            else if (input.value !== "") result[name] = type === "integer" ? parseInt(input.value, 10) : input.value;
+        });
+        return result;
+    }
+
+    function loadDependencies() {
+        return Promise.all([request("/api/tenants"), request("/api/scripts")]).then(function (results) {
+            tenants = results[0];
+            scripts = results[1].scripts || [];
+            tenantSelect.innerHTML = tenants.map(function (item) {
+                return '<option value="' + escapeHtml(item.tenant_id) + '">' +
+                    escapeHtml(item.user_id + " / " + item.bot_id) + "</option>";
+            }).join("");
+            scriptSelect.innerHTML = scripts.map(function (item) {
+                return '<option value="' + escapeHtml(item.id) + '">' +
+                    escapeHtml(item.name + " (" + item.id + ")") + "</option>";
+            }).join("");
+            renderParameters();
+            loadSchedules();
+        }).catch(function (error) {
+            showToast("加载脚本计划数据失败：" + error.message, "error");
+        });
+    }
+
+    function loadSchedules() {
+        var tenantId = tenantSelect.value;
+        var list = document.getElementById("script-schedule-list");
+        if (!tenantId) {
+            list.innerHTML = '<div class="empty-state">暂无机器人用户</div>';
+            return;
+        }
+        request("/api/tenants/" + encodeURIComponent(tenantId) + "/script-schedules").then(function (items) {
+            if (!items.length) {
+                list.innerHTML = '<div class="empty-state">当前用户暂无脚本计划</div>';
+                return;
+            }
+            list.innerHTML = items.map(function (item) {
+                return '<div class="card"><div class="card-header"><div><strong>' +
+                    escapeHtml(item.schedule_id) + '</strong><span class="badge ' +
+                    (item.enabled ? "badge-success" : "badge-muted") + '">' +
+                    (item.enabled ? "启用" : "停用") + '</span></div></div><div class="card-body"><p>脚本：<code>' +
+                    escapeHtml(item.script_id) + '</code></p><p>Cron：<code>' +
+                    escapeHtml(item.crons.join("；")) + '</code></p><p>授权版本：<code>' +
+                    escapeHtml((item.authorized_sha256 || "").slice(0, 12)) +
+                    '</code></p><p>最近状态：' + escapeHtml(item.last_status || "尚未运行") +
+                    '</p></div><div class="card-footer card-actions">' +
+                    '<button class="btn-edit" data-script-schedule-action="edit" data-id="' +
+                    item.schedule_id + '">编辑</button><button class="btn-secondary" data-script-schedule-action="' +
+                    (item.enabled ? "disable" : "enable") + '" data-id="' + item.schedule_id + '">' +
+                    (item.enabled ? "停用" : "重新授权") + '</button><button class="btn-danger" data-script-schedule-action="delete" data-id="' +
+                    item.schedule_id + '">删除</button></div></div>';
+            }).join("");
+            list._items = items;
+        }).catch(function (error) {
+            showToast("加载脚本计划失败：" + error.message, "error");
+        });
+    }
+
+    function openEditor(item) {
+        editingId = item ? item.schedule_id : null;
+        document.getElementById("script-schedule-modal-title").textContent = item ? "编辑脚本计划" : "新建脚本计划";
+        document.getElementById("script-schedule-id-group").style.display = item ? "none" : "";
+        document.getElementById("script-schedule-id").value = item ? item.schedule_id : "";
+        scriptSelect.value = item ? item.script_id : (scripts[0] ? scripts[0].id : "");
+        document.getElementById("script-schedule-crons").value = item ? item.crons.join("\n") : "";
+        document.getElementById("script-schedule-enabled").checked = item ? item.enabled : true;
+        renderParameters(item ? item.parameters : {});
+        modal.style.display = "";
+    }
+
+    tenantSelect.addEventListener("change", loadSchedules);
+    scriptSelect.addEventListener("change", function () { renderParameters(); });
+    document.getElementById("create-script-schedule-btn").addEventListener("click", function () {
+        if (!tenants.length || !scripts.length) {
+            showToast("需要先有机器人用户和已注册脚本", "error"); return;
+        }
+        openEditor(null);
+    });
+    document.getElementById("script-schedule-modal-close").addEventListener("click", function () { modal.style.display = "none"; });
+    document.getElementById("script-schedule-modal-cancel").addEventListener("click", function () { modal.style.display = "none"; });
+
+    document.getElementById("script-schedule-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        var tenantId = tenantSelect.value;
+        var scheduleId = editingId || document.getElementById("script-schedule-id").value.trim();
+        var payload = {
+            schedule_id: scheduleId,
+            script_id: scriptSelect.value,
+            crons: document.getElementById("script-schedule-crons").value.split(/\r?\n/).map(function (item) { return item.trim(); }).filter(Boolean),
+            parameters: collectParameters(),
+            enabled: document.getElementById("script-schedule-enabled").checked
+        };
+        var selectedScript = scripts.find(function (item) { return item.id === payload.script_id; }) || {};
+        var summary = "脚本：" + (selectedScript.name || payload.script_id) +
+            "（" + payload.script_id + "）\n参数：" + JSON.stringify(payload.parameters) +
+            "\n版本：" + (selectedScript.sha256_short || "内置") +
+            "\n时间：" + payload.crons.join("；") + "（Asia/Shanghai）" +
+            "\n是否无人值守：" + (payload.enabled ? "是" : "否");
+        showConfirm(summary + "\n\n保存后触发时不再逐次确认。确定继续吗？").then(function (ok) {
+            if (!ok) return;
+            var base = "/api/tenants/" + encodeURIComponent(tenantId) + "/script-schedules";
+            request(editingId ? base + "/" + encodeURIComponent(editingId) : base, {
+                method: editingId ? "PUT" : "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(payload)
+            }).then(function () {
+                modal.style.display = "none"; showToast("已保存并授权脚本计划", "success"); loadSchedules();
+            }).catch(function (error) { showToast("保存失败：" + error.message, "error"); });
+        });
+    });
+
+    document.getElementById("script-schedule-list").addEventListener("click", function (event) {
+        var button = event.target.closest("[data-script-schedule-action]");
+        if (!button) return;
+        var action = button.getAttribute("data-script-schedule-action");
+        var id = button.getAttribute("data-id");
+        var items = document.getElementById("script-schedule-list")._items || [];
+        var item = items.find(function (value) { return value.schedule_id === id; });
+        if (action === "edit") { openEditor(item); return; }
+        var tenantId = tenantSelect.value;
+        var base = "/api/tenants/" + encodeURIComponent(tenantId) + "/script-schedules/" + encodeURIComponent(id);
+        var message = action === "enable"
+            ? "计划：" + id + "\n脚本：" + item.script_id +
+                "\n参数：" + JSON.stringify(item.parameters || {}) +
+                "\n时间：" + (item.crons || []).join("；") + "（Asia/Shanghai）" +
+                "\n重新启用会按当前脚本版本授权无人值守执行，确定继续吗？"
+            : (action === "disable" ? "确定停用该脚本计划吗？" : "确定删除该脚本计划吗？");
+        showConfirm(message).then(function (ok) {
+            if (!ok) return;
+            request(base, action === "delete" ? {method: "DELETE"} : {
+                method: "PUT", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({action: action})
+            }).then(function () { showToast("操作成功", "success"); loadSchedules(); })
+              .catch(function (error) { showToast("操作失败：" + error.message, "error"); });
+        });
+    });
+
+    loadDependencies();
 }

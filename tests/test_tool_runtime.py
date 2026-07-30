@@ -196,7 +196,11 @@ class ToolRuntimeTests(unittest.TestCase):
 
     def test_workspace_script_runs_without_shell_interpretation_and_truncates(self) -> None:
         script = self.root / "output.sh"
-        script.write_text("#!/bin/sh\nprintf 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789extra'\n", encoding="utf-8")
+        script.write_text(
+            "#!/bin/sh\nprintf '"
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789extra'\n",
+            encoding="utf-8",
+        )
         script.chmod(0o700)
         prepared = self.runtime.command_runner.prepare(
             {

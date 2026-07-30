@@ -51,6 +51,37 @@
     cursor: pointer;
 }
 
+.builtin-category-tabs {
+    margin: -4px 0 18px;
+}
+
+.builtin-category-tabs .tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.builtin-tab-count {
+    min-width: 20px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.5;
+    text-align: center;
+}
+
+.builtin-category-tabs .tab-btn.active .builtin-tab-count {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+#tools-pane-builtin .builtin-tools-grid {
+    padding-top: 0;
+}
+
 /* Plugin detail sections */
 .plugin-detail-section {
     margin-bottom: 20px;
@@ -172,3 +203,14 @@
     color: var(--text);
 }
 
+@media (max-width: 640px) {
+    .toolbar-left {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .search-box {
+        flex: 1 1 220px;
+        min-width: 0;
+    }
+}

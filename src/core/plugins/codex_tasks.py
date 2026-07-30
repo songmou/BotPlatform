@@ -1264,8 +1264,8 @@ class CodexTaskService:
             return
         try:
             session.close()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - best effort on session cleanup
+            LOGGER.warning("关闭 Codex 任务会话失败", exc_info=True)
 
     def create_task(
         self,
@@ -1632,8 +1632,8 @@ class CodexTaskService:
         if handle is not None:
             try:
                 handle.interrupt()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - task may have already finished
+                LOGGER.warning("中断 Codex 任务 %s 失败", thread_id, exc_info=True)
 
     def _deliver_event(self, event: Mapping[str, Any]) -> None:
         if not event or event.get("delivery_status") == "disabled":
@@ -2174,8 +2174,8 @@ class CodexTaskService:
         for _task_id, handle in active:
             try:
                 handle.interrupt()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                LOGGER.warning("关闭时中断 Codex 任务 %s 失败", _task_id, exc_info=True)
         for task in queued:
             current = self.store.get(str(task["thread_id"]))
             if current and current["status"] in ACTIVE_STATUSES:
@@ -2194,8 +2194,8 @@ class CodexTaskService:
         if client is not None:
             try:
                 client.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                LOGGER.warning("关闭 Codex 客户端失败", exc_info=True)
 
 
 class CodexTasksPlugin:

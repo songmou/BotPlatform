@@ -37,7 +37,11 @@ from src.core.services.notification import (
     NotificationService,
     TenantRecipientStore,
 )
-from src.core.storage.tenants import TenantRegistry, TenantStoreError
+from src.core.storage.tenants import (
+    ConversationStore,
+    TenantRegistry,
+    TenantStoreError,
+)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -144,6 +148,7 @@ def run_notify_command(
         try:
             registry = TenantRegistry(DATA_DIR)
             registry.get(tenant_id)
+            project_config = load_project_config(CONFIG_DIR)
             notification_service = NotificationService(
                 credentials_loader=None,
                 recipient_store=TenantRecipientStore(registry),
@@ -157,13 +162,15 @@ def run_notify_command(
                             ),
                             channel_id=channel.id,
                         )
-                        for channel in load_project_config(
-                            CONFIG_DIR
-                        ).channels.values()
+                        for channel in project_config.channels.values()
                         if channel.enabled
                     ]
                 ),
                 address_store=ChannelAddressStore(registry),
+                conversation_store=ConversationStore(
+                    registry,
+                    project_config.app.history_rounds * 2,
+                ),
             )
         except (TenantStoreError, ILinkError, OSError, ValueError) as exc:
             print("发送消息通知失败：{}。".format(exc), file=error_stream)

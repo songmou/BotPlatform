@@ -21,7 +21,6 @@ from src.core.integrations.ilink import (
     extract_text_and_image,
     is_private_user_message,
 )
-from src.core.integrations.images import ImageSource
 from src.core.messaging import (
     DIRECT,
     AttachmentRef,
@@ -800,6 +799,61 @@ class MessageBot:
             self.agent_service.clear_history(subject)
             self._cancel_approval_timer(subject)
             reply = "对话上下文已清空。"
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
+        if not image_item and (
+            lowered_text == "/feedback" or lowered_text.startswith("/feedback ")
+        ):
+            analytics_store = getattr(
+                self.agent_service, "model_analytics_store", None
+            )
+            parts = normalized_text.split()
+            if tenant is None or analytics_store is None:
+                reply = "当前未启用模型质量反馈。"
+            elif len(parts) < 2 or parts[1] not in {"好", "差"}:
+                reply = (
+                    "格式错误，请使用 /feedback 好 [备注]，或 "
+                    "/feedback 差 [原因] [备注]。"
+                )
+            else:
+                run_id = analytics_store.latest_successful_run(tenant.tenant_id)
+                if run_id is None:
+                    reply = "暂时没有可评价的模型回答。"
+                else:
+                    rating = "good" if parts[1] == "好" else "bad"
+                    reasons = []
+                    comment_start = 2
+                    if rating == "bad":
+                        reason = parts[2] if len(parts) > 2 else "其他"
+                        if reason not in {
+                            "答非所问",
+                            "事实错误",
+                            "格式表达",
+                            "工具执行失败",
+                            "响应过慢",
+                            "其他",
+                        }:
+                            reason = "其他"
+                            comment_start = 2
+                        else:
+                            comment_start = 3
+                        reasons = [reason]
+                    comment = " ".join(parts[comment_start:])
+                    try:
+                        analytics_store.put_feedback(
+                            run_id,
+                            actor_type="tenant",
+                            actor_ref=tenant.tenant_id,
+                            rating=rating,
+                            reasons=reasons,
+                            comment=comment,
+                            tenant_id=tenant.tenant_id,
+                        )
+                    except (LookupError, PermissionError, ValueError) as exc:
+                        reply = "提交反馈失败：{}".format(exc)
+                    else:
+                        reply = "感谢反馈，已记录本次评价。"
             self._reply(endpoint, reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, reply)
             return

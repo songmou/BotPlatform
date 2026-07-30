@@ -44,11 +44,22 @@ class GenerationOptions:
 
 
 @dataclass(frozen=True)
+class ModelCallContext:
+    run_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    source: str = "internal"
+    operation: str = "answer"
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ModelRequest:
     messages: List[CanonicalMessage]
     tools: List[Dict[str, Any]] = field(default_factory=list)
     image: Optional[bytes] = None
     generation: GenerationOptions = field(default_factory=GenerationOptions)
+    context: ModelCallContext = field(default_factory=ModelCallContext)
 
 
 @dataclass(frozen=True)
@@ -56,6 +67,9 @@ class ModelUsage:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    cached_input_tokens: Optional[int] = None
+    uncached_input_tokens: Optional[int] = None
+    reasoning_output_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +79,12 @@ class ModelResponse:
     usage: Optional[ModelUsage] = None
     request_id: Optional[str] = None
     finish_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ModelStreamEvent:
+    text: str = ""
+    response: Optional[ModelResponse] = None
 
 
 class ModelError(RuntimeError):

@@ -16,6 +16,7 @@ from src.core.modeling.contracts import (
     ModelIdentity,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelUsage,
 )
 
@@ -292,8 +293,29 @@ class OllamaAdapter:
                     message = chunk.get("message") or {}
                     content = message.get("content")
                     if content:
-                        yield content
+                        yield ModelStreamEvent(text=str(content))
                     if chunk.get("done"):
+                        usage = ModelUsage(
+                            input_tokens=_optional_int(chunk.get("prompt_eval_count")),
+                            output_tokens=_optional_int(chunk.get("eval_count")),
+                            total_tokens=_sum_optional(
+                                chunk.get("prompt_eval_count"),
+                                chunk.get("eval_count"),
+                            ),
+                        )
+                        yield ModelStreamEvent(
+                            response=ModelResponse(
+                                message=CanonicalMessage("assistant", ""),
+                                actual_model=str(chunk.get("model") or self.model),
+                                usage=usage,
+                                request_id=_header_request_id(response),
+                                finish_reason=(
+                                    str(chunk["done_reason"])
+                                    if chunk.get("done_reason")
+                                    else None
+                                ),
+                            )
+                        )
                         break
         except httpx.TimeoutException as exc:
             raise ModelError(

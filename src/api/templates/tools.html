@@ -108,20 +108,52 @@
                 </div>
             </div>
         </div>
-        <div id="builtin-tools-list" class="builtin-tools-grid"></div>
+        <div id="builtin-category-tabs" class="tab-bar builtin-category-tabs"
+             role="tablist" aria-label="内置工具分类"></div>
+        <div id="builtin-tools-list" class="builtin-tools-grid"
+             role="tabpanel" aria-live="polite"></div>
     </div>
 
-    <!-- 审计日志 -->
+    <!-- 执行审计 -->
     <div class="tools-pane" id="tools-pane-audit" style="display:none">
         <div class="page-header">
             <div class="page-header-row">
                 <div>
-                    <h2>审计日志</h2>
-                    <p class="page-desc">工具调用的历史审计记录</p>
+                    <h2>执行审计</h2>
+                    <p class="page-desc">用于安全追踪与故障排查；不保存原始参数或工具输出正文，仅记录工具名称、状态、耗时、参数哈希与输出大小</p>
                 </div>
             </div>
         </div>
-        <div id="tool-audit-list"></div>
+
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <div class="search-box">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                    <input type="text" id="audit-filter-tool" placeholder="搜索工具名称...">
+                </div>
+                <select id="audit-filter-status" class="filter-select">
+                    <option value="">全部状态</option>
+                    <option value="成功">成功</option>
+                    <option value="失败">失败</option>
+                </select>
+            </div>
+            <div class="toolbar-left">
+                <span id="audit-total" class="text-muted"></span>
+                <button id="audit-refresh" class="btn-secondary" type="button">刷新</button>
+            </div>
+        </div>
+
+        <div id="tool-audit-table">
+            <div class="tool-audit-head">
+                <span>时间</span>
+                <span>工具</span>
+                <span>状态</span>
+                <span class="audit-head-owner">归属</span>
+                <span>耗时</span>
+                <span></span>
+            </div>
+            <div id="tool-audit-list"></div>
+        </div>
         <div id="audit-load-more-wrap" style="display:none;margin-top:12px">
             <button id="audit-load-more" class="btn-secondary">加载更多</button>
         </div>

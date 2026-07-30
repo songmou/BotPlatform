@@ -12,6 +12,14 @@ function initTools() {
     var searchInput = document.getElementById("plugin-search");
     var filterSelect = document.getElementById("plugin-filter-status");
     var allPlugins = [];
+    var auditOffset = 0;
+    var auditLimit = 20;
+    var auditSearchTimer = null;
+    var auditRequestSeq = 0;
+    var allBuiltinTools = [];
+    var builtinCategory = "全部";
+    var builtinTabsEl = document.getElementById("builtin-category-tabs");
+    var builtinListEl = document.getElementById("builtin-tools-list");
 
     var validTabs = ["skills", "mcp", "plugins", "builtin", "audit"];
     function switchTab() {
@@ -26,18 +34,43 @@ function initTools() {
         document.querySelectorAll(".nav-sub-item").forEach(function (el) {
             el.classList.toggle("active", el.getAttribute("data-tab") === hash);
         });
+        // Audit data is loaded lazily and refreshed on every tab entry.
+        if (hash === "audit") {
+            auditOffset = 0;
+            loadAuditLogs(false);
+        }
     }
     switchTab();
     window.addEventListener("hashchange", switchTab);
 
     loadPlugins();
     loadBuiltinTools();
-    loadAuditLogs();
     loadSkills();
     loadMcpServers();
 
     searchInput.addEventListener("input", renderPlugins);
     filterSelect.addEventListener("change", renderPlugins);
+    builtinTabsEl.addEventListener("click", function (event) {
+        var tab = event.target.closest("[data-tool-category]");
+        if (!tab) return;
+        builtinCategory = tab.getAttribute("data-tool-category");
+        renderBuiltinCategoryTabs();
+        renderBuiltinTools();
+    });
+    builtinTabsEl.addEventListener("keydown", function (event) {
+        if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) === -1) return;
+        var tabs = Array.prototype.slice.call(builtinTabsEl.querySelectorAll("[role='tab']"));
+        var current = tabs.indexOf(document.activeElement);
+        if (current === -1) return;
+        event.preventDefault();
+        var next = current;
+        if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+        if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+        if (event.key === "Home") next = 0;
+        if (event.key === "End") next = tabs.length - 1;
+        tabs[next].focus();
+        tabs[next].click();
+    });
 
     document.getElementById("plugin-modal-close").addEventListener("click", closeModal);
     document.getElementById("plugin-modal-cancel").addEventListener("click", closeModal);
@@ -208,115 +241,228 @@ function initTools() {
         openModal();
     }
 
+    function builtinCategories() {
+        var seen = {};
+        return allBuiltinTools.reduce(function (categories, tool) {
+            if (!seen[tool.category]) {
+                seen[tool.category] = true;
+                categories.push(tool.category);
+            }
+            return categories;
+        }, []);
+    }
+
+    function renderBuiltinCategoryTabs() {
+        var categories = ["全部"].concat(builtinCategories());
+        if (categories.indexOf(builtinCategory) === -1) builtinCategory = "全部";
+        builtinTabsEl.innerHTML = categories.map(function (category, index) {
+            var count = category === "全部"
+                ? allBuiltinTools.length
+                : allBuiltinTools.filter(function (tool) { return tool.category === category; }).length;
+            var active = category === builtinCategory;
+            return '<button id="builtin-category-tab-' + index + '" class="tab-btn' +
+                (active ? " active" : "") + '" type="button" role="tab" data-tool-category="' +
+                escapeHtml(category) + '" aria-selected="' + (active ? "true" : "false") +
+                '" aria-controls="builtin-tools-list" tabindex="' + (active ? "0" : "-1") + '">' +
+                escapeHtml(category) + '<span class="builtin-tab-count">' + count + "</span></button>";
+        }).join("");
+        var activeIndex = categories.indexOf(builtinCategory);
+        builtinListEl.setAttribute("aria-labelledby", "builtin-category-tab-" + activeIndex);
+    }
+
+    function renderBuiltinTools() {
+        var countEl = document.getElementById("builtin-tools-count");
+        countEl.textContent = "（" + allBuiltinTools.length + "）";
+        if (!allBuiltinTools.length) {
+            builtinListEl.innerHTML = '<p class="text-muted">暂无内置工具</p>';
+            return;
+        }
+
+        var visibleTools = builtinCategory === "全部"
+            ? allBuiltinTools
+            : allBuiltinTools.filter(function (tool) { return tool.category === builtinCategory; });
+        var categories = {};
+        visibleTools.forEach(function (tool) {
+            if (!categories[tool.category]) categories[tool.category] = [];
+            categories[tool.category].push(tool);
+        });
+
+        builtinListEl.innerHTML = Object.keys(categories).map(function (category) {
+            var items = categories[category].map(function (tool) {
+                var badges = tool.available
+                    ? '<span class="badge badge-success">可用</span>'
+                    : '<span class="badge badge-muted">不可用</span>';
+                if (tool.requires_approval) {
+                    badges += ' <span class="badge badge-warning">需审批</span>';
+                }
+                var toggle = '<label class="switch-label">' +
+                    '<input type="checkbox" class="tool-toggle" data-tool="' + escapeHtml(tool.name) + '"' +
+                    (tool.enabled ? " checked" : "") + ">" +
+                    '<span class="switch switch-sm"></span>' +
+                    "</label>";
+                return '<div class="builtin-tool-item">' +
+                    '<div class="builtin-tool-header">' +
+                        '<code class="builtin-tool-name">' + escapeHtml(tool.name) + "</code>" +
+                        '<div class="builtin-tool-badges">' + toggle + badges + "</div>" +
+                    "</div>" +
+                    '<p class="builtin-tool-desc">' + escapeHtml(tool.description) + "</p>" +
+                "</div>";
+            }).join("");
+            var title = builtinCategory === "全部"
+                ? '<div class="builtin-tool-category-title">' + escapeHtml(category) + "</div>"
+                : "";
+            return '<div class="builtin-tool-category">' + title +
+                '<div class="builtin-tool-items">' + items + "</div></div>";
+        }).join("");
+
+        builtinListEl.querySelectorAll(".tool-toggle").forEach(function (checkbox) {
+            checkbox.addEventListener("change", function () {
+                var toolName = this.getAttribute("data-tool");
+                var enabled = this.checked;
+                fetch("/api/tools/" + encodeURIComponent(toolName), {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ enabled: enabled }),
+                })
+                    .then(function (response) {
+                        if (!response.ok) {
+                            return response.json().then(function (data) { throw new Error(data.detail); });
+                        }
+                        showToast(enabled ? "已启用 " + toolName : "已禁用 " + toolName, "success");
+                        loadBuiltinTools();
+                    })
+                    .catch(function (error) {
+                        showToast("操作失败：" + error.message, "error");
+                        renderBuiltinTools();
+                    });
+            });
+        });
+    }
+
     function loadBuiltinTools() {
         fetch("/api/tools")
-            .then(function (r) { return r.json(); })
+            .then(function (response) {
+                if (!response.ok) throw new Error("请求失败");
+                return response.json();
+            })
             .then(function (tools) {
-                var container = document.getElementById("builtin-tools-list");
-                var countEl = document.getElementById("builtin-tools-count");
-                if (!tools.length) {
-                    container.innerHTML = '<p class="text-muted">暂无内置工具</p>';
-                    return;
-                }
-                countEl.textContent = "（" + tools.length + "）";
-
-                var categories = {};
-                tools.forEach(function (t) {
-                    if (!categories[t.category]) categories[t.category] = [];
-                    categories[t.category].push(t);
-                });
-
-                container.innerHTML = Object.keys(categories).map(function (cat) {
-                    var items = categories[cat].map(function (t) {
-                        var badges = t.available
-                            ? '<span class="badge badge-success">可用</span>'
-                            : '<span class="badge badge-muted">不可用</span>';
-                        if (t.requires_approval) {
-                            badges += ' <span class="badge badge-warning">需审批</span>';
-                        }
-                        var toggle = '<label class="switch-label">' +
-                            '<input type="checkbox" class="tool-toggle" data-tool="' + escapeHtml(t.name) + '"' +
-                            (t.enabled ? " checked" : "") + ">" +
-                            '<span class="switch switch-sm"></span>' +
-                            "</label>";
-                        return '<div class="builtin-tool-item">' +
-                            '<div class="builtin-tool-header">' +
-                                '<code class="builtin-tool-name">' + escapeHtml(t.name) + "</code>" +
-                                '<div class="builtin-tool-badges">' + toggle + badges + "</div>" +
-                            "</div>" +
-                            '<p class="builtin-tool-desc">' + escapeHtml(t.description) + "</p>" +
-                        "</div>";
-                    }).join("");
-                    return '<div class="builtin-tool-category">' +
-                        '<div class="builtin-tool-category-title">' + escapeHtml(cat) + "</div>" +
-                        '<div class="builtin-tool-items">' + items + "</div>" +
-                    "</div>";
-                }).join("");
-
-                container.querySelectorAll(".tool-toggle").forEach(function (cb) {
-                    cb.addEventListener("change", function () {
-                        var toolName = this.getAttribute("data-tool");
-                        var enabled = this.checked;
-                        fetch("/api/tools/" + encodeURIComponent(toolName), {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ enabled: enabled }),
-                        })
-                            .then(function (r) {
-                                if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-                                showToast(enabled ? "已启用 " + toolName : "已禁用 " + toolName, "success");
-                                loadBuiltinTools();
-                            })
-                            .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
-                    });
-                });
+                allBuiltinTools = tools;
+                renderBuiltinCategoryTabs();
+                renderBuiltinTools();
+            })
+            .catch(function (error) {
+                showToast("加载内置工具失败：" + error.message, "error");
             });
     }
 
-    var auditOffset = 0;
-    var auditLimit = 20;
+    function formatAuditTime(ts) {
+        if (!ts) return "";
+        var date = new Date(ts);
+        if (isNaN(date.getTime())) return ts;
+        function pad(n) { return n < 10 ? "0" + n : "" + n; }
+        return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) +
+            " " + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+    }
+
+    function renderAuditEntry(item) {
+        var statusBadge = item.status === "成功"
+            ? '<span class="badge badge-success">成功</span>'
+            : '<span class="badge badge-danger">失败</span>';
+        var owner = [item.tenant_id, item.agent_id].filter(Boolean).join(" / ") || "系统";
+        return '<details class="tool-audit-entry' +
+            (item.status !== "成功" ? " audit-row-fail" : "") + '">' +
+            '<summary class="tool-audit-row">' +
+                '<span class="audit-ts">' + escapeHtml(formatAuditTime(item.ts)) + "</span>" +
+                '<code class="audit-tool">' + escapeHtml(item.tool_name) + "</code>" +
+                statusBadge +
+                '<span class="audit-owner">' + escapeHtml(owner) + "</span>" +
+                '<span class="audit-duration">' + (item.duration_ms || 0) + "ms</span>" +
+                '<span class="audit-chevron">›</span>' +
+            "</summary>" +
+            '<div class="audit-detail">' +
+                '<div><span>机器人用户</span><code>' + escapeHtml(item.tenant_id || "-") + "</code></div>" +
+                '<div><span>智能体</span><code>' + escapeHtml(item.agent_id || "-") + "</code></div>" +
+                '<div><span>会话</span><code>' + escapeHtml(item.session_id || "-") + "</code></div>" +
+                '<div><span>参数哈希</span><code>' + escapeHtml(item.args_hash || "-") + "</code></div>" +
+                '<div><span>输出大小</span><strong>' + (item.output_bytes || 0) + " B</strong></div>" +
+                '<div><span>错误信息</span><strong class="audit-detail-error">' +
+                    escapeHtml(item.error || "-") + "</strong></div>" +
+            "</div></details>";
+    }
 
     function loadAuditLogs(append) {
-        fetch("/api/tools/audit?limit=" + auditLimit + "&offset=" + auditOffset)
-            .then(function (r) { return r.json(); })
+        var tool = document.getElementById("audit-filter-tool").value.trim();
+        var status = document.getElementById("audit-filter-status").value;
+        var requestOffset = append ? auditOffset : 0;
+        var query = "?limit=" + encodeURIComponent(auditLimit) +
+            "&offset=" + encodeURIComponent(requestOffset);
+        if (tool) query += "&tool=" + encodeURIComponent(tool);
+        if (status) query += "&status=" + encodeURIComponent(status);
+        var container = document.getElementById("tool-audit-list");
+        var loadMoreWrap = document.getElementById("audit-load-more-wrap");
+        var totalEl = document.getElementById("audit-total");
+        // Stale-response guard: only the latest request may touch the DOM.
+        var seq = ++auditRequestSeq;
+        if (!append) container.innerHTML = '<div class="audit-loading">正在加载审计记录…</div>';
+        fetch("/api/tools/audit" + query)
+            .then(function (r) {
+                if (!r.ok) {
+                    return r.json().then(function (body) {
+                        throw new Error(body.detail || "请求失败");
+                    });
+                }
+                return r.json();
+            })
             .then(function (data) {
-                var container = document.getElementById("tool-audit-list");
-                var loadMoreWrap = document.getElementById("audit-load-more-wrap");
+                if (seq !== auditRequestSeq) return;
                 var items = data.items || [];
+                totalEl.textContent = "共 " + (data.total || 0) + " 条";
                 if (!items.length && !append) {
-                    container.innerHTML = '<p class="text-muted">暂无审计记录</p>';
+                    container.innerHTML = '<div class="empty-state">暂无符合条件的工具执行记录</div>';
                     loadMoreWrap.style.display = "none";
                     return;
                 }
-                var html = items.map(function (item) {
-                    var statusBadge = item.status === "成功"
-                        ? '<span class="badge badge-success">成功</span>'
-                        : '<span class="badge badge-warning">失败</span>';
-                    var ts = item.ts ? item.ts.replace("T", " ").substring(0, 19) : "";
-                    return '<div class="tool-audit-row' + (item.status !== "成功" ? " audit-row-fail" : "") + '">' +
-                        '<span class="audit-ts">' + escapeHtml(ts) + "</span>" +
-                        '<code class="audit-tool">' + escapeHtml(item.tool_name) + "</code>" +
-                        statusBadge +
-                        '<span class="audit-duration">' + (item.duration_ms || 0) + "ms</span>" +
-                        (item.error ? '<span class="audit-error">' + escapeHtml(item.error) + "</span>" : "") +
-                    "</div>";
-                }).join("");
+                var html = items.map(renderAuditEntry).join("");
                 if (append) {
-                    container.innerHTML += html;
+                    // insertAdjacentHTML keeps already-expanded entries open.
+                    container.insertAdjacentHTML("beforeend", html);
                 } else {
                     container.innerHTML = html;
                 }
-                loadMoreWrap.style.display = (auditOffset + items.length < data.total) ? "" : "none";
+                // Advance the offset only after a successful load so a failed
+                // "load more" can simply be retried without skipping a page.
+                auditOffset = requestOffset + items.length;
+                loadMoreWrap.style.display = auditOffset < data.total ? "" : "none";
+            })
+            .catch(function (error) {
+                if (seq !== auditRequestSeq) return;
+                if (!append) {
+                    container.innerHTML = '<div class="audit-error-state">加载审计记录失败：' +
+                        escapeHtml(error.message) + "</div>";
+                    loadMoreWrap.style.display = "none";
+                }
+                showToast("加载审计记录失败：" + error.message, "error");
             });
     }
 
     var auditLoadMoreBtn = document.getElementById("audit-load-more");
     if (auditLoadMoreBtn) {
         auditLoadMoreBtn.addEventListener("click", function () {
-            auditOffset += auditLimit;
             loadAuditLogs(true);
         });
     }
+    document.getElementById("audit-filter-status").addEventListener("change", function () {
+        loadAuditLogs(false);
+    });
+    document.getElementById("audit-filter-tool").addEventListener("input", function () {
+        if (auditSearchTimer) clearTimeout(auditSearchTimer);
+        auditSearchTimer = setTimeout(function () {
+            loadAuditLogs(false);
+        }, 300);
+    });
+    document.getElementById("audit-refresh").addEventListener("click", function () {
+        loadAuditLogs(false);
+    });
 
     /* ---- Skill 技能 ---- */
     var skillModal = document.getElementById("skill-modal");

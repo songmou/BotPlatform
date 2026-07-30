@@ -6,6 +6,7 @@ import difflib
 import copy
 import fnmatch
 import json
+import logging
 import os
 import platform
 import shutil
@@ -21,244 +22,22 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
 from src.core.config.loader import ToolConfig
-from src.core.plugins.base import PlatformPlugin, PluginError, PluginToolDefinition
+from src.core.plugins.base import PlatformPlugin, PluginError
 from .commands import CommandRunner
+# APPROVAL_TOOLS/TOOL_DEFINITIONS are re-exported here for backward
+# compatibility: existing callers import them from ``runtime``.
+from .definitions import APPROVAL_TOOLS, TOOL_DEFINITIONS, _object_schema  # noqa: F401
 from .models import ToolAuditContext, ToolError, ToolResult
 from src.core.storage.tenants import TenantContext, TenantRegistry
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from src.core.services.script import ScriptService
+    from src.core.services.script_schedule import ScriptScheduleService
     from src.core.services.knowledge import KnowledgeService
+    from src.core.services.drive import DriveService
     from src.core.tooling.mcp_client import McpClientManager
-
-
-APPROVAL_TOOLS = {
-    "create_directory",
-    "write_text_file",
-    "replace_text",
-    "copy_path",
-    "move_path",
-    "move_to_trash",
-    "run_command",
-    "run_script",
-    "knowledge_add_text",
-    "knowledge_index_file",
-    "knowledge_delete",
-}
-
-
-def _object_schema(
-    properties: Optional[Dict[str, Any]] = None,
-    required: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": properties or {},
-        "required": required or [],
-        "additionalProperties": False,
-    }
-
-
-TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
-    "knowledge_add_text": {
-        "description": "把用户明确提供的纯文本保存到当前用户的私人知识库。",
-        "parameters": _object_schema(
-            {"name": {"type": "string"}, "content": {"type": "string"}},
-            ["name", "content"],
-        ),
-    },
-    "knowledge_index_file": {
-        "description": "索引当前用户 workspace 内的 UTF-8 TXT 或 Markdown 文件。",
-        "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
-    },
-    "knowledge_search": {
-        "description": "检索当前用户的私人知识库。",
-        "parameters": _object_schema(
-            {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}},
-            ["query"],
-        ),
-    },
-    "knowledge_list": {
-        "description": "列出当前用户的知识来源及索引状态。",
-        "parameters": _object_schema(),
-    },
-    "knowledge_delete": {
-        "description": "按来源编号删除当前用户的一项知识及其索引。",
-        "parameters": _object_schema({"source_id": {"type": "string"}}, ["source_id"]),
-    },
-    "list_allowed_roots": {
-        "description": "显示本机工具允许访问的根目录和当前默认工作目录。",
-        "parameters": _object_schema(),
-    },
-    "list_directory": {
-        "description": "列出目录中的文件和子目录；相对路径基于默认工作目录。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string", "description": "目录路径，默认 ."},
-                "depth": {"type": "integer", "minimum": 1, "maximum": 3},
-                "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1},
-            }
-        ),
-    },
-    "find_files": {
-        "description": "在目录中递归按文件名查找文件或目录，支持 * 和 ? 通配符。",
-        "parameters": _object_schema(
-            {
-                "query": {"type": "string"},
-                "path": {"type": "string", "description": "默认 ."},
-                "max_results": {"type": "integer", "minimum": 1},
-            },
-            ["query"],
-        ),
-    },
-    "search_text": {
-        "description": "在开放目录的 UTF-8 文本文件中搜索文字。",
-        "parameters": _object_schema(
-            {
-                "query": {"type": "string"},
-                "path": {"type": "string", "description": "默认 ."},
-                "glob": {"type": "string", "description": "可选文件名模式，如 *.py"},
-                "case_sensitive": {"type": "boolean"},
-                "max_results": {"type": "integer", "minimum": 1},
-            },
-            ["query"],
-        ),
-    },
-    "read_text_file": {
-        "description": "按行读取开放目录中的 UTF-8 文本文件。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string"},
-                "start_line": {"type": "integer", "minimum": 1},
-                "max_lines": {"type": "integer", "minimum": 1, "maximum": 400},
-            },
-            ["path"],
-        ),
-    },
-    "get_path_info": {
-        "description": "获取文件或目录的类型、大小和修改时间。",
-        "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
-    },
-    "get_current_time": {
-        "description": "获取机器人配置时区中的当前日期和时间。",
-        "parameters": _object_schema(),
-    },
-    "get_system_info": {
-        "description": "获取本机操作系统、架构和主机名，不返回环境变量。",
-        "parameters": _object_schema(),
-    },
-    "get_disk_usage": {
-        "description": "获取开放目录所在磁盘的容量和可用空间。",
-        "parameters": _object_schema({"path": {"type": "string"}}),
-    },
-    "list_processes": {
-        "description": "列出本机进程的 PID 和程序名，不包含完整命令参数。",
-        "parameters": _object_schema(
-            {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-            }
-        ),
-    },
-    "create_directory": {
-        "description": "新建目录，需要用户确认。",
-        "parameters": _object_schema(
-            {"path": {"type": "string"}, "parents": {"type": "boolean"}}, ["path"]
-        ),
-    },
-    "write_text_file": {
-        "description": "新建或覆盖 UTF-8 文本文件，需要用户确认。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-                "mode": {"type": "string", "enum": ["create", "overwrite"]},
-            },
-            ["path", "content", "mode"],
-        ),
-    },
-    "replace_text": {
-        "description": "在文本文件中精确替换内容，需要用户确认。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string"},
-                "old_text": {"type": "string"},
-                "new_text": {"type": "string"},
-                "expected_count": {"type": "integer", "minimum": 1},
-            },
-            ["path", "old_text", "new_text"],
-        ),
-    },
-    "copy_path": {
-        "description": "复制文件或目录到一个不存在的目标路径，需要用户确认。",
-        "parameters": _object_schema(
-            {"source": {"type": "string"}, "destination": {"type": "string"}},
-            ["source", "destination"],
-        ),
-    },
-    "move_path": {
-        "description": "移动文件或目录到一个不存在的目标路径，需要用户确认。",
-        "parameters": _object_schema(
-            {"source": {"type": "string"}, "destination": {"type": "string"}},
-            ["source", "destination"],
-        ),
-    },
-    "move_to_trash": {
-        "description": "把文件或目录移到 iLinkBot 专用废纸篓，不会永久删除，需要用户确认。",
-        "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
-    },
-    "run_command": {
-        "description": "使用白名单档案在 macOS 沙箱中运行命令，需要用户确认；不支持 shell 字符串。",
-        "parameters": _object_schema(
-            {
-                "profile": {
-                    "type": "string",
-                    "enum": [
-                        "python", "git_readonly", "node", "npm_script",
-                        "ollama_readonly", "workspace_script"
-                    ],
-                },
-                "args": {"type": "array", "items": {"type": "string"}},
-                "cwd": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
-            },
-            ["profile", "args"],
-        ),
-    },
-    "list_scripts": {
-        "description": "列出 iLinkBot 已注册、可由模型请求运行的固定脚本及其参数。",
-        "parameters": _object_schema(),
-    },
-    "run_script": {
-        "description": (
-            "提交已注册的固定脚本到后台异步运行，立即返回任务编号（状态通常为 running）。"
-            "脚本在后台执行，完成后其结果摘要和产物会自动推送给用户，无需你在对话中等待。"
-            "提交成功后应直接告知用户“已提交，结果将在完成后自动发送”，"
-            "不要反复调用 get_script_run 轮询等待完成（会耗尽工具调用轮次）。"
-        ),
-        "parameters": _object_schema(
-            {
-                "script_id": {"type": "string"},
-                "parameters": {
-                    "type": "object",
-                    "description": "脚本的具名参数；先用 list_scripts 查看允许值。",
-                    "additionalProperties": True,
-                },
-            },
-            ["script_id"],
-        ),
-    },
-    "get_script_run": {
-        "description": (
-            "仅在用户明确要求查询某个任务编号的当前状态时，做一次性状态查询；"
-            "不要用它轮询等待脚本完成，脚本结果会在完成后自动推送。"
-        ),
-        "parameters": _object_schema(
-            {"run_id": {"type": "string"}}, ["run_id"]
-        ),
-    },
-}
 
 
 class ToolRuntime:
@@ -278,6 +57,9 @@ class ToolRuntime:
         tool_audit_store: Optional[Any] = None,
         tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
         mcp_manager: Optional["McpClientManager"] = None,
+        script_schedule_service: Optional["ScriptScheduleService"] = None,
+        drive_service: Optional["DriveService"] = None,
+        drive_audit_store: Optional[Any] = None,
     ) -> None:
         self.base_config = config
         self.config = config
@@ -287,6 +69,7 @@ class ToolRuntime:
         self.trash_directory = trash_directory or (Path.home() / ".Trash" / "iLinkBot")
         self.audit_logger = audit_logger
         self.script_service = script_service
+        self.script_schedule_service = script_schedule_service
         self.tenant_registry = tenant_registry
         self.knowledge_service = knowledge_service
         self.tenant: Optional[TenantContext] = None
@@ -304,6 +87,11 @@ class ToolRuntime:
         self.tool_audit_store = tool_audit_store
         self._tool_states: Dict[str, Dict[str, Any]] = tool_states or {}
         self.mcp_manager = mcp_manager
+        self.drive_service = drive_service
+        self.drive_audit_store = drive_audit_store
+        # Audit context of the tool call currently being executed; used by
+        # drive tools to attribute the operator (agent:{agent_id}).
+        self._audit_context = ToolAuditContext()
 
     def is_tool_enabled(self, name: str) -> bool:
         state = self._tool_states.get(name)
@@ -365,8 +153,12 @@ class ToolRuntime:
             return False
         if name == "run_command":
             return self.command_runner.available
-        if name in {"list_scripts", "run_script", "get_script_run"}:
+        if name in {
+            "list_scripts", "run_script", "get_script_run", "cancel_script_run"
+        }:
             return self.script_service is not None
+        if name in {"list_script_schedules", "manage_script_schedule"}:
+            return self.script_schedule_service is not None
         if name.startswith("knowledge_"):
             return self.knowledge_service is not None
         return True
@@ -402,10 +194,11 @@ class ToolRuntime:
                 parameters["properties"]["profile"]["enum"] = list(
                     self.config.enabled_command_profiles
                 )
-            if name == "run_script" and self.script_service:
+            if name in {"run_script", "manage_script_schedule"} and self.script_service:
                 parameters["properties"]["script_id"]["enum"] = list(
                     self.script_service.script_ids
                 )
+            if name == "run_script" and self.script_service:
                 catalog = "；".join(
                     "{}＝{}（{}）".format(item.id, item.name, item.description)
                     if item.description
@@ -442,6 +235,8 @@ class ToolRuntime:
             if not isinstance(arguments, dict):
                 return True
             return self.script_service.requires_approval(arguments.get("script_id"))
+        if name in {"cancel_script_run", "manage_script_schedule"}:
+            return True
         state = self._tool_states.get(name)
         if state is not None and "require_approval" in state:
             return state["require_approval"]
@@ -615,6 +410,25 @@ class ToolRuntime:
                 )
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
+        if name == "cancel_script_run":
+            if not self.script_service:
+                raise ToolError("固定脚本服务不可用")
+            tenant = self._require_tenant()
+            if tenant is None:
+                raise ToolError("脚本工具需要租户身份")
+            run_id = self._string(arguments, "run_id")
+            current = self.script_service.get_run(tenant, run_id)
+            return "取消脚本任务：{}\n脚本：{}\n当前状态：{}".format(
+                run_id, current["script_name"], current["status"]
+            )
+        if name == "manage_script_schedule":
+            tenant = self._require_tenant()
+            if tenant is None or self.script_schedule_service is None:
+                raise ToolError("脚本计划服务不可用")
+            try:
+                return self.script_schedule_service.preview(tenant, arguments)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
         if name == "knowledge_add_text":
             return "保存私人知识：{}\n内容长度：{} 字符".format(
                 self._string(arguments, "name"), len(self._string(arguments, "content"))
@@ -624,6 +438,8 @@ class ToolRuntime:
             return "索引私人知识文件：{}".format(path)
         if name == "knowledge_delete":
             return "删除私人知识来源：{}".format(self._string(arguments, "source_id"))
+        if name == "drive_delete_file":
+            return "删除个人网盘文件：{}".format(self._string(arguments, "path"))
         raise ToolError("工具缺少审批预览：{}".format(name))
 
     def execute(
@@ -642,6 +458,7 @@ class ToolRuntime:
         status = "失败"
         output_size = 0
         error_msg = ""
+        self._audit_context = audit_context or ToolAuditContext()
         try:
             self._validate_arguments(name, arguments)
             plugin = self._plugin_tools.get(name)
@@ -688,8 +505,8 @@ class ToolRuntime:
                         args_hash=args_hash,
                         error=error_msg or None,
                     )
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - audit must never break tool calls
+                    logger.warning("写入工具审计记录失败：工具=%s", name, exc_info=True)
 
     def close_tenant(self, tenant_id: str) -> None:
         for plugin in self.plugins:
@@ -699,20 +516,20 @@ class ToolRuntime:
         for plugin in reversed(self.plugins):
             try:
                 plugin.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
         if self.mcp_manager is not None:
             try:
                 self.mcp_manager.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("关闭 MCP 管理器失败", exc_info=True)
 
     def reload_plugins(self, plugins: Iterable[PlatformPlugin]) -> None:
         for plugin in reversed(self.plugins):
             try:
                 plugin.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - keep reload going
+                logger.warning("重载前关闭插件 %s 失败", plugin.id, exc_info=True)
         self.plugins = list(plugins)
         self._plugin_tools = {}
         for plugin in self.plugins:
@@ -760,11 +577,160 @@ class ToolRuntime:
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
+    def _tool_cancel_script_run(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.script_service:
+            raise ToolError("固定脚本服务不可用")
+        tenant = self._require_tenant()
+        if tenant is None:
+            raise ToolError("脚本工具需要租户身份")
+        try:
+            return self.script_service.cancel_run(
+                tenant, self._string(arguments, "run_id")
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def _tool_list_script_schedules(
+        self, _arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tenant = self._require_tenant()
+        if tenant is None or self.script_schedule_service is None:
+            raise ToolError("脚本计划服务不可用")
+        return {
+            "schedules": self.script_schedule_service.list_for_tenant(tenant)
+        }
+
+    def _tool_manage_script_schedule(
+        self, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tenant = self._require_tenant()
+        if tenant is None or self.script_schedule_service is None:
+            raise ToolError("脚本计划服务不可用")
+        try:
+            return self.script_schedule_service.manage(
+                tenant, arguments, authorized_by="chat"
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
     def _knowledge_tenant(self) -> TenantContext:
         tenant = self._require_tenant()
         if tenant is None or self.knowledge_service is None:
             raise ToolError("知识库服务需要租户身份")
         return tenant
+
+    # ---- drive tools ----
+
+    def _drive_tenant(self) -> TenantContext:
+        tenant = self._require_tenant()
+        if tenant is None or self.drive_service is None:
+            raise ToolError("网盘服务需要租户身份")
+        return tenant
+
+    def _drive_scope(self, arguments: Dict[str, Any]) -> str:
+        scope = self._string(arguments, "scope", "tenant")
+        if scope not in ("tenant", "public"):
+            raise ToolError("scope 仅支持 tenant 或 public")
+        return scope
+
+    def _drive_record(
+        self,
+        scope: str,
+        tenant_id: Optional[str],
+        action: str,
+        path: str,
+        size_bytes: int = 0,
+        status: str = "成功",
+        error: Optional[str] = None,
+    ) -> None:
+        if self.drive_audit_store is None:
+            return
+        try:
+            self.drive_audit_store.record(
+                operator="agent:{}".format(self._audit_context.agent_id or "unknown"),
+                source="agent",
+                scope=scope,
+                tenant_id=tenant_id,
+                action=action,
+                path=path,
+                size_bytes=size_bytes,
+                status=status,
+                error=error,
+            )
+        except Exception:  # noqa: BLE001 - audit must never break tool calls
+            logger.warning("写入网盘审计记录失败", exc_info=True)
+
+    def _tool_drive_list_files(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        scope = self._drive_scope(arguments)
+        tenant_id = tenant.tenant_id if scope == "tenant" else None
+        path = self._string(arguments, "path", "")
+        try:
+            result = self.drive_service.list_entries(scope, tenant_id, path)
+        except ValueError as exc:
+            self._drive_record(scope, tenant_id, "list", path, status="失败", error=str(exc))
+            raise ToolError(str(exc)) from exc
+        self._drive_record(scope, tenant_id, "list", path)
+        return result
+
+    def _tool_drive_read_file(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        scope = self._drive_scope(arguments)
+        tenant_id = tenant.tenant_id if scope == "tenant" else None
+        path = self._string(arguments, "path")
+        max_lines = self._integer(arguments, "max_lines", 200, 1, 400)
+        try:
+            preview = self.drive_service.read_text(scope, tenant_id, path)
+        except ValueError as exc:
+            self._drive_record(scope, tenant_id, "preview", path, status="失败", error=str(exc))
+            raise ToolError(str(exc)) from exc
+        lines = preview["content"].splitlines()
+        truncated = preview["truncated"] or len(lines) > max_lines
+        self._drive_record(scope, tenant_id, "preview", path, size_bytes=preview["size"])
+        return {
+            "path": path,
+            "size": preview["size"],
+            "truncated": truncated,
+            "content": "\n".join(lines[:max_lines]),
+        }
+
+    def _tool_drive_save_file(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        path = self._string(arguments, "path")
+        content = self._string(arguments, "content")
+        overwrite = bool(arguments.get("overwrite", False))
+        directory, _, filename = path.replace("\\", "/").strip("/").rpartition("/")
+        try:
+            result = self.drive_service.save_file(
+                "tenant",
+                tenant.tenant_id,
+                directory,
+                filename,
+                content.encode("utf-8"),
+                overwrite=overwrite,
+            )
+        except ValueError as exc:
+            self._drive_record(
+                "tenant", tenant.tenant_id, "upload", path, status="失败", error=str(exc)
+            )
+            raise ToolError(str(exc)) from exc
+        self._drive_record(
+            "tenant", tenant.tenant_id, "upload", result["path"], size_bytes=result["size"]
+        )
+        return result
+
+    def _tool_drive_delete_file(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        path = self._string(arguments, "path")
+        try:
+            result = self.drive_service.delete("tenant", tenant.tenant_id, path)
+        except ValueError as exc:
+            self._drive_record(
+                "tenant", tenant.tenant_id, "delete", path, status="失败", error=str(exc)
+            )
+            raise ToolError(str(exc)) from exc
+        self._drive_record("tenant", tenant.tenant_id, "delete", path)
+        return result
 
     def _tool_knowledge_add_text(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         tenant = self._knowledge_tenant()
@@ -782,8 +748,18 @@ class ToolRuntime:
     def _tool_knowledge_search(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         tenant = self._knowledge_tenant()
         limit = self._integer(arguments, "limit", 6, 1, 20)
+        category_ids = arguments.get("category_ids")
+        if category_ids is not None and (
+            not isinstance(category_ids, list)
+            or any(not isinstance(value, str) for value in category_ids)
+        ):
+            raise ToolError("category_ids 必须是字符串数组")
         return {"results": self.knowledge_service.search(
-            tenant.tenant_id, self._string(arguments, "query"), limit
+            tenant.tenant_id,
+            self._string(arguments, "query"),
+            limit,
+            agent_id=self._audit_context.agent_id or None,
+            category_ids=category_ids,
         )}
 
     def _tool_knowledge_list(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:

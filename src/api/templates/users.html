@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}用户管理 - BotPlatform{% endblock %}
+{% block title %}用户与权限 - BotPlatform{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/users.css">{% endblock %}
 {% block content %}
 <div class="page-container">
@@ -55,9 +55,9 @@
 
 <!-- Tenant detail modal -->
 <div id="tenant-detail-modal" class="modal-overlay" style="display:none">
-    <div class="modal">
+    <div class="modal modal-xl tenant-detail-modal">
         <div class="modal-header">
-            <h3>租户详情</h3>
+            <h3 id="tenant-detail-title">机器人用户详情</h3>
             <button id="tenant-detail-close" class="modal-close-btn">&times;</button>
         </div>
         <div class="modal-body" id="tenant-detail-body"></div>

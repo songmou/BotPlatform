@@ -7,13 +7,112 @@
         <div class="page-header-row">
             <div>
                 <h2>模型管理</h2>
-                <p class="page-desc">管理多厂商模型档案，支持切换主模型</p>
+                <p class="page-desc">统一管理模型配置、用量、成本、质量与预算</p>
             </div>
             <button id="create-model-btn" class="btn-primary">+ 添加模型</button>
         </div>
     </div>
-    <div id="model-status" class="status-card"></div>
-    <div id="model-list" class="card-grid"></div>
+    <div class="tab-bar model-tabs">
+        <button class="tab-btn active" data-model-tab="config">模型配置</button>
+        <button class="tab-btn" data-model-tab="usage">用量与成本</button>
+        <button class="tab-btn" data-model-tab="quality">质量</button>
+        <button class="tab-btn" data-model-tab="budgets">预算预警</button>
+    </div>
+
+    <section class="model-tab-pane active" data-model-pane="config">
+        <div id="model-status" class="status-card"></div>
+        <div id="model-list" class="card-grid"></div>
+    </section>
+
+    <section class="model-tab-pane" data-model-pane="usage">
+        <div class="analytics-toolbar">
+            <label>时间范围
+                <select id="analytics-days">
+                    <option value="1">最近 24 小时</option>
+                    <option value="7" selected>最近 7 天</option>
+                    <option value="30">最近 30 天</option>
+                    <option value="90">最近 90 天</option>
+                </select>
+            </label>
+            <label>模型
+                <select id="analytics-profile"><option value="">全部模型</option></select>
+            </label>
+            <label>来源
+                <select id="analytics-source">
+                    <option value="">全部来源</option>
+                    <option value="web">Web</option>
+                    <option value="wechat">微信</option>
+                    <option value="schedule">定时任务</option>
+                    <option value="internal">内部任务</option>
+                </select>
+            </label>
+            <button id="analytics-refresh" class="btn-secondary">刷新</button>
+            <a id="analytics-export" class="btn-secondary" href="/api/model-analytics/export.csv">导出 CSV</a>
+        </div>
+        <div id="usage-stats" class="analytics-stats"></div>
+        <div class="analytics-grid">
+            <div class="analytics-card">
+                <h3>调用与成本趋势</h3>
+                <div id="usage-trend" class="trend-chart"></div>
+            </div>
+            <div class="analytics-card">
+                <h3>模型分布</h3>
+                <div id="usage-breakdown"></div>
+            </div>
+        </div>
+        <div class="analytics-card">
+            <div class="card-title-row">
+                <h3>运行明细</h3>
+                <small>只展示元数据，不保存提示词、回答或推理内容</small>
+            </div>
+            <div class="table-scroll"><table class="data-table">
+                <thead><tr><th>时间</th><th>来源</th><th>智能体</th><th>状态</th><th>调用</th><th>Token</th><th>成本</th></tr></thead>
+                <tbody id="model-runs-body"></tbody>
+            </table></div>
+        </div>
+    </section>
+
+    <section class="model-tab-pane" data-model-pane="quality">
+        <div id="quality-stats" class="analytics-stats"></div>
+        <div class="analytics-card">
+            <h3>质量说明</h3>
+            <p class="page-desc">质量按反馈、可用性、延迟、截断、工具失败、重试和模型切换分别呈现，不合成为单一分数。</p>
+            <div id="quality-notes" class="quality-notes"></div>
+        </div>
+    </section>
+
+    <section class="model-tab-pane" data-model-pane="budgets">
+        <div class="analytics-card">
+            <h3>新增月度预算</h3>
+            <form id="budget-form" class="budget-form">
+                <label>范围
+                    <select id="budget-scope-type">
+                        <option value="global">全局</option>
+                        <option value="tenant">租户</option>
+                        <option value="profile">模型档案</option>
+                        <option value="agent">智能体</option>
+                    </select>
+                </label>
+                <label>范围 ID
+                    <input id="budget-scope-id" placeholder="全局预算无需填写">
+                </label>
+                <label>月度金额
+                    <input id="budget-amount" type="number" min="0.000001" step="0.01" required>
+                </label>
+                <button class="btn-primary" type="submit">保存预算</button>
+            </form>
+        </div>
+        <div class="analytics-grid">
+            <div class="analytics-card">
+                <h3>本月预算进度</h3>
+                <div id="budget-list"></div>
+            </div>
+            <div class="analytics-card">
+                <h3>预警记录</h3>
+                <div id="budget-alerts"></div>
+            </div>
+        </div>
+    </section>
 </div>
 
 <!-- Modal -->
@@ -53,6 +152,28 @@
                     </select>
                 </div>
             </div>
+            <fieldset class="pricing-fieldset">
+                <legend>计价（每百万 Token，留空表示未计价）</legend>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="price-input">普通输入</label>
+                        <input type="number" id="price-input" min="0" step="0.000001">
+                    </div>
+                    <div class="form-group">
+                        <label for="price-cached">缓存输入</label>
+                        <input type="number" id="price-cached" min="0" step="0.000001">
+                    </div>
+                    <div class="form-group">
+                        <label for="price-output">普通输出</label>
+                        <input type="number" id="price-output" min="0" step="0.000001">
+                    </div>
+                    <div class="form-group">
+                        <label for="price-reasoning">推理输出</label>
+                        <input type="number" id="price-reasoning" min="0" step="0.000001">
+                    </div>
+                </div>
+                <small>统一使用系统结算币种；价格修改后需完整重启，历史调用保留原价格快照。</small>
+            </fieldset>
             <div class="form-group">
                 <label for="model-base-url">API 地址</label>
                 <input type="text" id="model-base-url" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1">
@@ -88,6 +209,16 @@
                 <button type="submit" class="btn-primary">保存</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div id="run-detail-modal" class="modal-overlay" style="display:none">
+    <div class="modal analytics-detail-modal">
+        <div class="modal-header">
+            <h3>模型调用链</h3>
+            <button id="run-detail-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div id="run-detail-content" class="modal-body"></div>
     </div>
 </div>
 {% endblock %}

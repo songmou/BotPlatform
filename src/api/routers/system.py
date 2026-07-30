@@ -53,6 +53,14 @@ def page_schedules(request: Request):
     return templates.TemplateResponse(name="schedules.html", request=request, context={"active": "schedules"})
 
 
+@router.get("/scripts", response_class=HTMLResponse)
+def page_scripts(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        name="scripts.html", request=request, context={"active": "scripts"}
+    )
+
+
 @router.get("/tools", response_class=HTMLResponse)
 def page_tools(request: Request):
     templates = request.app.state.templates
@@ -75,3 +83,19 @@ def page_users(request: Request):
 def page_docs(request: Request):
     templates = request.app.state.templates
     return templates.TemplateResponse(name="docs.html", request=request, context={"active": "docs"})
+
+
+@router.get("/knowledge", response_class=HTMLResponse)
+def page_knowledge(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        name="knowledge.html", request=request, context={"active": "knowledge"}
+    )
+
+
+@router.get("/drive", response_class=HTMLResponse)
+def page_drive(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        name="drive.html", request=request, context={"active": "drive"}
+    )

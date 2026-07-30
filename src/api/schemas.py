@@ -24,11 +24,15 @@ class ModelProfileOut(BaseModel):
     enabled: bool
     type: str
     provider: str
+    base_url: str
+    api_key_env: Optional[str] = None
     model: str
     temperature: float
     max_tokens: int
     timeout_seconds: float
     capabilities: Dict[str, bool]
+    billing_currency: str = "CNY"
+    pricing: Optional[Dict[str, Optional[str]]] = None
     is_primary: bool = False
     is_fallback: bool = False
 
@@ -60,6 +64,7 @@ class ModelCreate(BaseModel):
     timeout_seconds: float = 120
     enabled: bool = True
     capabilities: Dict[str, bool] = {"tools": False, "vision": False, "reasoning": False}
+    pricing: Optional[Dict[str, Optional[str]]] = None
 
 
 class ModelUpdate(BaseModel):
@@ -73,6 +78,20 @@ class ModelUpdate(BaseModel):
     timeout_seconds: Optional[float] = None
     enabled: Optional[bool] = None
     capabilities: Optional[Dict[str, bool]] = None
+    pricing: Optional[Dict[str, Optional[str]]] = None
+
+
+class ModelFeedbackIn(BaseModel):
+    rating: str
+    reasons: List[str] = []
+    comment: str = ""
+
+
+class ModelBudgetIn(BaseModel):
+    scope_type: str
+    scope_id: str = ""
+    monthly_limit_micros: int
+    enabled: bool = True
 
 
 class AgentOut(BaseModel):
@@ -90,6 +109,7 @@ class AgentOut(BaseModel):
     greeting_hints: List[str] = []
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    enabled: bool = True
 
 
 class AgentCapabilityIn(BaseModel):
@@ -112,6 +132,7 @@ class AgentCreate(BaseModel):
     greeting_hints: List[str] = []
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    enabled: bool = True
 
 
 class AgentUpdate(BaseModel):
@@ -128,6 +149,7 @@ class AgentUpdate(BaseModel):
     greeting_hints: Optional[List[str]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    enabled: Optional[bool] = None
 
 
 class ChatRequest(BaseModel):
@@ -160,6 +182,7 @@ class TaskActionOut(BaseModel):
     script_id: Optional[str] = None
     plugin_id: Optional[str] = None
     tool_name: Optional[str] = None
+    parameters: Dict[str, Any] = {}
 
 
 class TaskConditionOut(BaseModel):
@@ -357,3 +380,105 @@ class LoginRequest(BaseModel):
 class MeOut(BaseModel):
     user: AdminUserOut
     permissions: List[str]
+
+
+class KnowledgeTextIn(BaseModel):
+    tenant_id: Optional[str] = None
+    name: str
+    content: str
+    category_id: Optional[str] = None
+
+
+class KnowledgeReindexIn(BaseModel):
+    tenant_id: str
+    category_ids: Optional[List[str]] = None
+
+
+class KnowledgeCategoryCreateIn(BaseModel):
+    scope: str
+    name: str
+    description: str = ""
+    tenant_id: Optional[str] = None
+
+
+class KnowledgeCategoryUpdateIn(BaseModel):
+    name: str
+    description: str = ""
+
+
+class KnowledgeDriveImportIn(BaseModel):
+    category_id: str
+    scope: str
+    tenant_id: Optional[str] = None
+    paths: List[str]
+
+
+class KnowledgeRefreshIn(BaseModel):
+    source_ids: List[str]
+
+
+class KnowledgeMoveIn(BaseModel):
+    source_ids: List[str]
+    target_category_id: str
+
+
+class KnowledgeEmbeddingConfigIn(BaseModel):
+    id: str
+    enabled: bool
+    base_url: str
+    model: str
+    dimensions: int
+    timeout_seconds: float
+
+
+class KnowledgeAgentBindingsIn(BaseModel):
+    category_ids: List[str]
+
+
+class DriveEntryOut(BaseModel):
+    name: str
+    path: str
+    type: str
+    size: int
+    modified_at: float
+
+
+class DriveBreadcrumbOut(BaseModel):
+    name: str
+    path: str
+
+
+class DriveListOut(BaseModel):
+    path: str
+    breadcrumbs: List[DriveBreadcrumbOut]
+    entries: List[DriveEntryOut]
+
+
+class DriveFolderIn(BaseModel):
+    scope: str
+    tenant_id: Optional[str] = None
+    path: str = ""
+    name: str
+
+
+class DriveEntryActionIn(BaseModel):
+    scope: str
+    tenant_id: Optional[str] = None
+    action: str  # rename | move
+    path: str
+    target: str
+
+
+class DriveAuditOut(BaseModel):
+    id: int
+    ts: str
+    operator: str
+    source: str
+    scope: str
+    tenant_id: Optional[str] = None
+    action: str
+    path: str
+    target_path: Optional[str] = None
+    size_bytes: int
+    status: str
+    error: Optional[str] = None
