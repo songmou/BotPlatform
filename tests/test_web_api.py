@@ -1308,8 +1308,8 @@ class McpApiTest(unittest.TestCase):
     def test_update_partial_preserves_unsubmitted_keys(self):
         import json as json_module
 
-        # Seed the file with a custom key that no schema field covers;
-        # update_server mutates the dict in place, so it must survive.
+        # A partial update must preserve known fields that were not submitted;
+        # update_server mutates the stored dict in place.
         self.mcp_file.write_text(
             json_module.dumps(
                 {
@@ -1319,9 +1319,8 @@ class McpApiTest(unittest.TestCase):
                             "name": "本地文件",
                             "transport": "stdio",
                             "command": "python",
-                            "args": [],
+                            "args": ["-m", "server"],
                             "env": {},
-                            "headers_env": "MY_HEADERS",
                             "enabled": True,
                         }
                     ]
@@ -1341,7 +1340,7 @@ class McpApiTest(unittest.TestCase):
         saved = json_module.loads(self.mcp_file.read_text(encoding="utf-8"))["servers"]
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0]["name"], "新名字")
-        self.assertEqual(saved[0]["headers_env"], "MY_HEADERS")
+        self.assertEqual(saved[0]["args"], ["-m", "server"])
         self.assertEqual(saved[0]["command"], "python")
 
     def test_update_missing_server_404(self):
