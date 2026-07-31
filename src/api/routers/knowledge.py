@@ -18,19 +18,17 @@ from fastapi import (
     UploadFile,
 )
 
-from src.api.deps import get_registry, require_permission
+from src.api.deps import get_config, get_registry, require_permission
 from src.api.schemas import (
     KnowledgeCategoryCreateIn,
     KnowledgeCategoryUpdateIn,
     KnowledgeDriveImportIn,
-    KnowledgeEmbeddingConfigIn,
+    KnowledgeEmbeddingStatusOut,
     KnowledgeMoveIn,
     KnowledgeRefreshIn,
     KnowledgeReindexIn,
     KnowledgeTextIn,
 )
-from src.core.config.loader import ConfigError, validate_embedding_profile
-from src.core.paths import CONFIG_DIR
 from src.core.services.knowledge import SUPPORTED_SUFFIXES
 from src.core.storage.tenants import TenantStoreError
 
@@ -39,7 +37,6 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 UPLOAD_SUBDIR = "knowledge_uploads"
 _UNSAFE_FILENAME = re.compile(r"[\\/\x00-\x1f]")
-EMBEDDINGS_FILE = CONFIG_DIR / "embeddings.json"
 
 
 def _knowledge_service(request: Request):
@@ -352,60 +349,28 @@ def preview_source(
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@router.get("/embedding-config")
+@router.get("/embedding-config", response_model=KnowledgeEmbeddingStatusOut)
 def get_embedding_config(
     request: Request,
     principal=Depends(require_permission("knowledge.read")),
 ):
-    try:
-        data = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
-        profile = validate_embedding_profile(data, EMBEDDINGS_FILE)
-    except (OSError, json.JSONDecodeError, ConfigError) as exc:
-        raise HTTPException(status_code=500, detail="读取向量配置失败：{}".format(exc)) from exc
-    return {
-        "id": profile.id,
-        "enabled": profile.enabled,
-        "base_url": profile.base_url,
-        "model": profile.model,
-        "dimensions": profile.dimensions,
-        "timeout_seconds": profile.timeout_seconds,
-        "runtime_enabled": _knowledge_service(request).embedding is not None,
-    }
-
-
-@router.put("/embedding-config")
-def update_embedding_config(
-    body: KnowledgeEmbeddingConfigIn,
-    request: Request,
-    principal=Depends(require_permission("knowledge.manage")),
-):
-    data = {
-        "id": body.id,
-        "enabled": body.enabled,
-        "base_url": body.base_url,
-        "model": body.model,
-        "dimensions": body.dimensions,
-        "timeout_seconds": body.timeout_seconds,
-    }
-    try:
-        profile = validate_embedding_profile(data, EMBEDDINGS_FILE)
-        normalized = {
-            "id": profile.id,
-            "enabled": profile.enabled,
-            "base_url": profile.base_url,
-            "model": profile.model,
-            "dimensions": profile.dimensions,
-            "timeout_seconds": profile.timeout_seconds,
-        }
-        EMBEDDINGS_FILE.write_text(
-            json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+    # Read-only status; embedding models are managed on the models page now.
+    config = get_config(request)
+    binding = config.app.embedding_model
+    profile = config.models.get(binding) if binding else None
+    runtime_enabled = _knowledge_service(request).embedding is not None
+    if profile is None:
+        return KnowledgeEmbeddingStatusOut(
+            bound=False, runtime_enabled=runtime_enabled
         )
-    except ConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail="保存向量配置失败") from exc
-    return {**normalized, "restart_required": True}
+    return KnowledgeEmbeddingStatusOut(
+        bound=True,
+        profile_id=profile.id,
+        model=profile.model,
+        dimensions=profile.dimensions,
+        enabled=profile.enabled,
+        runtime_enabled=runtime_enabled,
+    )
 
 
 @router.post("/reindex")

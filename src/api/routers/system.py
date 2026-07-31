@@ -73,6 +73,14 @@ def page_plugins(request: Request):
     return templates.TemplateResponse(name="plugins.html", request=request, context={"active": "plugins"})
 
 
+@router.get("/channels", response_class=HTMLResponse)
+def page_channels(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        name="channels.html", request=request, context={"active": "channels"}
+    )
+
+
 @router.get("/users", response_class=HTMLResponse)
 def page_users(request: Request):
     templates = request.app.state.templates

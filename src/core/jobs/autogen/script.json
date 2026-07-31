@@ -1,0 +1,18 @@
+{
+  "id": "autogen_monitor",
+  "name": "悟空 AI 文生图监控",
+  "description": "续写带参考图的连载故事场景，并保存本次图片。",
+  "entrypoint": "monitor.py",
+  "timeout_seconds": 900,
+  "requires_approval": false,
+  "data_directory": "autogen",
+  "parameters": {
+    "reset_story": {
+      "type": "string",
+      "required": false,
+      "choices": ["true"],
+      "flag": "--reset-story"
+    }
+  },
+  "artifact_types": ["image"]
+}

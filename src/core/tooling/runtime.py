@@ -37,7 +37,9 @@ if TYPE_CHECKING:
     from src.core.services.script_schedule import ScriptScheduleService
     from src.core.services.knowledge import KnowledgeService
     from src.core.services.drive import DriveService
+    from src.core.services.ocr import OcrService
     from src.core.tooling.mcp_client import McpClientManager
+    from src.core.plugins.manager import PluginManager
 
 
 class ToolRuntime:
@@ -54,12 +56,14 @@ class ToolRuntime:
         tenant_registry: Optional[TenantRegistry] = None,
         knowledge_service: Optional["KnowledgeService"] = None,
         plugins: Optional[Iterable[PlatformPlugin]] = None,
+        plugin_manager: Optional["PluginManager"] = None,
         tool_audit_store: Optional[Any] = None,
         tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
         mcp_manager: Optional["McpClientManager"] = None,
         script_schedule_service: Optional["ScriptScheduleService"] = None,
         drive_service: Optional["DriveService"] = None,
         drive_audit_store: Optional[Any] = None,
+        ocr_service: Optional["OcrService"] = None,
     ) -> None:
         self.base_config = config
         self.config = config
@@ -73,13 +77,19 @@ class ToolRuntime:
         self.tenant_registry = tenant_registry
         self.knowledge_service = knowledge_service
         self.tenant: Optional[TenantContext] = None
-        self.plugins = list(plugins or [])
+        self.plugin_manager = plugin_manager
+        self.plugins = list(plugins or []) if plugin_manager is None else []
         self._plugin_tools: Dict[str, PlatformPlugin] = {}
-        for plugin in self.plugins:
-            for tool_name in plugin.tool_definitions:
-                if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+        if plugin_manager is not None:
+            for tool_name in plugin_manager.tool_names:
+                if tool_name in TOOL_DEFINITIONS:
                     raise ValueError("平台插件工具名称重复：{}".format(tool_name))
-                self._plugin_tools[tool_name] = plugin
+        else:
+            for plugin in self.plugins:
+                for tool_name in plugin.tool_definitions:
+                    if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+                        raise ValueError("平台插件工具名称重复：{}".format(tool_name))
+                    self._plugin_tools[tool_name] = plugin
         self._sandbox_available = sandbox_available
         self.command_runner = CommandRunner(
             config, self.resolve_path, sandbox_available=sandbox_available
@@ -89,6 +99,7 @@ class ToolRuntime:
         self.mcp_manager = mcp_manager
         self.drive_service = drive_service
         self.drive_audit_store = drive_audit_store
+        self.ocr_service = ocr_service
         # Audit context of the tool call currently being executed; used by
         # drive tools to attribute the operator (agent:{agent_id}).
         self._audit_context = ToolAuditContext()
@@ -144,6 +155,11 @@ class ToolRuntime:
     def is_available(self, name: str) -> bool:
         if not self.is_tool_enabled(name):
             return False
+        if (
+            self.plugin_manager is not None
+            and self.plugin_manager.manifest_for_tool(name) is not None
+        ):
+            return self.plugin_manager.is_available(name, self.tenant)
         plugin = self._plugin_tools.get(name)
         if plugin is not None:
             return plugin.is_available(name)
@@ -161,12 +177,21 @@ class ToolRuntime:
             return self.script_schedule_service is not None
         if name.startswith("knowledge_"):
             return self.knowledge_service is not None
+        if name == "ocr_extract_text":
+            return self.ocr_service is not None and self.ocr_service.available
         return True
 
     def _definition(self, name: str) -> Optional[Dict[str, Any]]:
         definition = TOOL_DEFINITIONS.get(name)
         if definition is not None:
             return definition
+        if self.plugin_manager is not None:
+            managed_definition = self.plugin_manager.definition(name)
+            if managed_definition is not None:
+                return {
+                    "description": managed_definition.description,
+                    "parameters": managed_definition.parameters,
+                }
         plugin = self._plugin_tools.get(name)
         if plugin is None:
             if self.mcp_manager is not None:
@@ -225,9 +250,20 @@ class ToolRuntime:
     def requires_approval(
         self, name: str, arguments: Optional[Dict[str, Any]] = None
     ) -> bool:
+        definition = (
+            self.plugin_manager.definition(name)
+            if self.plugin_manager is not None
+            else None
+        )
         plugin = self._plugin_tools.get(name)
-        if plugin is not None:
-            definition = plugin.tool_definitions.get(name)
+        if definition is not None or plugin is not None:
+            if definition is None and plugin is not None:
+                definition = plugin.tool_definitions.get(name)
+            if definition and definition.approval_policy == "required":
+                return True
+            state = self._tool_states.get(name)
+            if state is not None and "require_approval" in state:
+                return bool(state["require_approval"])
             return bool(definition and definition.requires_approval)
         if name == "run_script" and self.script_service is not None:
             if arguments is None:
@@ -247,8 +283,14 @@ class ToolRuntime:
     ) -> Optional[str]:
         """Return a trusted plugin summary that should bypass model rewriting."""
 
+        definition = (
+            self.plugin_manager.definition(name)
+            if self.plugin_manager is not None
+            else None
+        )
         plugin = self._plugin_tools.get(name)
-        definition = plugin.tool_definitions.get(name) if plugin is not None else None
+        if definition is None and plugin is not None:
+            definition = plugin.tool_definitions.get(name)
         if not definition or not definition.direct_response or not result or not result.ok:
             return None
         if not isinstance(result.data, dict):
@@ -369,11 +411,19 @@ class ToolRuntime:
         self._require_tenant()
         self._validate_arguments(name, arguments)
         if name not in APPROVAL_TOOLS:
+            plugin_definition = (
+                self.plugin_manager.definition(name)
+                if self.plugin_manager is not None
+                else None
+            )
             plugin = self._plugin_tools.get(name)
-            plugin_definition = plugin.tool_definitions.get(name) if plugin else None
+            if plugin_definition is None and plugin is not None:
+                plugin_definition = plugin.tool_definitions.get(name)
             if not plugin_definition or not plugin_definition.requires_approval:
                 raise ToolError("该工具不需要审批：{}".format(name))
             try:
+                if self.plugin_manager is not None:
+                    return self.plugin_manager.preview(name, arguments, self.tenant)
                 return plugin.preview(name, arguments, self.tenant)
             except PluginError as exc:
                 raise ToolError(str(exc)) from exc
@@ -461,8 +511,12 @@ class ToolRuntime:
         self._audit_context = audit_context or ToolAuditContext()
         try:
             self._validate_arguments(name, arguments)
-            plugin = self._plugin_tools.get(name)
-            if plugin is not None:
+            if (
+                self.plugin_manager is not None
+                and self.plugin_manager.manifest_for_tool(name) is not None
+            ):
+                data = self.plugin_manager.execute(name, arguments, self.tenant)
+            elif (plugin := self._plugin_tools.get(name)) is not None:
                 data = plugin.execute(name, arguments, self.tenant)
             elif self.mcp_manager is not None and self.mcp_manager.has_tool(name):
                 data = self.mcp_manager.call_tool(name, arguments)
@@ -509,22 +563,35 @@ class ToolRuntime:
                     logger.warning("写入工具审计记录失败：工具=%s", name, exc_info=True)
 
     def close_tenant(self, tenant_id: str) -> None:
+        if self.plugin_manager is not None:
+            self.plugin_manager.close_tenant(tenant_id)
+            return
         for plugin in self.plugins:
             plugin.close_tenant(tenant_id)
 
     def close(self) -> None:
-        for plugin in reversed(self.plugins):
-            try:
-                plugin.close()
-            except Exception:  # noqa: BLE001 - best effort on shutdown
-                logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
+        if self.plugin_manager is not None:
+            self.plugin_manager.close()
+        else:
+            for plugin in reversed(self.plugins):
+                try:
+                    plugin.close()
+                except Exception:  # noqa: BLE001 - best effort on shutdown
+                    logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
         if self.mcp_manager is not None:
             try:
                 self.mcp_manager.close()
             except Exception:  # noqa: BLE001 - best effort on shutdown
                 logger.warning("关闭 MCP 管理器失败", exc_info=True)
+        if self.ocr_service is not None:
+            try:
+                self.ocr_service.close()
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("关闭 OCR 服务失败", exc_info=True)
 
     def reload_plugins(self, plugins: Iterable[PlatformPlugin]) -> None:
+        if self.plugin_manager is not None:
+            raise ValueError("插件配置需要重启后生效")
         for plugin in reversed(self.plugins):
             try:
                 plugin.close()
@@ -543,6 +610,17 @@ class ToolRuntime:
             "default_working_directory": str(self.default_directory),
             "allowed_roots": [str(root) for root in self.roots],
         }
+
+    def _tool_ocr_extract_text(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if self.ocr_service is None:
+            raise ToolError("OCR 服务不可用")
+        from src.core.services.ocr import OcrError
+
+        path = self.resolve_path(self._string(arguments, "path"), must_exist=True)
+        try:
+            return self.ocr_service.recognize_path(path).payload()
+        except OcrError as exc:
+            raise ToolError(str(exc)) from exc
 
     def _tool_list_scripts(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:
         if not self.script_service:

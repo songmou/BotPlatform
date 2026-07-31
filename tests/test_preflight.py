@@ -35,6 +35,7 @@ class PreflightTests(unittest.TestCase):
         )
         warning_text = "\n".join(item.message for item in report.warnings)
         self.assertIn("全文检索", warning_text)
+        self.assertIn("本地 OCR 已启用但不可用", warning_text)
 
     def test_key_is_not_sent_to_provider_and_optional_warnings_do_not_fail(self):
         with patch(

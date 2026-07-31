@@ -3,6 +3,8 @@
 from .contracts import (
     CanonicalMessage,
     CanonicalToolCall,
+    EmbeddingClient,
+    EmbeddingError,
     GenerationOptions,
     ModelCallContext,
     ModelCapabilities,
@@ -13,12 +15,16 @@ from .contracts import (
     ModelResponse,
     ModelStreamEvent,
     ModelUsage,
+    RerankClient,
+    RerankError,
 )
 from .router import ModelRouter, ModelSession
 
 __all__ = [
     "CanonicalMessage",
     "CanonicalToolCall",
+    "EmbeddingClient",
+    "EmbeddingError",
     "GenerationOptions",
     "ModelCallContext",
     "ModelCapabilities",
@@ -29,6 +35,8 @@ __all__ = [
     "ModelResponse",
     "ModelStreamEvent",
     "ModelUsage",
+    "RerankClient",
+    "RerankError",
     "ModelRouter",
     "ModelSession",
 ]

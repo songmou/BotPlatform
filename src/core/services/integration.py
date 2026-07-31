@@ -13,6 +13,7 @@ from src.core.storage.tenants import IntegrationStore, TenantContext
 
 SUPPORTED_INTEGRATIONS = {
     "ctsehr": "CTS EHR",
+    "ctsoa": "CTS OA",
     "autogen": "悟空 AI",
 }
 

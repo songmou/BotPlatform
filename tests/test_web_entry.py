@@ -78,6 +78,7 @@ class SharedRuntimeGraphTest(unittest.TestCase):
             tenant_registry=registry,
             conversation_store=ConversationStore(registry, 20),
             embedding_client=None,
+            rerank_client=None,
             knowledge_service=KnowledgeService(registry, None),
             recipient_store=TenantRecipientStore(registry),
             schedule_store=ScheduleStore(registry),

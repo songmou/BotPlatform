@@ -1,10 +1,10 @@
-# BotPlatform：可扩展消息渠道的多模型机器人
+# BotPlatform：轻量级的AI中台的项目
 
-BotPlatform 是一个运行在自己电脑上的多渠道 AI 机器人。当前内置微信 iLink 适配器，统一消息层已经把平台协议与会话、模型、工具、通知和租户数据解耦，可继续接入飞书、钉钉、企业微信和 QQ。默认调用 DeepSeek V4 Flash，并提供多租户会话、可审批的本机工具、知识库、长期记忆、待办、定时任务以及可选插件。
+BotPlatform 是一个轻量级的AI中台的项目。当前内置微信 iLink、企业微信智能机器人和飞书长连接适配器，统一消息层已经把平台协议与会话、模型、工具、通知和租户数据解耦，可继续接入钉钉和 QQ。默认调用 DeepSeek V4 Flash，并提供多租户会话、可审批的本机工具、知识库、长期记忆、待办、定时任务以及可选插件。
 
-当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化、Codex 开发任务和个人后台任务。向量检索保持关闭，不需要安装 `bge-m3`。
+当前本地配置仍以 DeepSeek 为默认文字模型，同时启用 Ollama 图片理解、浏览器自动化和个人后台任务。Codex 开发任务作为可选额外插件提供；向量检索保持关闭，不需要安装 `bge-m3`。
 
-核心代码位于 `src/core/*` 与 `src/api/*` 两个包：`src/core/application/` 负责入口与消息编排，`src/core/services/` 承载业务服务，`src/core/storage/` 管理 SQLite 与租户数据，`src/core/integrations/` 对接微信、图片和向量能力，`src/core/infrastructure/` 提供诊断、日志与单实例运行支持，模型、工具、插件分别位于同名子包，可独立执行的后台任务集中在 `src/core/jobs/`；`src/api/` 则是 FastAPI Web 管理面板（路由、鉴权、模板与静态资源）。根目录 `main.py` 启动微信机器人（也可用 `python -m src`），`web.py` 启动 Web 管理面板。请统一从 `src.core.*` / `src.api.*` 导入，顶层的 `src/config`、`src/application` 等为空的陈旧目录。
+核心代码位于 `src/core/*` 与 `src/api/*` 两个包：`src/core/application/` 负责入口与消息编排，`src/core/services/` 承载业务服务，`src/core/storage/` 管理 SQLite 与租户数据，`src/core/integrations/` 对接微信、图片和向量能力，`src/core/infrastructure/` 提供诊断、日志与单实例运行支持，模型、工具、插件分别位于同名子包，可独立执行的后台任务集中在 `src/core/jobs/`；`src/api/` 则是 FastAPI Web 管理面板（路由、鉴权、模板与静态资源）。根目录 `main.py` 启动微信机器人（也可用 `python -m src`），`web.py` 启动 Web 管理面板。请统一从 `src.core.*` / `src.api.*` 导入。
 
 ## 5 分钟快速开始
 
@@ -85,16 +85,19 @@ Windows：
 
 首次启动会显示微信二维码。扫码并在手机确认后，登录凭据保存在 `data/system/credentials.json`；后续启动会直接复用。现在向机器人发送一条私聊文字即可开始使用。
 
-消息渠道配置位于 [`config/channels.json`](config/channels.json)。每个启用渠道拥有独立接收线程，消息会先进入持久化 inbox，再由核心串行处理；当前首期只响应私聊。可使用以下命令管理渠道：
+消息渠道配置位于 [`config/channels.json`](config/channels.json)。每个启用渠道拥有独立接收线程，消息会先进入持久化 inbox，再由核心串行处理。企业微信与飞书支持私聊及群聊 `@机器人`；群聊默认禁用私有上下文和本机工具。完整架构、平台配置、灰度与回滚流程见[消息渠道改造与接入手册](docs/message-channels.md)。可使用以下命令管理渠道：
 
 ```bash
 ./start.sh channel list
 ./start.sh channel status
 ./start.sh channel login wechat-main
+printf '%s' '{"bot_id":"...","secret":"..."}' | ./start.sh channel configure wecom-main --stdin
+printf '%s' '{"app_id":"...","app_secret":"..."}' | ./start.sh channel configure feishu-main --stdin
+./start.sh channel test wecom-main
 ./start.sh channel logout wechat-main
 ```
 
-`notify --user <租户编号>` 默认发送到用户最后活跃的绑定渠道，也可以通过 `--channel <渠道编号>` 指定渠道。
+`notify --user <租户编号>` 默认发送到用户最后活跃的私聊渠道，也可以通过 `--channel <渠道编号>` 指定渠道。在原渠道私聊发送 `/bind` 获取一次性绑定码，再在新渠道发送 `/bind <绑定码>`，可显式绑定同一租户。
 
 ## 默认模型与切换
 
@@ -166,7 +169,7 @@ ollama pull <你的模型名>
 ollama pull bge-m3
 ```
 
-然后把 `config/embeddings.json` 的 `enabled` 改为 `true`，确认地址、模型名和维度与实际模型一致。
+然后把 `config/models.json` 中 `bge_m3_local` 档案的 `enabled` 改为 `true`，确认地址、模型名和维度与实际模型一致，并保持 `config/app.json` 的 `embedding_model` 指向该档案。
 
 向量服务不可用时，知识写入仍会成功并标记为等待向量化，搜索自动退化为 FTS5；不会切换到云端 embedding。
 
@@ -185,10 +188,9 @@ ollama pull bge-m3
 /memory clear                  二次确认后停用全部记忆
 /soul                          查看当前长期用户画像
 /soul rebuild                  从有效记忆重建 SOUL.md
-/integration setup <ctsehr|autogen>  安全配置业务集成
+/integration setup <ctsehr|ctsoa|autogen>  安全配置业务集成
 /integration status [编号]     查看集成状态
 /integration delete <编号>     删除集成凭据
-/codex                         查看 Codex 确认命令
 /clear                         清空短期模型上下文
 /delete-data                   二次确认后删除自己的租户数据
 /help                          显示帮助
@@ -203,13 +205,38 @@ ollama pull bge-m3
 - 新建、写入、替换、复制、移动或移到专用废纸篓；
 - 执行白名单命令；
 - 写入或删除知识；
-- 创建、继续或停止 Codex 任务。
+- 清单声明为强制审批的插件操作。
 
 回复“同意”或“确认”才会执行；回复“不同意”“拒绝”“取消”或等待超时都不会执行。工具限制在 [`config/tools.json`](config/tools.json) 中配置。
 
+### 本地 OCR（可选）
+
+`ocr_extract_text` 可识别租户 workspace 内的图片和最多 10 页 PDF；微信图片会在模型调用前自动 OCR。OCR 完全在本机执行，Paddle 依赖和模型需由管理员显式准备：
+
+```bash
+.venv/bin/python -m pip install -r requirements-ocr.txt
+.venv/bin/python -m src.core.integrations.paddle_ocr prepare
+.venv/bin/python -m src.core.integrations.paddle_ocr check
+```
+
+模型保存在 `data/system/ocr_models`，不会提交仓库。缺少依赖或模型时机器人仍可启动，OCR 工具显示为不可用；修改 `config/tools.json` 中的 `ocr` 配置后需要完整重启。
+
 ## 插件
 
-当前本地配置已启用 `browser_automation` 和 `codex_tasks`。
+插件由 `src/core/plugins/bundled/<id>/plugin.json` 或
+`data/system/plugins/<id>/plugin.json` 清单发现。清单是工具定义、设置
+Schema、依赖、图标、提示和后台任务的唯一元数据来源；禁用插件及依赖
+缺失的插件不会导入入口代码。插件安装、更新、启停、设置及智能体绑定
+均需完整重启生效。
+
+管理员可在 `/plugins` 插件中心从可信本地目录安装插件。插件与主进程
+同权限运行，不是安全沙箱；系统不会联网、运行安装脚本或自动执行
+`pip`。外部插件包存放在 `data/system/plugins/`，移除时进入可恢复目录，
+插件数据默认保留，可另行通过插件 ID 二次确认清除。
+
+智能体配置中的内置工具写在 `tools`，插件工具写在
+`plugin_tools: {plugin_id: [tool_name]}`。安装并启用插件并不会自动把工具
+授予智能体。
 
 ### 浏览器自动化
 
@@ -219,22 +246,26 @@ ollama pull bge-m3
 
 ### Codex 开发任务
 
-启用 `codex_tasks` 前：
+`codex_tasks` 是一个内置但可选的额外插件，只提供五个工具：列出、查看、
+创建、继续和中止任务。启用前：
 
 1. 使用当前系统用户完成 Codex 登录；
 2. 向机器人发送 `/id`；
-3. 将得到的租户编号加入 `admin_tenant_ids`；
-4. 按需配置允许的项目路径并重启。
+3. 将得到的租户编号加入 `allowed_tenant_ids`；
+4. 配置 `projects`、`default_project` 和并发上限；
+5. 在目标智能体的 `plugin_tools.codex_tasks` 中显式选择工具并重启。
 
-管理员列表为空时 Codex 工具不会开放。创建、继续和停止任务均需微信确认。默认仅当 BotPlatform 创建的任务需要用户输入时发送微信通知，用于在方案生成后选择方向；排队、执行、终态和权限审批均不推送。外部 Codex 生命周期由用户级 `~/.codex/hooks.json` 采集；本机安装模板为 [`config/codex-hooks.json`](config/codex-hooks.json)，安装或修改后需在 Codex 中运行 `/hooks` 并确认信任。外部任务的等待输入和审批没有可回传的实时通道，因此不会推送到微信；仍须回原 Codex 界面处理。
-
-`codex_tasks.external_project_scope` 设为 `all` 时会监控所有本机项目，但 `projects` 仍是微信可创建或继续任务的独立执行白名单。外部任务在同一 turn 内每个生命周期阶段只通知一次，连续审批会合并，完成事件仍保留。iLink 上下文失效后，通知会持久停在 `waiting_recipient`；用户再次私聊机器人刷新上下文后，积压通知会按原顺序自动重投。
+创建、继续和中止由平台强制审批。插件固定使用 `workspace-write` 和无需
+提权的策略；若任务仍请求额外审批、权限或用户输入，会被安全拒绝并
+标记失败。插件只管理自身创建、按租户隔离的任务，不轮询外部 Codex
+任务、不安装 Hook，也不发送阶段或完成通知。`openai-codex` 是插件可选
+依赖，缺失时只影响该插件。
 
 ## 定时任务与待办
 
 当前本地时间表启用文生图（08:00、14:00）、OA 考勤（08:50、18:00）、待办提醒（09:00、18:00）、每月 1 日 09:05 归档，以及每 10 分钟执行的离线窗口检查。普通早安和晚间总结保持关闭；各用户是否接收仍由已有订阅决定。
 
-后台任务实现位于 [`src/core/jobs/`](src/core/jobs/)，注册信息位于 [`config/scripts.json`](config/scripts.json)：`autogen_monitor` 负责带参考图的连载文生图，`ctsehr_check` 负责 OA 考勤与待审批。AutoGen 使用与主进程相同的默认语言模型生成中文故事提示词，并固定用上一场的第 1 张候选图续写下一场；目标网站未提供参考图上传控件时会停止，不会降级为随机文生图。传入 `reset_story=true` 可在本次成功后开始新的随机故事。它们由脚本服务以独立子进程运行；待办则由 `src/core/plugins/todo.py` 插件提供，不属于后台任务注册表。业务账号与密码通过 `/integration` 配置，密码只保存在权限为 `0600` 的受限凭据文件中，不进入日志、聊天历史或模型上下文。
+后台任务实现位于 [`src/core/jobs/`](src/core/jobs/)；每个脚本由同目录的 `script.json` 自行声明。`autogen_monitor` 负责带参考图的连载文生图，`ctsehr_check` 负责 EHR 考勤与待审批，`ctsoa_check` 负责 CTS OA 待办查询。CTS OA 首次登录会返回验证码图片；在 5 分钟内再次运行并传入 `validate_code` 后完成登录，随后复用受限权限会话直到失效。AutoGen 使用与主进程相同的默认语言模型生成中文故事提示词，并固定用上一场的第 1 张候选图续写下一场；目标网站未提供参考图上传控件时会停止，不会降级为随机文生图。传入 `reset_story=true` 可在本次成功后开始新的随机故事。它们由脚本服务以独立子进程运行；私人待办则由 `src/core/plugins/todo.py` 插件提供，不属于后台任务注册表。业务账号与密码通过 `/integration` 配置，密码只保存在权限为 `0600` 的受限凭据文件中，不进入日志、聊天历史或模型上下文。
 
 机器人停机期间不会补跑尚未触发的普通任务；已经生成的主动通知会先持久化到 SQLite Outbox，并在机器人恢复后按用户、按原顺序补发。网络、凭证或微信服务临时异常会持续退避重试；微信上下文失效时通知会等待用户再次私聊刷新上下文。图片会在入队时复制到租户私有缓存，送达后自动删除。投递语义为至少一次：若微信已经接收、进程却在记录成功前异常退出，极端情况下可能重复一条。
 
@@ -274,8 +305,9 @@ python web.py --host 0.0.0.0 --port 8080
 - **对话**：与智能体多轮对话调试，支持流式输出与工具调用轨迹；
 - **模型**：管理模型档案（新增、编辑、启用/停用、切换主模型）；密钥仍写入 `data/system/model.env`；
 - **智能体**：编辑名称、系统提示词、可用工具、技能与 MCP；
-- **工具**：内置工具、插件工具、工具执行审计、Skill 技能、MCP 服务（可在线调试）；
-- **消息平台**：查看已接入机器人渠道的连接状态；
+- **工具**：统一查看内置与插件工具的来源、启停、审批策略和执行审计，并管理 Skill 与 MCP；
+- **插件中心**：安装、更新、启停和配置可信本地插件；
+- **消息渠道**：在 `/channels` 添加、配置和检查 iLink、企业微信与飞书渠道；
 - **定时任务**：管理 cron 任务，改动自动重载调度；
 - **用户管理**：机器人用户（租户列表/详情/删除）、管理员账号（增删改、分配角色、重置密码，新账号初始密码为 `12345`）、角色权限（点击角色弹窗编辑；内置 admin 拥有全部权限且不可修改）；
 - **文档说明**：面板功能与使用指南。
@@ -299,15 +331,17 @@ python web.py --host 0.0.0.0 --port 8080
 ```text
 config/
 ├── app.json         默认 Agent、模型模式、时区和历史轮数
-├── models.json      DeepSeek、Ollama 与其他兼容模型档案
-├── embeddings.json 可选 Ollama embedding
+├── models.json      DeepSeek、Ollama 与其他兼容模型档案（含 embedding 档案）
+├── channels.json    消息渠道实例（微信 iLink、企业微信、飞书）
 ├── tools.json       工具目录、限制和命令白名单
-├── plugins.json     浏览器与 Codex 插件
-├── codex-hooks.json 用户级 Codex 生命周期 Hook 安装模板
-├── scripts.json     后台任务注册表（实现位于 src/core/jobs）
+├── plugins.json     插件启用状态与设置
+├── skills.json      技能定义
+├── mcp_servers.json MCP 服务器配置
 ├── schedules.json   定时任务
 └── agents/          Agent 角色与提示词
 ```
+
+内置后台脚本采用自包含文件夹：每个脚本位于 `src/core/jobs/<目录>/`，由同目录的 `script.json` 清单声明（id、参数、超时等），启动时自动扫描发现；新增脚本只需放入文件夹，删除脚本即删除文件夹。
 
 远程 OpenAI-compatible 地址必须使用 HTTPS，本机回环地址可以使用 HTTP。配置修改后需要重启，不支持热加载。
 

@@ -188,3 +188,14 @@
     font-size: 12px;
     padding: 4px;
 }
+
+/* ===== Agent modal sub-tabs ===== */
+.agent-modal-tabs {
+    margin: 12px 24px 0;
+}
+.agent-tab-panel[hidden] {
+    display: none;
+}
+.agent-tab-panel > .form-group:first-child {
+    margin-top: 0;
+}

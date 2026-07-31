@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.core.plugins.base import PlatformPlugin, PluginError
+from src.core.plugins.manager import PluginManager
 from src.core.services.agent import AgentService
 from src.core.config.loader import ScheduledTask
 from src.core.infrastructure.logging import log_scheduled_task
@@ -49,6 +50,7 @@ class SchedulerService:
         tenant_registry: TenantRegistry = None,
         schedule_store: ScheduleStore = None,
         plugins: Optional[List[PlatformPlugin]] = None,
+        plugin_manager: Optional[PluginManager] = None,
         memory_service: Optional[MemoryService] = None,
         notification_service: Optional[NotificationService] = None,
         script_schedule_service: Optional[ScriptScheduleService] = None,
@@ -74,8 +76,10 @@ class SchedulerService:
         self.tenant_registry = tenant_registry
         self.schedule_store = schedule_store
         self.memory_service = memory_service
+        self.plugin_manager = plugin_manager
         self._plugins: Dict[str, PlatformPlugin] = {
-            plugin.id: plugin for plugin in (plugins or [])
+            plugin.id: plugin
+            for plugin in (plugins or [])
         }
         if self.tenant_registry is None or self.schedule_store is None:
             raise ValueError("多用户调度器需要租户注册表和订阅存储")
@@ -125,19 +129,19 @@ class SchedulerService:
                     max_instances=1,
                     misfire_grace_time=1,
                 )
-        todo = self._plugins.get("todo")
-        if todo is not None and hasattr(todo, "claim_due_reminders"):
-            recover = getattr(todo, "recover_inflight_reminders", None)
-            if recover is not None:
-                recover(self.now_provider())
+        for plugin_id, job in self._plugin_background_jobs():
             self.scheduler.add_job(
-                self.run_due_todo_reminders,
-                trigger=IntervalTrigger(seconds=30, timezone=self.timezone_name),
-                id="todo_due_reminders",
+                self.run_plugin_background_job,
+                trigger=IntervalTrigger(
+                    seconds=job.interval_seconds,
+                    timezone=self.timezone_name,
+                ),
+                args=[plugin_id, job.id],
+                id="plugin:{}:{}".format(plugin_id, job.id),
                 replace_existing=True,
                 coalesce=True,
                 max_instances=1,
-                misfire_grace_time=30,
+                misfire_grace_time=job.interval_seconds,
             )
         if self.memory_service is not None:
             self.memory_service.recover_dirty()
@@ -324,52 +328,42 @@ class SchedulerService:
             self.logger(task.id, "跳过", "没有用户订阅此任务", None)
         return any_success
 
-    def run_due_todo_reminders(self) -> bool:
-        """Deliver due one-off todo reminders claimed atomically by the plugin."""
-        todo = self._plugins.get("todo")
-        if todo is None:
-            return False
-        due = getattr(todo, "due_reminders", None)
-        claim = getattr(todo, "claim_due_reminders", None)
-        finish = getattr(todo, "finish_reminder", None)
-        if (due is None and claim is None) or finish is None:
-            return False
-        any_success = False
-        events = due(self.now_provider()) if due is not None else claim(self.now_provider())
-        for event in events:
-            tenant_id = str(event["tenant_id"])
-            number = int(event["todo_number"])
-            try:
-                enqueue_todo = getattr(
-                    self.notification_service, "enqueue_todo_reminder", None
+    def _plugin_background_jobs(self):
+        if self.plugin_manager is not None:
+            return self.plugin_manager.background_jobs()
+        result = []
+        for plugin in self._plugins.values():
+            for job in getattr(plugin, "background_jobs", []):
+                result.append((plugin.id, job))
+        return result
+
+    def run_plugin_background_job(self, plugin_id: str, job_id: str) -> bool:
+        try:
+            if self.plugin_manager is not None:
+                result = self.plugin_manager.run_background_job(
+                    plugin_id, job_id, self.now_provider()
                 )
-                if callable(enqueue_todo):
-                    enqueue_todo(
-                        tenant_id,
-                        number,
-                        str(event["due_at"]),
-                        str(event["title"]),
-                    )
-                else:
-                    message = "【待办提醒】{} {}".format(
-                        "T{:04d}".format(number), event["title"]
-                    )
-                    self.notification_service.enqueue_text_to_tenant(
-                        tenant_id,
-                        message,
-                        source_type="todo",
-                        source_key="{}:{}".format(number, event["due_at"]),
-                        source_ref=str(number),
-                    )
-                message = "【待办提醒】{} {}".format(
-                    "T{:04d}".format(number), event["title"]
-                )
-                self.logger("todo_due_reminders", "已入队", message, tenant_id)
-                any_success = True
-            except Exception as exc:
-                finish(tenant_id, number, False, str(exc), now=self.now_provider())
-                self.logger("todo_due_reminders", "失败", str(exc), tenant_id)
-        return any_success
+            else:
+                plugin = self._plugins.get(plugin_id)
+                runner = getattr(plugin, "run_background_job", None) if plugin else None
+                if not callable(runner):
+                    return False
+                result = runner(job_id, self.now_provider())
+            self.logger(
+                "plugin:{}:{}".format(plugin_id, job_id),
+                "完成",
+                "插件后台任务已执行",
+                None,
+            )
+            return bool(result)
+        except Exception as exc:
+            self.logger(
+                "plugin:{}:{}".format(plugin_id, job_id),
+                "失败",
+                str(exc),
+                None,
+            )
+            return False
 
     def _run_task_for_tenant(
         self, task: ScheduledTask, tenant: TenantContext
@@ -423,11 +417,21 @@ class SchedulerService:
     ) -> bool:
         plugin_id = task.action.plugin_id or ""
         tool_name = task.action.tool_name or ""
-        plugin = self._plugins.get(plugin_id)
-        if plugin is None:
-            raise ValueError("插件 {} 未加载或不存在".format(plugin_id))
         try:
-            result = plugin.execute(tool_name, task.action.parameters, tenant)
+            if self.plugin_manager is not None:
+                manifest = self.plugin_manager.manifest_for_tool(tool_name)
+                if manifest is None or manifest.id != plugin_id:
+                    raise ValueError("插件 {} 未加载或不存在".format(plugin_id))
+                result = self.plugin_manager.execute(
+                    tool_name,
+                    task.action.parameters,
+                    tenant,
+                )
+            else:
+                plugin = self._plugins.get(plugin_id)
+                if plugin is None:
+                    raise ValueError("插件 {} 未加载或不存在".format(plugin_id))
+                result = plugin.execute(tool_name, task.action.parameters, tenant)
         except PluginError as exc:
             raise ValueError("插件执行失败：{}".format(exc)) from exc
         summary = ""

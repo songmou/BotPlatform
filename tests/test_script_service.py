@@ -303,6 +303,28 @@ class ScriptServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "/integration setup ctsehr"):
             service.submit(self.tenant, "ctsehr_check", {}, trigger="schedule")
 
+    def test_ctsoa_script_requires_its_own_integration(self) -> None:
+        definition = ScriptDefinition(
+            id="ctsoa_check",
+            name="CTS OA",
+            description="test",
+            entrypoint=str(self.entrypoint),
+            timeout_seconds=5,
+            requires_approval=False,
+        )
+        service = ScriptService(
+            {"ctsoa_check": definition},
+            Credentials("token", "https://gateway", "bot", "owner"),
+            self.store,
+            self.root,
+            self.registry,
+            notification_service=self.notifications,
+            keychain_service=KeychainService(storage_path=self.root / "credentials.json"),
+        )
+        self.addCleanup(service.shutdown)
+        with self.assertRaisesRegex(ValueError, "/integration setup ctsoa"):
+            service.submit(self.tenant, "ctsoa_check", {}, trigger="manual")
+
 
 if __name__ == "__main__":
     unittest.main()

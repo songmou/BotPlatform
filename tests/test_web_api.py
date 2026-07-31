@@ -93,7 +93,6 @@ def _make_config():
         AgentPreset,
         AppConfig,
         Capability,
-        EmbeddingProfile,
         ModelProfile,
         ProjectConfig,
         ToolConfig,
@@ -110,6 +109,8 @@ def _make_config():
         flash_model="",
         pro_model="",
         vision_model="",
+        embedding_model="",
+        rerank_model="",
         fallback_cooldown_seconds=60,
     )
     model_profile = ModelProfile(
@@ -150,9 +151,6 @@ def _make_config():
         max_command_timeout_seconds=60,
         enabled_command_profiles=[],
     )
-    embedding = EmbeddingProfile(
-        id="none", enabled=False, base_url="", model="", dimensions=0, timeout_seconds=5
-    )
     return ProjectConfig(
         app=app,
         models={"test_model": model_profile},
@@ -161,7 +159,6 @@ def _make_config():
         agents={"general": agent},
         scripts={},
         schedules=[],
-        embedding=embedding,
     )
 
 
@@ -749,7 +746,6 @@ class WebApiTest(unittest.TestCase):
         self.assertIn("audit-filter-status", tools.text)
         tool_menu_labels = [
             "内置工具",
-            "插件工具",
             "Skill 技能",
             "MCP 服务",
             "运维脚本",

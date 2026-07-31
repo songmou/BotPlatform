@@ -1,0 +1,15 @@
+{
+  "oa": {
+    "base_url": "https://oa.chowtaiseng.com",
+    "timeout_seconds": 30,
+    "retries": 3,
+    "challenge_ttl_seconds": 300
+  },
+  "pending": {
+    "max_items": 20
+  },
+  "output": {
+    "results_dir": "results",
+    "logs_dir": "logs"
+  }
+}

@@ -371,13 +371,16 @@ class SchedulerServiceTests(unittest.TestCase):
             {}, PluginContext(Path(self.temp.name), self.registry)
         )
         service = self.service([fixed_task()], plugins=[plugin])
+        plugin._notification_service = service.notification_service
         plugin.execute_for_tenant(
             self.tenant.tenant_id, "add", title="到期事项",
             remind_at="2026-07-16T08:01:00+00:00",
             now=datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc),
         )
         self.now = datetime(2026, 7, 16, 8, 1, tzinfo=timezone.utc)
-        self.assertTrue(service.run_due_todo_reminders())
+        self.assertTrue(
+            service.run_plugin_background_job("todo", "due_reminders")
+        )
         with self.registry.database.read() as connection:
             event = connection.execute(
                 "SELECT delivery_status FROM todo_reminder_events "
@@ -406,7 +409,9 @@ class SchedulerServiceTests(unittest.TestCase):
             self.tenant.tenant_id, "list", scope="pending"
         )
         self.assertNotIn("T0001", pending.summary)
-        self.assertFalse(service.run_due_todo_reminders())
+        self.assertFalse(
+            service.run_plugin_background_job("todo", "due_reminders")
+        )
 
     def test_one_logical_task_can_register_two_cron_triggers(self) -> None:
         scheduler = FakeScheduler()

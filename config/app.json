@@ -9,5 +9,7 @@
   "flash_model": "deepseek_cloud",
   "pro_model": "deepseek_pro",
   "vision_model": "ollama_local",
+  "embedding_model": "bge_m3_local",
+  "rerank_model": "",
   "fallback_cooldown_seconds": 60
 }

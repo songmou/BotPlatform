@@ -2,6 +2,8 @@
 function initModels() {
     var statusEl = document.getElementById("model-status");
     var listEl = document.getElementById("model-list");
+    var rolesPane = document.getElementById("model-roles-pane");
+    var createBtn = document.getElementById("create-model-btn");
     var modal = document.getElementById("model-modal");
     var modalTitle = document.getElementById("model-modal-title");
     var form = document.getElementById("model-form");
@@ -9,16 +11,24 @@ function initModels() {
     var editingId = null;
     var allModels = [];
     var analyticsCurrency = "CNY";
+    var currentCat = "chat";
+    var modalityLabels = { chat: "\u5bf9\u8bdd", embedding: "\u5411\u91cf", rerank: "\u91cd\u6392" };
 
     loadModels();
     initAnalyticsTabs();
+    initCategoryNav();
 
-    document.getElementById("create-model-btn").addEventListener("click", function () {
+    createBtn.addEventListener("click", function () {
         editingId = null;
-        modalTitle.textContent = "添加模型";
+        modalTitle.textContent = "\u6dfb\u52a0\u6a21\u578b";
         idGroup.style.display = "";
         form.reset();
         document.getElementById("model-enabled").checked = true;
+        // Pre-select the modality matching the active category so creating a
+        // model from the "\u5411\u91cf/\u91cd\u6392" tabs opens the right form.
+        document.getElementById("model-modality").value =
+            (currentCat === "embedding" || currentCat === "rerank") ? currentCat : "chat";
+        applyModalityVisibility();
         openModal();
     });
 
@@ -62,6 +72,68 @@ function initModels() {
     function openModal() { modal.style.display = ""; }
     function closeModal() { modal.style.display = "none"; }
 
+    var modalityEl = document.getElementById("model-modality");
+    modalityEl.addEventListener("change", applyModalityVisibility);
+
+    function applyModalityVisibility() {
+        var modality = modalityEl.value;
+        form.querySelectorAll(".chat-only").forEach(function (el) {
+            el.style.display = modality === "chat" ? "" : "none";
+        });
+        form.querySelectorAll(".embedding-only").forEach(function (el) {
+            el.style.display = modality === "embedding" ? "" : "none";
+        });
+    }
+
+    var roleVision = document.getElementById("role-vision");
+    var roleEmbedding = document.getElementById("role-embedding");
+    var roleRerank = document.getElementById("role-rerank");
+    document.getElementById("save-roles-btn").addEventListener("click", saveRoles);
+
+    function roleOptions(candidates, current) {
+        var opts = '<option value="">（未绑定）</option>';
+        (candidates || []).forEach(function (c) {
+            var label = c.id + (c.enabled ? "" : "（已禁用）");
+            opts += '<option value="' + escapeHtml(c.id) + '"' +
+                (c.id === current ? " selected" : "") + ">" + escapeHtml(label) + "</option>";
+        });
+        return opts;
+    }
+
+    function loadRoles() {
+        fetch("/api/models/roles")
+            .then(function (r) { return r.json(); })
+            .then(function (roles) {
+                roleVision.innerHTML = roleOptions(roles.vision_candidates, roles.vision_model);
+                roleEmbedding.innerHTML = roleOptions(roles.embedding_candidates, roles.embedding_model);
+                roleRerank.innerHTML = roleOptions(roles.rerank_candidates, roles.rerank_model);
+            });
+    }
+
+    function saveRoles() {
+        var payload = {
+            vision_model: roleVision.value,
+            embedding_model: roleEmbedding.value,
+            rerank_model: roleRerank.value,
+        };
+        fetch("/api/models/roles", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        }).then(function (r) {
+            if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+            return r.json();
+        }).then(function (d) {
+            showToast(
+                d.restart_required
+                    ? "已保存，向量 / 重排绑定需完整重启后生效"
+                    : "角色绑定已保存",
+                "success"
+            );
+            loadRoles();
+        }).catch(function (err) { showToast("保存失败：" + err.message, "error"); });
+    }
+
     function loadModels() {
         fetch("/api/models/status")
             .then(function (r) { return r.json(); })
@@ -84,29 +156,107 @@ function initModels() {
                     models.map(function (m) {
                         return '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.id) + '</option>';
                     }).join("");
-                listEl.innerHTML = models.map(function (m) {
-                    var badges = "";
-                    if (m.is_primary) badges += '<span class="badge badge-primary">主模型</span>';
-                    if (m.is_fallback) badges += '<span class="badge badge-fallback">兜底</span>';
-                    if (!m.enabled) badges += '<span class="badge badge-fallback">已禁用</span>';
-                    var actions = '<div class="model-card-footer">';
-                    if (m.enabled && !m.is_primary) {
-                        actions += '<button class="btn-primary btn-switch" data-id="' + m.id + '">设为主模型</button> ';
-                    }
-                    actions += '<button class="btn-edit" data-action="edit-model" data-id="' + m.id + '">编辑</button> ';
-                    if (!m.is_primary) {
-                        actions += '<button class="btn-danger" data-action="delete-model" data-id="' + m.id + '">删除</button>';
-                    }
-                    actions += "</div>";
-                    return '<div class="model-card">' +
-                        "<h5>" + m.id + " " + badges + "</h5>" +
-                        "<p>" + m.provider + " / " + m.model + "</p>" +
-                        "<p>" + m.type + " · " + m.temperature + " · " + m.max_tokens + " tokens · " + m.timeout_seconds + "s</p>" +
-                        "<p>" + (m.pricing ? "已配置 " + m.billing_currency + " 计价" : "未计价") + "</p>" +
-                        actions +
-                        "</div>";
-                }).join("");
+                renderModels();
             });
+        loadRoles();
+    }
+
+    function initCategoryNav() {
+        document.querySelectorAll("[data-model-cat]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                activateCategory(btn.getAttribute("data-model-cat"));
+            });
+        });
+    }
+
+    function activateCategory(cat) {
+        currentCat = cat;
+        document.querySelectorAll("[data-model-cat]").forEach(function (item) {
+            item.classList.toggle("active", item.getAttribute("data-model-cat") === cat);
+        });
+        createBtn.style.display = cat === "roles" ? "none" : "";
+        renderModels();
+    }
+
+    // Older running processes may not include modality yet. Treat those
+    // profiles as chat models so the card never renders "undefined".
+    function modelModality(m) {
+        return m.modality || "chat";
+    }
+
+    function renderModels() {
+        var counts = { chat: 0, embedding: 0, rerank: 0 };
+        allModels.forEach(function (m) {
+            var mod = modelModality(m);
+            if (counts[mod] !== undefined) counts[mod] += 1;
+        });
+        Object.keys(counts).forEach(function (cat) {
+            var badge = document.querySelector('[data-cat-count="' + cat + '"]');
+            if (badge) badge.textContent = counts[cat];
+        });
+
+        if (currentCat === "roles") {
+            // .card-grid sets display:grid, which overrides the [hidden] UA rule,
+            // so toggle inline display explicitly to hide the model list.
+            listEl.style.display = "none";
+            rolesPane.hidden = false;
+            return;
+        }
+        rolesPane.hidden = true;
+        listEl.style.display = "";
+
+        var items = allModels.filter(function (m) { return modelModality(m) === currentCat; });
+        if (!items.length) {
+            listEl.innerHTML = '<div class="empty-state">暂无' +
+                (modalityLabels[currentCat] || "") +
+                '模型，点击右上角“添加模型”创建</div>';
+            return;
+        }
+        listEl.innerHTML = items.map(modelCardHtml).join("");
+    }
+
+    function modelCardHtml(m) {
+        var modality = modelModality(m);
+        var modalityLabel = modalityLabels[modality] || "其他";
+        var badges = '<span class="badge badge-modality badge-modality-' + modality + '">' + modalityLabel + '</span>';
+        if (m.is_primary) badges += '<span class="badge badge-primary">主模型</span>';
+        if (m.is_fallback) badges += '<span class="badge badge-fallback">兜底</span>';
+        if (!m.enabled) badges += '<span class="badge badge-fallback">已禁用</span>';
+        var actions = '<div class="model-card-footer">';
+        if (modality === "chat" && m.enabled && !m.is_primary) {
+            actions += '<button class="btn-primary btn-switch" data-id="' + m.id + '">设为主模型</button> ';
+        }
+        actions += '<button class="btn-edit" data-action="edit-model" data-id="' + m.id + '">编辑</button> ';
+        if (!m.is_primary) {
+            actions += '<button class="btn-danger" data-action="delete-model" data-id="' + m.id + '">删除</button>';
+        }
+        actions += "</div>";
+        var detail;
+        var modelType = m.type || "未指定类型";
+        var timeout = m.timeout_seconds != null ? m.timeout_seconds + "s" : "未设置超时";
+        if (modality === "embedding") {
+            detail = modelType + " · " + (m.dimensions || "?") + " 维 · " + timeout;
+        } else if (modality === "rerank") {
+            detail = modelType + " · " + timeout;
+        } else {
+            var temperature = m.temperature != null ? m.temperature : "—";
+            var maxTokens = m.max_tokens != null ? m.max_tokens + " tokens" : "未设置 Token";
+            detail = modelType + " · " + temperature + " · " + maxTokens + " · " + timeout;
+        }
+        var extra = "";
+        if (modality === "chat") {
+            extra = "<p>" + (m.pricing
+                ? "已配置 " + (m.billing_currency || "CNY") + " 计价"
+                : "未计价") + "</p>";
+        }
+        return '<div class="model-card">' +
+            "<h5>" + escapeHtml(m.id || "未命名档案") + " " + badges + "</h5>" +
+            "<p>" + escapeHtml(m.provider || "未指定厂商") + " / " +
+            escapeHtml(m.model || "未指定模型") + "</p>" +
+            "<p>" + escapeHtml(detail) + "</p>" +
+            extra +
+            actions +
+            "</div>";
     }
 
     listEl.addEventListener("click", function (e) {
@@ -157,19 +307,26 @@ function initModels() {
                     modalTitle.textContent = "编辑模型";
                     idGroup.style.display = "none";
                     document.getElementById("model-id").value = m.id;
+                    document.getElementById("model-modality").value = m.modality || "chat";
                     document.getElementById("model-provider").value = m.provider;
                     document.getElementById("model-type").value = m.type;
                     document.getElementById("model-base-url").value = m.base_url || "";
                     document.getElementById("model-name").value = m.model;
                     document.getElementById("model-api-key-env").value = m.api_key_env || "";
+                    document.getElementById("model-dimensions").value = m.dimensions || "";
                     document.getElementById("model-temperature").value = m.temperature;
                     document.getElementById("model-max-tokens").value = m.max_tokens;
                     document.getElementById("model-timeout").value = m.timeout_seconds;
                     document.getElementById("model-enabled").checked = m.enabled;
+                    var caps = m.capabilities || {};
+                    document.getElementById("model-cap-tools").checked = !!caps.tools;
+                    document.getElementById("model-cap-vision").checked = !!caps.vision;
+                    document.getElementById("model-cap-reasoning").checked = !!caps.reasoning;
                     document.getElementById("price-input").value = m.pricing ? m.pricing.input_per_million : "";
                     document.getElementById("price-cached").value = m.pricing ? (m.pricing.cached_input_per_million || "") : "";
                     document.getElementById("price-output").value = m.pricing ? m.pricing.output_per_million : "";
                     document.getElementById("price-reasoning").value = m.pricing ? (m.pricing.reasoning_output_per_million || "") : "";
+                    applyModalityVisibility();
                     openModal();
                 });
         }
@@ -177,32 +334,48 @@ function initModels() {
 
     form.addEventListener("submit", function (e) {
         e.preventDefault();
+        var modality = document.getElementById("model-modality").value;
         var payload = {
+            modality: modality,
             type: document.getElementById("model-type").value,
             provider: document.getElementById("model-provider").value,
             base_url: document.getElementById("model-base-url").value,
             model: document.getElementById("model-name").value,
             api_key_env: document.getElementById("model-api-key-env").value || null,
-            temperature: parseFloat(document.getElementById("model-temperature").value),
-            max_tokens: parseInt(document.getElementById("model-max-tokens").value),
             timeout_seconds: parseFloat(document.getElementById("model-timeout").value),
             enabled: document.getElementById("model-enabled").checked,
         };
-        var inputPrice = document.getElementById("price-input").value.trim();
-        var outputPrice = document.getElementById("price-output").value.trim();
-        if ((inputPrice && !outputPrice) || (!inputPrice && outputPrice)) {
-            showToast("普通输入与普通输出价格必须同时填写", "error");
-            return;
-        }
-        if (inputPrice && outputPrice) {
-            payload.pricing = {
-                input_per_million: inputPrice,
-                cached_input_per_million: document.getElementById("price-cached").value.trim() || null,
-                output_per_million: outputPrice,
-                reasoning_output_per_million: document.getElementById("price-reasoning").value.trim() || null,
+        if (modality === "chat") {
+            payload.temperature = parseFloat(document.getElementById("model-temperature").value);
+            payload.max_tokens = parseInt(document.getElementById("model-max-tokens").value);
+            payload.capabilities = {
+                tools: document.getElementById("model-cap-tools").checked,
+                vision: document.getElementById("model-cap-vision").checked,
+                reasoning: document.getElementById("model-cap-reasoning").checked,
             };
-        } else if (editingId) {
-            payload.pricing = null;
+            var inputPrice = document.getElementById("price-input").value.trim();
+            var outputPrice = document.getElementById("price-output").value.trim();
+            if ((inputPrice && !outputPrice) || (!inputPrice && outputPrice)) {
+                showToast("普通输入与普通输出价格必须同时填写", "error");
+                return;
+            }
+            if (inputPrice && outputPrice) {
+                payload.pricing = {
+                    input_per_million: inputPrice,
+                    cached_input_per_million: document.getElementById("price-cached").value.trim() || null,
+                    output_per_million: outputPrice,
+                    reasoning_output_per_million: document.getElementById("price-reasoning").value.trim() || null,
+                };
+            } else if (editingId) {
+                payload.pricing = null;
+            }
+        } else if (modality === "embedding") {
+            var dims = document.getElementById("model-dimensions").value.trim();
+            if (!dims) {
+                showToast("向量模型必须填写向量维度", "error");
+                return;
+            }
+            payload.dimensions = parseInt(dims);
         }
 
         var url, method;
@@ -222,8 +395,18 @@ function initModels() {
         })
             .then(function (r) {
                 if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-                showToast(editingId ? "已保存修改" : "已添加模型", "success");
+                return r.json();
+            })
+            .then(function (d) {
+                var restart = d && d.restart_required;
+                showToast(
+                    (editingId ? "已保存修改" : "已添加模型") +
+                        (restart ? "，向量 / 重排模型需完整重启后生效" : ""),
+                    "success"
+                );
                 closeModal();
+                // Jump to the category matching the saved model so it is visible.
+                activateCategory(modality);
                 loadModels();
             })
             .catch(function (err) { showToast("保存失败：" + err.message, "error"); });
@@ -239,7 +422,8 @@ function initModels() {
                 document.querySelectorAll("[data-model-pane]").forEach(function (pane) {
                     pane.classList.toggle("active", pane.getAttribute("data-model-pane") === tab);
                 });
-                document.getElementById("create-model-btn").style.display = tab === "config" ? "" : "none";
+                document.getElementById("create-model-btn").style.display =
+                    (tab === "config" && currentCat !== "roles") ? "" : "none";
                 if (tab === "usage" || tab === "quality") loadAnalytics();
                 if (tab === "budgets") loadBudgets();
             });

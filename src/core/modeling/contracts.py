@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 
 @dataclass(frozen=True)
@@ -115,5 +115,38 @@ class ModelClient(Protocol):
     def ensure_ready(self) -> None: ...
 
     def complete(self, request: ModelRequest) -> ModelResponse: ...
+
+    def close(self) -> None: ...
+
+
+class EmbeddingError(RuntimeError):
+    """Sanitized embedding error safe to surface outside the adapter layer."""
+
+
+class RerankError(RuntimeError):
+    """Sanitized rerank error safe to surface outside the adapter layer."""
+
+
+class EmbeddingClient(Protocol):
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def dimensions(self) -> int: ...
+
+    def embed(self, texts: List[str]) -> List[List[float]]: ...
+
+    def close(self) -> None: ...
+
+
+class RerankClient(Protocol):
+    @property
+    def model_id(self) -> str: ...
+
+    def rerank(
+        self, query: str, documents: List[str], top_n: Optional[int] = None
+    ) -> List[Tuple[int, float]]:
+        """Return (original_index, score) pairs sorted by descending score."""
+        ...
 
     def close(self) -> None: ...

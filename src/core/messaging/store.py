@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import base64
+import secrets
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional
@@ -25,83 +27,165 @@ def _stable_id(prefix: str, *parts: str) -> str:
     return "{}-{}".format(prefix, hashlib.sha256(raw).hexdigest()[:32])
 
 
+class ChannelBindingError(ValueError):
+    """Raised when a cross-channel identity binding cannot be completed."""
+
+
 class ChannelAddressStore:
     """Map external channel identities to canonical tenants and endpoints."""
 
     def __init__(self, registry: TenantRegistry) -> None:
         self.registry = registry
-        self._backfill_legacy()
-
-    def _backfill_legacy(self) -> None:
-        now = _iso(_now())
-        with self.registry.database.transaction(immediate=True) as connection:
-            rows = connection.execute(
-                "SELECT tenant_id, bot_id, user_id, created_at FROM tenants "
-                "WHERE deleting=0"
-            ).fetchall()
-            for row in rows:
-                tenant_id = str(row["tenant_id"])
-                account_id = str(row["bot_id"])
-                user_id = str(row["user_id"])
-                identity_id = _stable_id(
-                    "identity", "wechat-main", account_id, user_id
-                )
-                connection.execute(
-                    "INSERT OR IGNORE INTO channel_identities("
-                    "identity_id, tenant_id, channel_id, platform, account_id, "
-                    "external_user_id, created_at, last_seen_at"
-                    ") VALUES (?, ?, 'wechat-main', 'wechat_ilink', ?, ?, ?, ?)",
-                    (
-                        identity_id,
-                        tenant_id,
-                        account_id,
-                        user_id,
-                        str(row["created_at"]),
-                        now,
-                    ),
-                )
-                recipient = connection.execute(
-                    "SELECT user_id, context_token, updated_at FROM recipients "
-                    "WHERE tenant_id=?",
-                    (tenant_id,),
-                ).fetchone()
-                if recipient is None:
-                    continue
-                endpoint_id = _stable_id(
-                    "endpoint",
-                    "wechat-main",
-                    account_id,
-                    "direct",
-                    str(recipient["user_id"]),
-                    str(recipient["user_id"]),
-                    "",
-                )
-                connection.execute(
-                    "INSERT OR IGNORE INTO delivery_endpoints("
-                    "endpoint_id, identity_id, tenant_id, channel_id, platform, "
-                    "account_id, conversation_type, conversation_id, recipient_id, "
-                    "thread_id, route_context_json, status, last_seen_at"
-                    ") VALUES (?, ?, ?, 'wechat-main', 'wechat_ilink', ?, "
-                    "'direct', ?, ?, '', ?, 'active', ?)",
-                    (
-                        endpoint_id,
-                        identity_id,
-                        tenant_id,
-                        account_id,
-                        str(recipient["user_id"]),
-                        str(recipient["user_id"]),
-                        json.dumps(
-                            {"context_token": str(recipient["context_token"])},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        str(recipient["updated_at"]),
-                    ),
-                )
 
     @staticmethod
     def _identity(row: Any) -> str:
         return str(row["identity_id"])
+
+    @staticmethod
+    def _binding_hash(code: str) -> str:
+        return hashlib.sha256(code.strip().upper().encode("ascii")).hexdigest()
+
+    def issue_binding_code(
+        self,
+        tenant: TenantContext,
+        message: InboundMessage,
+        *,
+        lifetime_minutes: int = 10,
+    ) -> str:
+        if message.conversation_type != "direct":
+            raise ChannelBindingError("绑定码只能在私聊中生成")
+        now = _now()
+        expires_at = now + timedelta(minutes=max(1, lifetime_minutes))
+        code = base64.b32encode(secrets.token_bytes(7)).decode("ascii").rstrip("=")[:10]
+        token_hash = self._binding_hash(code)
+        with self.registry.database.transaction(immediate=True) as connection:
+            identity = connection.execute(
+                "SELECT identity_id, tenant_id FROM channel_identities "
+                "WHERE channel_id=? AND account_id=? AND external_user_id=?",
+                (message.channel_id, message.account_id, message.sender_id),
+            ).fetchone()
+            if identity is None or str(identity["tenant_id"]) != tenant.tenant_id:
+                raise ChannelBindingError("当前消息身份尚未绑定租户")
+            connection.execute(
+                "DELETE FROM channel_binding_codes "
+                "WHERE expires_at<=? OR used_at IS NOT NULL",
+                (_iso(now),),
+            )
+            connection.execute(
+                "INSERT INTO channel_binding_codes("
+                "token_hash, tenant_id, identity_id, created_at, expires_at"
+                ") VALUES (?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    tenant.tenant_id,
+                    str(identity["identity_id"]),
+                    _iso(now),
+                    _iso(expires_at),
+                ),
+            )
+        return code
+
+    def bind_with_code(
+        self,
+        message: InboundMessage,
+        code: str,
+        *,
+        max_attempts: int = 5,
+        attempt_window_minutes: int = 10,
+    ) -> TenantContext:
+        if message.conversation_type != "direct":
+            raise ChannelBindingError("绑定码只能在私聊中使用")
+        normalized = code.strip().upper()
+        if len(normalized) != 10 or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+            for character in normalized
+        ):
+            raise ChannelBindingError("绑定码格式无效")
+        now = _now()
+        cutoff = _iso(now - timedelta(minutes=max(1, attempt_window_minutes)))
+        token_hash = self._binding_hash(normalized)
+        identity_id = _stable_id(
+            "identity",
+            message.channel_id,
+            message.account_id,
+            message.sender_id,
+        )
+        # Attempt accounting must commit even when the supplied code is invalid.
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM channel_binding_attempts WHERE attempted_at<?",
+                (_iso(now - timedelta(days=1)),),
+            )
+            attempts = connection.execute(
+                "SELECT COUNT(*) FROM channel_binding_attempts "
+                "WHERE channel_id=? AND account_id=? AND external_user_id=? "
+                "AND attempted_at>=?",
+                (
+                    message.channel_id,
+                    message.account_id,
+                    message.sender_id,
+                    cutoff,
+                ),
+            ).fetchone()
+            if attempts is not None and int(attempts[0]) >= max_attempts:
+                raise ChannelBindingError("绑定尝试过于频繁，请稍后再试")
+            connection.execute(
+                "INSERT INTO channel_binding_attempts("
+                "channel_id, account_id, external_user_id, attempted_at"
+                ") VALUES (?, ?, ?, ?)",
+                (
+                    message.channel_id,
+                    message.account_id,
+                    message.sender_id,
+                    _iso(now),
+                ),
+            )
+        with self.registry.database.transaction(immediate=True) as connection:
+            binding = connection.execute(
+                "SELECT tenant_id FROM channel_binding_codes "
+                "WHERE token_hash=? AND used_at IS NULL AND expires_at>?",
+                (token_hash, _iso(now)),
+            ).fetchone()
+            if binding is None:
+                raise ChannelBindingError("绑定码无效或已经过期")
+            target_tenant_id = str(binding["tenant_id"])
+            existing = connection.execute(
+                "SELECT tenant_id FROM channel_identities "
+                "WHERE channel_id=? AND account_id=? AND external_user_id=?",
+                (
+                    message.channel_id,
+                    message.account_id,
+                    message.sender_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["tenant_id"]) != target_tenant_id:
+                    raise ChannelBindingError(
+                        "当前渠道身份已有独立数据，不能自动合并"
+                    )
+            else:
+                seen_at = message.occurred_at or _iso(now)
+                connection.execute(
+                    "INSERT INTO channel_identities("
+                    "identity_id, tenant_id, channel_id, platform, account_id, "
+                    "external_user_id, created_at, last_seen_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        identity_id,
+                        target_tenant_id,
+                        message.channel_id,
+                        message.platform,
+                        message.account_id,
+                        message.sender_id,
+                        seen_at,
+                        seen_at,
+                    ),
+                )
+            connection.execute(
+                "UPDATE channel_binding_codes SET used_at=? WHERE token_hash=?",
+                (_iso(now), token_hash),
+            )
+        return self.registry.get(target_tenant_id)
 
     def resolve(self, message: InboundMessage) -> TenantContext:
         with self.registry.database.read() as connection:
@@ -259,12 +343,15 @@ class ChannelAddressStore:
         self,
         tenant_id: str,
         channel_id: Optional[str] = None,
+        include_non_direct: bool = False,
     ) -> Optional[DeliveryEndpoint]:
         query = (
             "SELECT * FROM delivery_endpoints "
             "WHERE tenant_id=? AND status='active'"
         )
         values: List[Any] = [tenant_id]
+        if not include_non_direct:
+            query += " AND conversation_type='direct'"
         if channel_id:
             query += " AND channel_id=?"
             values.append(channel_id)

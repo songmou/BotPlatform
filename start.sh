@@ -58,7 +58,7 @@ if [ "$VENV_PREFIX" != "$EXPECTED_PREFIX" ]; then
 fi
 
 if ! "$VENV_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-  echo "Codex 任务插件要求 Python 3.10 或更高版本，请重新创建 .venv。" >&2
+  echo "BotPlatform 要求 Python 3.10 或更高版本，请重新创建 .venv。" >&2
   exit 1
 fi
 

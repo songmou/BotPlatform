@@ -2,19 +2,19 @@
 
 本文件为 AI 智能体在本仓库中工作提供指引。
 
-BotPlatform 是一个微信（iLink）AI 机器人，外加一个 FastAPI Web 管理面板。支持多租户，具备可审批的本机工具、知识库、记忆、定时任务、插件以及 MCP。
+BotPlatform 是一个轻量级的AI中台的项目，外加一个 FastAPI Web 管理面板。支持多租户，具备可审批的本机工具、知识库、记忆、定时任务、插件以及 MCP。
 
 ## 导入根路径
 - 所有真实代码位于 `src.core.*`（bot/services/storage/tooling/…）与 `src.api.*`（Web 面板）之下。请从这些路径导入，**不要**从 `src.*` 导入。
-- 顶层的 `src/config`、`src/application` 等是空的陈旧目录 —— 请忽略。
 
 ## 入口
-- `main.py` → 微信机器人（`src.core.application.cli`）。也可用 `python -m src`。
+- `main.py` → 主入口（`src.core.application.cli`）。也可用 `python -m src`。
 - `web.py` → FastAPI 管理面板，默认 `--host 127.0.0.1 --port 8080`。
 - `./start.sh` / `.\start.ps1` 封装 `main.py`；`./start.sh web ...` 运行 `web.py`。
 
 ## 配置：无热重载，冻结数据类
 - 修改 `config/*.json` 中的任何内容都需要完整重启进程 —— 没有热重载。
+- 内置后台脚本没有集中式配置文件：每个脚本是 `src/core/jobs/<目录>/` 下的自包含文件夹，由同目录的 `script.json` 清单声明，启动时自动扫描发现（无 `script.json` 的目录被忽略，可作共享辅助包）；`config/scripts.json` 已移除。
 - 改完代码后，务必确认已真正杀掉旧进程再重启（同端口上残留的旧服务是常见坑）。`web.py`/`uvicorn` 运行时不带 `--reload`。
 - `ProjectConfig` 及所有配置数据类都是 `@dataclass(frozen=True)`。若要在运行时更新 `config.skills`/`config.mcp_servers`（例如 API 写入后刷新），必须调用 `config.update_skills(...)` / `config.update_mcp_servers(...)` —— 它们会先用 loader 的校验规则验证，再就地替换列表内容（引用不变，持有者自动可见）。禁止用 `object.__setattr__` 绕过冻结校验；直接赋值会抛出 `FrozenInstanceError`。
 

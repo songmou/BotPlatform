@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 21
+LATEST_SCHEMA_VERSION = 23
 
 
 SCHEMA_V1 = r"""
@@ -203,29 +203,7 @@ CREATE INDEX IF NOT EXISTS ix_memory_tenant_status
 """
 
 
-SCHEMA_V2 = r"""
-CREATE TABLE IF NOT EXISTS codex_task_runs (
-    thread_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    project_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (
-        status IN ('queued', 'running', 'completed', 'failed', 'interrupted')
-    ),
-    created_at TEXT NOT NULL,
-    started_at TEXT,
-    finished_at TEXT,
-    result_excerpt TEXT,
-    error TEXT,
-    notification_status TEXT NOT NULL DEFAULT 'pending' CHECK (
-        notification_status IN ('pending', 'sent', 'failed', 'disabled')
-    )
-);
-CREATE INDEX IF NOT EXISTS ix_codex_task_runs_tenant_status
-    ON codex_task_runs(tenant_id, status, created_at DESC);
-CREATE INDEX IF NOT EXISTS ix_codex_task_runs_project_created
-    ON codex_task_runs(project_id, created_at DESC);
-"""
+SCHEMA_V2 = "-- Retired legacy plugin schema."
 
 
 SCHEMA_V3 = r"""
@@ -240,154 +218,13 @@ CREATE INDEX IF NOT EXISTS ix_legacy_imports_target
 """
 
 
-SCHEMA_V4 = r"""
-ALTER TABLE codex_task_runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'botplatform'
-    CHECK (origin IN ('botplatform', 'external'));
-ALTER TABLE codex_task_runs ADD COLUMN phase TEXT NOT NULL DEFAULT 'queued'
-    CHECK (phase IN (
-        'queued', 'running', 'waiting_approval', 'waiting_input',
-        'completed', 'failed', 'interrupted'
-    ));
-ALTER TABLE codex_task_runs ADD COLUMN updated_at TEXT;
-ALTER TABLE codex_task_runs ADD COLUMN last_seen_at TEXT;
-
-UPDATE codex_task_runs
-SET phase=status,
-    updated_at=COALESCE(finished_at, started_at, created_at),
-    last_seen_at=COALESCE(finished_at, started_at, created_at);
-
-CREATE TABLE IF NOT EXISTS codex_task_interactions (
-    interaction_id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL REFERENCES codex_task_runs(thread_id) ON DELETE CASCADE,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    turn_id TEXT NOT NULL,
-    item_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('approval', 'user_input')),
-    method TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    response_json TEXT,
-    status TEXT NOT NULL CHECK (
-        status IN (
-            'pending', 'approved', 'declined', 'answered',
-            'expired', 'cancelled'
-        )
-    ),
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    resolved_at TEXT,
-    UNIQUE(thread_id, turn_id, item_id, method)
-);
-CREATE INDEX IF NOT EXISTS ix_codex_interactions_tenant_status
-    ON codex_task_interactions(tenant_id, status, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS codex_task_events (
-    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_key TEXT NOT NULL UNIQUE,
-    thread_id TEXT NOT NULL REFERENCES codex_task_runs(thread_id) ON DELETE CASCADE,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL CHECK (
-        event_type IN (
-            'waiting_approval', 'waiting_input', 'completed', 'failed',
-            'interrupted', 'interaction_expired'
-        )
-    ),
-    message TEXT NOT NULL,
-    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
-        delivery_status IN ('pending', 'sending', 'retry', 'sent', 'failed', 'disabled')
-    ),
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT,
-    created_at TEXT NOT NULL,
-    sent_at TEXT,
-    last_error TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_codex_events_delivery
-    ON codex_task_events(delivery_status, next_attempt_at, event_id);
-"""
+SCHEMA_V4 = "-- Retired legacy plugin schema."
 
 
-SCHEMA_V5 = r"""
-CREATE TABLE codex_task_events_v5 (
-    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_key TEXT NOT NULL UNIQUE,
-    thread_id TEXT NOT NULL REFERENCES codex_task_runs(thread_id) ON DELETE CASCADE,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL CHECK (
-        event_type IN (
-            'queued', 'running', 'waiting_approval', 'waiting_input',
-            'completed', 'failed', 'interrupted', 'interaction_expired'
-        )
-    ),
-    message TEXT NOT NULL,
-    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
-        delivery_status IN ('pending', 'sending', 'retry', 'sent', 'failed', 'disabled')
-    ),
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT,
-    created_at TEXT NOT NULL,
-    sent_at TEXT,
-    last_error TEXT
-);
-INSERT INTO codex_task_events_v5(
-    event_id, event_key, thread_id, tenant_id, event_type, message,
-    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
-)
-SELECT
-    event_id, event_key, thread_id, tenant_id, event_type, message,
-    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
-FROM codex_task_events;
-DROP TABLE codex_task_events;
-ALTER TABLE codex_task_events_v5 RENAME TO codex_task_events;
-CREATE INDEX ix_codex_events_delivery
-    ON codex_task_events(delivery_status, next_attempt_at, event_id);
-"""
+SCHEMA_V5 = "-- Retired legacy plugin schema."
 
 
-SCHEMA_V6 = r"""
-ALTER TABLE codex_task_runs ADD COLUMN source_cwd TEXT;
-
-CREATE TABLE codex_task_events_v6 (
-    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_key TEXT NOT NULL UNIQUE,
-    thread_id TEXT NOT NULL REFERENCES codex_task_runs(thread_id) ON DELETE CASCADE,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL CHECK (
-        event_type IN (
-            'queued', 'running', 'waiting_approval', 'waiting_input',
-            'completed', 'failed', 'interrupted', 'interaction_expired'
-        )
-    ),
-    message TEXT NOT NULL,
-    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
-        delivery_status IN (
-            'pending', 'sending', 'retry', 'waiting_recipient',
-            'sent', 'failed', 'disabled'
-        )
-    ),
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT,
-    created_at TEXT NOT NULL,
-    sent_at TEXT,
-    last_error TEXT
-);
-INSERT INTO codex_task_events_v6(
-    event_id, event_key, thread_id, tenant_id, event_type, message,
-    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
-)
-SELECT
-    event_id, event_key, thread_id, tenant_id, event_type, message,
-    delivery_status, attempt_count, next_attempt_at, created_at, sent_at, last_error
-FROM codex_task_events;
-DROP TABLE codex_task_events;
-ALTER TABLE codex_task_events_v6 RENAME TO codex_task_events;
-CREATE INDEX ix_codex_events_delivery
-    ON codex_task_events(delivery_status, next_attempt_at, event_id);
-UPDATE codex_task_events
-SET delivery_status='waiting_recipient', next_attempt_at=NULL
-WHERE delivery_status='retry'
-  AND attempt_count>=3
-  AND lower(COALESCE(last_error, '')) LIKE '%prepare failed%';
-"""
+SCHEMA_V6 = "-- Retired legacy plugin schema."
 
 
 SCHEMA_V7 = r"""
@@ -1051,6 +888,84 @@ WHERE category_id = 'public-default'
 """
 
 
+SCHEMA_V22 = r"""
+DROP TABLE IF EXISTS codex_task_events;
+DROP TABLE IF EXISTS codex_task_interactions;
+DROP TABLE IF EXISTS codex_task_runs;
+"""
+
+SCHEMA_V22_PERMISSIONS = r"""
+UPDATE admin_roles
+SET permissions = CASE
+    WHEN trim(permissions) = '[]' THEN '["plugins.read"]'
+    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
+         || ',"plugins.read"]'
+END
+WHERE code IN ('editor', 'viewer')
+  AND instr(permissions, '"plugins.read"') = 0;
+
+UPDATE admin_roles
+SET permissions = CASE
+    WHEN trim(permissions) = '[]' THEN '["plugins.manage"]'
+    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
+         || ',"plugins.manage"]'
+END
+WHERE code = 'editor'
+  AND instr(permissions, '"plugins.manage"') = 0;
+"""
+
+SCHEMA_V23 = r"""
+DROP INDEX IF EXISTS ix_context_tenant_message;
+CREATE INDEX IF NOT EXISTS ix_context_tenant_session_message
+    ON conversation_context_messages(tenant_id, session_key, message_id);
+CREATE INDEX IF NOT EXISTS ix_conversation_events_tenant_session_time
+    ON conversation_events(tenant_id, session_key, event_id);
+
+CREATE TABLE IF NOT EXISTS channel_binding_codes (
+    token_hash TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    identity_id TEXT REFERENCES channel_identities(identity_id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_channel_binding_codes_expiry
+    ON channel_binding_codes(expires_at, used_at);
+
+CREATE TABLE IF NOT EXISTS channel_binding_attempts (
+    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    attempted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_channel_binding_attempts_identity_time
+    ON channel_binding_attempts(
+        channel_id, account_id, external_user_id, attempted_at
+    );
+"""
+
+SCHEMA_V23_PERMISSIONS = r"""
+UPDATE admin_roles
+SET permissions = CASE
+    WHEN trim(permissions) = '[]' THEN '["channels.read"]'
+    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
+         || ',"channels.read"]'
+END
+WHERE code IN ('editor', 'viewer')
+  AND instr(permissions, '"channels.read"') = 0;
+
+UPDATE admin_roles
+SET permissions = CASE
+    WHEN trim(permissions) = '[]' THEN '["channels.manage"]'
+    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
+         || ',"channels.manage"]'
+END
+WHERE code = 'editor'
+  AND instr(permissions, '"channels.manage"') = 0;
+"""
+
+
 # Versions applied as plain SQL scripts. 12 and 13 are intentionally absent:
 # they require Python-side logic and run via dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
@@ -1073,4 +988,6 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     19: SCHEMA_V19,
     20: SCHEMA_V20,
     21: SCHEMA_V21,
+    22: SCHEMA_V22,
+    23: SCHEMA_V23,
 }

@@ -4,7 +4,10 @@
       "id": "wechat-main",
       "type": "wechat_ilink",
       "enabled": true,
-      "settings": {}
+      "agent_id": "general",
+      "settings": {
+        "group_policy": "private_only"
+      }
     }
   ]
 }

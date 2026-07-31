@@ -12,6 +12,18 @@ from src.core.modeling import ModelError
 from tests.test_web_api import FakeClient, _make_config
 
 FACTORY_TARGET = "src.core.application.services.create_model_client"
+EMBEDDING_TARGET = "src.core.application.services.create_embedding_client"
+RERANK_TARGET = "src.core.application.services.create_rerank_client"
+
+
+class _FakeRoleClient:
+    def __init__(self, profile):
+        self.model_id = profile.id
+        self.dimensions = profile.dimensions
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 class BuildCoreServicesTest(unittest.TestCase):
@@ -41,6 +53,66 @@ class BuildCoreServicesTest(unittest.TestCase):
             return client
 
         return factory
+
+    def _config_with_roles(self, *, embedding_enabled=True, rerank_enabled=True):
+        """Add enabled embedding and rerank profiles bound to app roles."""
+        base = self.config.models["test_model"]
+        emb = dataclasses.replace(
+            base,
+            id="emb_model",
+            modality="embedding",
+            dimensions=4,
+            enabled=embedding_enabled,
+        )
+        rr = dataclasses.replace(
+            base, id="rr_model", modality="rerank", enabled=rerank_enabled
+        )
+        models = dict(self.config.models)
+        models["emb_model"] = emb
+        models["rr_model"] = rr
+        app = dataclasses.replace(
+            self.config.app, embedding_model="emb_model", rerank_model="rr_model"
+        )
+        return dataclasses.replace(self.config, app=app, models=models)
+
+    def test_role_bindings_build_embedding_and_rerank_clients(self):
+        config = self._config_with_roles()
+        created = []
+        with patch(FACTORY_TARGET, self._fake_factory(created)), patch(
+            EMBEDDING_TARGET, _FakeRoleClient
+        ), patch(RERANK_TARGET, _FakeRoleClient):
+            services = build_core_services(config, self.data_dir)
+        self.assertEqual(services.embedding_client.model_id, "emb_model")
+        self.assertEqual(services.rerank_client.model_id, "rr_model")
+        # The knowledge service consumes the same client instances.
+        self.assertIs(
+            services.knowledge_service.embedding, services.embedding_client
+        )
+        self.assertIs(services.knowledge_service.rerank, services.rerank_client)
+        # Only chat profiles become router clients.
+        self.assertNotIn("emb_model", services.clients)
+        self.assertNotIn("rr_model", services.clients)
+        self.assertIn("test_model", services.clients)
+        embedding = services.embedding_client
+        rerank = services.rerank_client
+        services.close()
+        self.assertTrue(embedding.closed)
+        self.assertTrue(rerank.closed)
+
+    def test_disabled_role_bindings_leave_clients_unset(self):
+        config = self._config_with_roles(
+            embedding_enabled=False, rerank_enabled=False
+        )
+        created = []
+        with patch(FACTORY_TARGET, self._fake_factory(created)), patch(
+            EMBEDDING_TARGET
+        ) as emb_factory, patch(RERANK_TARGET) as rr_factory:
+            services = build_core_services(config, self.data_dir)
+        self.assertIsNone(services.embedding_client)
+        self.assertIsNone(services.rerank_client)
+        emb_factory.assert_not_called()
+        rr_factory.assert_not_called()
+        services.close()
 
     def test_strict_build_wires_graph_and_close_releases_clients(self):
         created = []

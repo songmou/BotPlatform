@@ -23,8 +23,19 @@ from .errors import (
     UnsupportedCapability,
 )
 from .router import MessageRouter
-from .manager import ChannelManager, ChannelStatus
-from .store import ChannelAddressStore, MessageInboxStore
+from .manager import ChannelManager, ChannelStatus, ChannelStatusRegistry
+from .store import ChannelAddressStore, ChannelBindingError, MessageInboxStore
+from .credentials import (
+    ChannelCredentialError,
+    ChannelCredentialStore,
+    validate_channel_credentials,
+)
+from .providers import (
+    ChannelProvider,
+    build_channel_adapter,
+    channel_provider,
+    list_channel_providers,
+)
 
 __all__ = [
     "CHANNEL",
@@ -48,6 +59,15 @@ __all__ = [
     "MessageRouter",
     "ChannelManager",
     "ChannelStatus",
+    "ChannelStatusRegistry",
     "ChannelAddressStore",
+    "ChannelBindingError",
     "MessageInboxStore",
+    "ChannelCredentialError",
+    "ChannelCredentialStore",
+    "validate_channel_credentials",
+    "ChannelProvider",
+    "build_channel_adapter",
+    "channel_provider",
+    "list_channel_providers",
 ]

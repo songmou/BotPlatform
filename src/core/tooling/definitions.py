@@ -40,6 +40,16 @@ def _object_schema(
 
 
 TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
+    "ocr_extract_text": {
+        "description": (
+            "识别当前用户 workspace 内图片或 PDF 中的文字。"
+            "支持 JPEG、PNG、WebP、BMP、GIF 首帧和最多 10 页的 PDF。"
+        ),
+        "parameters": _object_schema(
+            {"path": {"type": "string", "description": "workspace 内的文件路径"}},
+            ["path"],
+        ),
+    },
     "knowledge_add_text": {
         "description": "把用户明确提供的纯文本保存到当前用户的私人知识库。",
         "parameters": _object_schema(

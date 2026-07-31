@@ -70,41 +70,13 @@
         </div>
     </div>
 
-    <!-- 插件工具 -->
-    <div class="tools-pane" id="tools-pane-plugins" style="display:none">
-        <div class="page-header">
-            <div class="page-header-row">
-                <div>
-                    <h2>插件工具</h2>
-                    <p class="page-desc">管理已注册的插件工具</p>
-                </div>
-            </div>
-        </div>
-
-        <div class="toolbar">
-            <div class="toolbar-left">
-                <div class="search-box">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-                    <input type="text" id="plugin-search" placeholder="搜索插件工具...">
-                </div>
-                <select id="plugin-filter-status" class="filter-select">
-                    <option value="">全部状态</option>
-                    <option value="enabled">已启用</option>
-                    <option value="disabled">已禁用</option>
-                </select>
-            </div>
-        </div>
-
-        <div id="plugin-list" class="plugin-card-grid"></div>
-    </div>
-
     <!-- 内置工具 -->
     <div class="tools-pane" id="tools-pane-builtin" style="display:none">
         <div class="page-header">
             <div class="page-header-row">
                 <div>
-                    <h2>内置工具 <span id="builtin-tools-count" class="text-muted"></span></h2>
-                    <p class="page-desc">系统内置的基础工具</p>
+                    <h2>工具管理 <span id="builtin-tools-count" class="text-muted"></span></h2>
+                    <p class="page-desc">管理系统内置工具与已配置插件提供的具体工具</p>
                 </div>
             </div>
         </div>
@@ -156,59 +128,6 @@
         </div>
         <div id="audit-load-more-wrap" style="display:none;margin-top:12px">
             <button id="audit-load-more" class="btn-secondary">加载更多</button>
-        </div>
-    </div>
-</div>
-
-<!-- Plugin Detail Modal -->
-<div id="plugin-modal" class="modal-overlay" style="display:none">
-    <div class="modal modal-lg">
-        <div class="modal-header">
-            <div class="modal-title-row">
-                <div class="plugin-icon-lg" id="plugin-modal-icon"></div>
-                <div>
-                    <h3 id="plugin-modal-title">插件详情</h3>
-                    <span class="modal-subtitle" id="plugin-modal-subtitle"></span>
-                </div>
-            </div>
-            <button id="plugin-modal-close" class="modal-close-btn">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div class="plugin-detail-section">
-                <div class="plugin-detail-row">
-                    <span class="detail-label">状态</span>
-                    <label class="switch-label">
-                        <input type="checkbox" id="plugin-enabled">
-                        <span class="switch"></span>
-                        <span id="plugin-status-text">启用</span>
-                    </label>
-                </div>
-                <div class="plugin-detail-row">
-                    <span class="detail-label">工具数量</span>
-                    <span id="plugin-tool-count" class="detail-value">0</span>
-                </div>
-            </div>
-
-            <div class="plugin-detail-section">
-                <h4 class="section-title">工具定义</h4>
-                <div id="plugin-tools-table"></div>
-            </div>
-
-            <div class="plugin-detail-section">
-                <div class="section-title-row">
-                    <h4 class="section-title">插件设置</h4>
-                    <button type="button" id="plugin-edit-settings-btn" class="btn-text">编辑</button>
-                </div>
-                <pre id="plugin-settings-view" class="json-view"></pre>
-                <div id="plugin-settings-edit-wrap" style="display:none">
-                    <textarea id="plugin-settings" rows="10" placeholder='{"key": "value"}' style="font-family:monospace;font-size:13px;width:100%;resize:vertical"></textarea>
-                    <small>以 JSON 格式编辑插件设置</small>
-                </div>
-            </div>
-        </div>
-        <div class="modal-footer">
-            <button type="button" id="plugin-modal-cancel" class="btn-secondary">关闭</button>
-            <button type="button" id="plugin-save-btn" class="btn-primary">保存</button>
         </div>
     </div>
 </div>

@@ -1,0 +1,17 @@
+{
+  "id": "ctsoa_check",
+  "name": "CTS OA 待办查询",
+  "description": "查询【OA系统 / CTSOA】的审批流程待办：当前待你处理的 OA 流程（如需求申请审批、报销审批等），首次登录需要验证码。触发词：OA待办、OA审批、待处理流程、CTSOA、查OA、OA信息。不要用于考勤打卡（用 ctsehr_check），也不要用于私人清单待办（用 todo_manage）。",
+  "entrypoint": "monitor.py",
+  "timeout_seconds": 180,
+  "requires_approval": false,
+  "data_directory": "ctsoa",
+  "parameters": {
+    "validate_code": {
+      "type": "string",
+      "required": false,
+      "flag": "--validate-code"
+    }
+  },
+  "artifact_types": ["image"]
+}

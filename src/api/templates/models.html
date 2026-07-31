@@ -21,7 +21,64 @@
 
     <section class="model-tab-pane active" data-model-pane="config">
         <div id="model-status" class="status-card"></div>
+        <div class="model-subnav">
+            <div class="segmented" role="tablist">
+                <button type="button" class="seg-btn active" data-model-cat="chat" role="tab">对话模型<span class="seg-count" data-cat-count="chat"></span></button>
+                <button type="button" class="seg-btn" data-model-cat="embedding" role="tab">向量模型<span class="seg-count" data-cat-count="embedding"></span></button>
+                <button type="button" class="seg-btn" data-model-cat="rerank" role="tab">重排模型<span class="seg-count" data-cat-count="rerank"></span></button>
+                <button type="button" class="seg-btn" data-model-cat="roles" role="tab">专用绑定</button>
+            </div>
+        </div>
+
         <div id="model-list" class="card-grid"></div>
+
+        <div id="model-roles-pane" class="model-roles-pane" hidden>
+            <div class="model-roles-grid">
+                <div class="role-card">
+                    <div class="role-card-head">
+                        <span class="role-icon" aria-hidden="true">👁</span>
+                        <div class="role-card-title">
+                            <strong>视觉模型</strong>
+                            <span class="role-tag role-tag-live">即时生效</span>
+                        </div>
+                    </div>
+                    <p class="role-desc">用于识图、图文理解等视觉任务，保存后立即生效。</p>
+                    <div class="form-group">
+                        <select id="role-vision"></select>
+                    </div>
+                </div>
+                <div class="role-card">
+                    <div class="role-card-head">
+                        <span class="role-icon" aria-hidden="true">🔡</span>
+                        <div class="role-card-title">
+                            <strong>向量模型</strong>
+                            <span class="role-tag role-tag-restart">需重启</span>
+                        </div>
+                    </div>
+                    <p class="role-desc">用于知识库分块向量化与语义检索，变更后需完整重启。</p>
+                    <div class="form-group">
+                        <select id="role-embedding"></select>
+                    </div>
+                </div>
+                <div class="role-card">
+                    <div class="role-card-head">
+                        <span class="role-icon" aria-hidden="true">🎯</span>
+                        <div class="role-card-title">
+                            <strong>重排模型</strong>
+                            <span class="role-tag role-tag-restart">需重启</span>
+                        </div>
+                    </div>
+                    <p class="role-desc">用于优化知识库检索结果的排序，变更后需完整重启。</p>
+                    <div class="form-group">
+                        <select id="role-rerank"></select>
+                    </div>
+                </div>
+            </div>
+            <div class="model-roles-actions">
+                <span class="text-muted">不需要专用模型时可保持“未绑定”</span>
+                <button id="save-roles-btn" class="btn-primary" type="button">保存绑定</button>
+            </div>
+        </div>
     </section>
 
     <section class="model-tab-pane" data-model-pane="usage">
@@ -117,7 +174,7 @@
 
 <!-- Modal -->
 <div id="model-modal" class="modal-overlay" style="display:none">
-    <div class="modal">
+    <div class="modal model-editor-modal">
         <div class="modal-header">
             <h3 id="model-modal-title">添加模型</h3>
             <button id="model-modal-close" class="modal-close-btn">&times;</button>
@@ -127,6 +184,15 @@
                 <label for="model-id">档案 ID</label>
                 <input type="text" id="model-id" placeholder="如 alibaba_qwen" required pattern="^[a-z][a-z0-9_]{0,63}$">
                 <small>小写字母开头，可含数字和下划线</small>
+            </div>
+            <div class="form-group">
+                <label for="model-modality">模型类型</label>
+                <select id="model-modality">
+                    <option value="chat">对话</option>
+                    <option value="embedding">向量</option>
+                    <option value="rerank">重排</option>
+                </select>
+                <small>向量 / 重排模型仅用于知识库检索，保存后需完整重启生效</small>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -152,7 +218,19 @@
                     </select>
                 </div>
             </div>
-            <fieldset class="pricing-fieldset">
+            <div class="form-group chat-only" id="model-capabilities-group">
+                <label>能力</label>
+                <div class="checkbox-row">
+                    <label class="checkbox-label"><input type="checkbox" id="model-cap-tools"> 工具调用</label>
+                    <label class="checkbox-label"><input type="checkbox" id="model-cap-vision"> 视觉</label>
+                    <label class="checkbox-label"><input type="checkbox" id="model-cap-reasoning"> 推理</label>
+                </div>
+            </div>
+            <div class="form-group embedding-only" id="model-dimensions-group" style="display:none">
+                <label for="model-dimensions">向量维度</label>
+                <input type="number" id="model-dimensions" min="1" step="1" placeholder="如 1024">
+            </div>
+            <fieldset class="pricing-fieldset chat-only" id="model-pricing-fieldset">
                 <legend>计价（每百万 Token，留空表示未计价）</legend>
                 <div class="form-row">
                     <div class="form-group">
@@ -188,11 +266,11 @@
                 <small>在 data/system/model.env 中配置对应的 KEY=值</small>
             </div>
             <div class="form-row">
-                <div class="form-group">
+                <div class="form-group chat-only">
                     <label for="model-temperature">温度</label>
                     <input type="number" id="model-temperature" value="0.7" min="0" max="2" step="0.1">
                 </div>
-                <div class="form-group">
+                <div class="form-group chat-only">
                     <label for="model-max-tokens">最大 Token</label>
                     <input type="number" id="model-max-tokens" value="2048" min="256" step="256">
                 </div>

@@ -1,54 +1,8 @@
-"""Integration tests for /api/bots, /api/auth/me and remaining page routes."""
+"""Integration tests for /api/auth/me and remaining page routes."""
 
 from __future__ import annotations
 
-import json
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
-
-import src.api.routers.bots as bots_module
-
 from tests._web_api_base import WebApiTestBase
-
-
-class BotsApiTest(WebApiTestBase):
-    def setUp(self):
-        super().setUp()
-        self._file_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._file_dir.cleanup)
-        self.credentials_path = Path(self._file_dir.name) / "credentials.json"
-        patcher = patch.object(
-            bots_module, "CREDENTIALS_PATH", self.credentials_path
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_bots_without_credentials(self):
-        response = self.client.get("/api/bots")
-        self.assertEqual(response.status_code, 200, response.text)
-        data = response.json()
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["channel"], "ilink")
-        self.assertFalse(data[0]["connected"])
-
-    def test_bots_with_valid_credentials(self):
-        self.credentials_path.write_text(
-            json.dumps({"bot_id": "bot123", "user_id": "wxid_abc"}),
-            encoding="utf-8",
-        )
-        response = self.client.get("/api/bots")
-        self.assertEqual(response.status_code, 200, response.text)
-        data = response.json()[0]
-        self.assertTrue(data["connected"])
-        self.assertEqual(data["bot_id"], "bot123")
-        self.assertEqual(data["user_id"], "wxid_abc")
-
-    def test_bots_with_corrupted_credentials(self):
-        self.credentials_path.write_text("{not-json", encoding="utf-8")
-        response = self.client.get("/api/bots")
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(response.json()[0]["connected"])
 
 
 class AuthMeApiTest(WebApiTestBase):
@@ -92,3 +46,25 @@ class RemainingPagesTest(WebApiTestBase):
             response = anonymous.get(page, follow_redirects=False)
             self.assertEqual(response.status_code, 302, page)
             self.assertTrue(response.headers["location"].startswith("/login"))
+
+    def test_schedule_page_separates_task_types_into_tabs(self):
+        response = self.client.get("/schedules")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('data-schedule-tab="tasks"', response.text)
+        self.assertIn('data-schedule-tab="automation"', response.text)
+        self.assertIn('data-schedule-pane="tasks"', response.text)
+        self.assertIn('data-schedule-pane="automation"', response.text)
+        self.assertIn("initScheduleTabs()", response.text)
+
+    def test_tenant_selects_use_shared_control_style(self):
+        pages = {
+            "/schedules": 'id="script-schedule-tenant" class="tenant-select"',
+            "/scripts": 'id="script-run-tenant" class="tenant-select"',
+            "/knowledge": 'id="knowledge-tenant" class="tenant-select"',
+            "/drive": 'id="drive-tenant" class="drive-select tenant-select"',
+            "/static/js/scripts.js": 'id="run-tenant" class="tenant-select"',
+        }
+        for page, marker in pages.items():
+            response = self.client.get(page)
+            self.assertEqual(response.status_code, 200, page)
+            self.assertIn(marker, response.text, page)

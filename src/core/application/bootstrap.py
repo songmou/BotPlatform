@@ -6,13 +6,12 @@ import signal
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from src.core.application.bot import (
     MessageBot,
     delete_credentials,
     display_qr_code,
-    load_credentials,
     print_login_status,
     save_credentials,
 )
@@ -23,15 +22,17 @@ from src.core.infrastructure.logging import (
     log_model_fallback,
     log_tool_call,
 )
-from src.core.integrations.ilink import ILinkClient, ILinkError, SessionExpired
+from src.core.integrations.ilink import ILinkClient, ILinkError
 from src.core.messaging import (
-    AuthenticationExpired,
     ChannelAddressStore,
+    ChannelCredentialError,
+    ChannelCredentialStore,
     ChannelManager,
+    ChannelStatusRegistry,
     MessageInboxStore,
     MessageRouter,
+    build_channel_adapter,
 )
-from src.core.messaging.adapters import WeChatILinkAdapter
 from src.core.modeling import ModelError
 from src.core.paths import (
     CONFIG_DIR,
@@ -40,7 +41,7 @@ from src.core.paths import (
     SYSTEM_DATA_DIR,
     channel_credentials_path,
 )
-from src.core.plugins import PluginContext, build_plugins
+from src.core.plugins import PluginContext, PluginManager, build_plugin_manager
 from src.core.services.agent import AgentService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService, ModelMemoryExtractor
@@ -48,6 +49,7 @@ from src.core.services.notification import (
     NotificationDispatcher,
     NotificationService,
 )
+from src.core.services.ocr import OcrService
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
 from src.core.services.script_registry import ExternalScriptRegistry
@@ -101,12 +103,12 @@ class BotRuntime:
     script_service: ScriptService
     script_schedule_service: ScriptScheduleService
     plugin_context: PluginContext
-    platform_plugins: List[Any]
-    codex_tasks_plugin: Optional[Any]
+    plugin_manager: PluginManager
     mcp_manager: Optional[Any]
     tool_runtime: Optional[ToolRuntime]
     agent_service: AgentService
     scheduler: SchedulerService
+    channel_statuses: ChannelStatusRegistry
     _started: bool = field(default=False, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -115,6 +117,7 @@ class BotRuntime:
         if self._started:
             return
         self._started = True
+        self.plugin_manager.start()
         self.notification_dispatcher.start()
         self.scheduler.start()
         print(
@@ -201,15 +204,11 @@ def build_bot_runtime(
             tenant_registry=tenant_registry,
             notification_service=notification_service,
             timezone=project_config.app.timezone,
+            data_root=DATA_DIR / "plugins",
         )
-        platform_plugins = (
-            build_plugins(project_config.plugins, context=plugin_context)
-            if project_config.tools.enabled
-            else []
-        )
-        codex_tasks_plugin = next(
-            (plugin for plugin in platform_plugins if plugin.id == "codex_tasks"),
-            None,
+        plugin_manager = build_plugin_manager(
+            project_config.plugins if project_config.tools.enabled else {},
+            context=plugin_context,
         )
         mcp_manager = None
         if project_config.tools.enabled and project_config.mcp_servers:
@@ -218,6 +217,11 @@ def build_bot_runtime(
             mcp_manager = McpClientManager()
             mcp_manager.start()
             mcp_manager.reload(project_config.mcp_servers)
+        ocr_service = (
+            OcrService(project_config.tools.ocr)
+            if project_config.tools.enabled
+            else None
+        )
         tool_runtime = (
             ToolRuntime(
                 project_config.tools,
@@ -227,12 +231,13 @@ def build_bot_runtime(
                 script_schedule_service=script_schedule_service,
                 tenant_registry=tenant_registry,
                 knowledge_service=services.knowledge_service,
-                plugins=platform_plugins,
+                plugin_manager=plugin_manager,
                 mcp_manager=mcp_manager,
                 tool_audit_store=tool_audit_store,
                 tool_states=tool_states,
                 drive_service=services.drive_service,
                 drive_audit_store=drive_audit_store,
+                ocr_service=ocr_service,
             )
             if project_config.tools.enabled
             else None
@@ -246,6 +251,13 @@ def build_bot_runtime(
                 "警告：macOS 命令沙箱不可用，run_command 已禁用；文件和系统工具仍可使用。",
                 file=sys.stderr,
             )
+        if ocr_service is not None and project_config.tools.ocr.enabled:
+            ocr_available, ocr_reason = ocr_service.availability()
+            if not ocr_available:
+                print(
+                    "警告：OCR 工具不可用：{}".format(ocr_reason),
+                    file=sys.stderr,
+                )
         agent_service = AgentService(
             services.model_router,
             project_config.app,
@@ -257,6 +269,7 @@ def build_bot_runtime(
             memory_service=memory_service,
             model_analytics_store=services.model_analytics_store,
             skills=project_config.skills,
+            ocr_service=ocr_service,
         )
         scheduler = SchedulerService(
             credentials=None,
@@ -267,7 +280,7 @@ def build_bot_runtime(
             script_service=script_service,
             tenant_registry=tenant_registry,
             schedule_store=services.schedule_store,
-            plugins=platform_plugins,
+            plugin_manager=plugin_manager,
             memory_service=memory_service,
             notification_service=notification_service,
             script_schedule_service=script_schedule_service,
@@ -291,125 +304,135 @@ def build_bot_runtime(
         script_service=script_service,
         script_schedule_service=script_schedule_service,
         plugin_context=plugin_context,
-        platform_plugins=platform_plugins,
-        codex_tasks_plugin=codex_tasks_plugin,
+        plugin_manager=plugin_manager,
         mcp_manager=mcp_manager,
         tool_runtime=tool_runtime,
         agent_service=agent_service,
         scheduler=scheduler,
+        channel_statuses=ChannelStatusRegistry(),
     )
 
 
 def run_channel_loop(runtime: BotRuntime, project_config: ProjectConfig) -> int:
-    """Log channels in and pump messages until interrupted.
-
-    Stable services live in ``runtime`` and survive re-logins; each loop
-    iteration only rebuilds ILink clients, adapters, ``MessageBot`` and
-    ``ChannelManager``, then swaps the adapters into the shared router.
-    """
+    """Build enabled channel adapters and pump normalized messages."""
     tenant_registry = runtime.services.tenant_registry
+    adapters = []
+    channel_manager: Optional[ChannelManager] = None
+    credential_store = ChannelCredentialStore()
     try:
-        while True:
-            adapters = []
-            ilink_clients = []
-            channel_manager: Optional[ChannelManager] = None
+        for channel_config in project_config.channels.values():
+            if not channel_config.enabled:
+                runtime.channel_statuses.set(
+                    channel_config.id,
+                    channel_config.type,
+                    "disabled",
+                )
+                continue
             try:
-                for channel_config in project_config.channels.values():
-                    if not channel_config.enabled:
-                        continue
+                credentials = credential_store.load(
+                    channel_config.id,
+                    channel_config.type,
+                )
+                if credentials is None and channel_config.type == "wechat_ilink":
                     credential_path = channel_credentials_path(channel_config.id)
-                    try:
-                        credentials = load_credentials(credential_path)
-                    except ILinkError as exc:
-                        print(str(exc), file=sys.stderr)
-                        print(
-                            "将清除渠道 {} 的无效凭证并重新登录。".format(
-                                channel_config.id
-                            )
-                        )
-                        delete_credentials(credential_path)
-                        credentials = None
-                    ilink = ILinkClient(credentials=credentials)
-                    ilink_clients.append(ilink)
-                    if credentials is None:
-                        print("正在登录消息渠道 {}。".format(channel_config.id))
-                        credentials = ilink.login(
+                    print("正在登录消息渠道 {}。".format(channel_config.id))
+                    with ILinkClient() as ilink:
+                        ilink_credentials = ilink.login(
                             display_qr_code,
                             status_changed=print_login_status,
                         )
-                        save_credentials(credentials, credential_path)
-                        print(
-                            "渠道 {} 的凭证已保存到 {}。".format(
-                                channel_config.id,
-                                credential_path,
-                            )
-                        )
-                    else:
-                        print(
-                            "已加载渠道 {} 的凭证，bot_id={}。".format(
-                                channel_config.id,
-                                credentials.bot_id,
-                            )
-                        )
-                    adapters.append(
-                        WeChatILinkAdapter(
-                            ilink,
-                            channel_id=channel_config.id,
+                    save_credentials(ilink_credentials, credential_path)
+                    credentials = credential_store.load(
+                        channel_config.id,
+                        channel_config.type,
+                        required=True,
+                    )
+                    print(
+                        "渠道 {} 的凭证已保存到 {}。".format(
+                            channel_config.id,
+                            credential_path,
                         )
                     )
-
-                runtime.message_router.reset(adapters)
-                message_bot = MessageBot(
-                    None,
-                    runtime.agent_service,
-                    tenant_registry=tenant_registry,
-                    recipient_store=runtime.services.recipient_store,
-                    conversation_store=runtime.services.conversation_store,
-                    schedule_store=runtime.services.schedule_store,
-                    schedule_ids=[
-                        task.id for task in project_config.schedules if task.enabled
-                    ],
-                    script_service=runtime.script_service,
-                    knowledge_service=runtime.services.knowledge_service,
-                    memory_service=runtime.memory_service,
-                    codex_tasks_plugin=runtime.codex_tasks_plugin,
-                    integration_service=runtime.integration_service,
-                    notification_dispatcher=runtime.notification_dispatcher,
-                    message_router=runtime.message_router,
-                    address_store=runtime.address_store,
+                if credentials is None:
+                    raise ChannelCredentialError(
+                        "渠道 {} 尚未配置凭据".format(channel_config.id)
+                    )
+                adapter = build_channel_adapter(channel_config, credentials)
+            except ChannelCredentialError as exc:
+                runtime.channel_statuses.set(
+                    channel_config.id,
+                    channel_config.type,
+                    "authentication_required",
+                    str(exc),
                 )
-                channel_manager = ChannelManager(
-                    adapters,
-                    MessageInboxStore(tenant_registry),
-                    message_bot.handle_inbound,
+                print(str(exc), file=sys.stderr)
+                continue
+            except Exception as exc:
+                runtime.channel_statuses.set(
+                    channel_config.id,
+                    channel_config.type,
+                    "failed",
+                    str(exc),
                 )
                 print(
-                    "消息服务已启动：渠道={}，正在等待私聊消息。按 Ctrl+C 退出。".format(
-                        "、".join(adapter.channel_id for adapter in adapters)
-                    )
+                    "创建消息渠道 {} 失败：{}".format(
+                        channel_config.id,
+                        exc,
+                    ),
+                    file=sys.stderr,
                 )
-                channel_manager.run()
-            except (SessionExpired, AuthenticationExpired):
-                print("消息渠道登录已失效，将重新登录。", file=sys.stderr)
-                if channel_manager is not None:
-                    for status in channel_manager.statuses():
-                        if status.state == "authentication_required":
-                            delete_credentials(
-                                channel_credentials_path(status.channel_id)
-                            )
                 continue
-            finally:
-                if channel_manager:
-                    channel_manager.shutdown()
-                if channel_manager is None:
-                    for client in ilink_clients:
-                        client.close()
+            adapters.append(adapter)
+            runtime.channel_statuses.set(
+                channel_config.id,
+                channel_config.type,
+                "starting",
+            )
+
+        runtime.message_router.reset(adapters)
+        message_bot = MessageBot(
+            runtime.agent_service,
+            runtime.message_router,
+            tenant_registry=tenant_registry,
+            recipient_store=runtime.services.recipient_store,
+            conversation_store=runtime.services.conversation_store,
+            schedule_store=runtime.services.schedule_store,
+            schedule_ids=[
+                task.id for task in project_config.schedules if task.enabled
+            ],
+            script_service=runtime.script_service,
+            knowledge_service=runtime.services.knowledge_service,
+            memory_service=runtime.memory_service,
+            integration_service=runtime.integration_service,
+            notification_dispatcher=runtime.notification_dispatcher,
+            address_store=runtime.address_store,
+            channel_configs=project_config.channels,
+        )
+        channel_manager = ChannelManager(
+            adapters,
+            MessageInboxStore(tenant_registry),
+            message_bot.handle_inbound,
+            status_registry=runtime.channel_statuses,
+        )
+        active = "、".join(adapter.channel_id for adapter in adapters) or "无"
+        print(
+            "消息服务已启动：渠道={}，正在等待消息。按 Ctrl+C 退出。".format(
+                active
+            )
+        )
+        channel_manager.run()
     except KeyboardInterrupt:
         print("\n机器人已停止。")
         return 0
     except (ILinkError, ModelError, OSError, TenantStoreError) as exc:
         print("启动失败：{}".format(exc), file=sys.stderr)
         return 1
+    finally:
+        if channel_manager is not None:
+            channel_manager.shutdown()
+        elif adapters:
+            runtime.message_router.close()
+    return 0
 
 
 def run_bot(args, project_config=None) -> int:

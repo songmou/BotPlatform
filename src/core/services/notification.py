@@ -346,43 +346,12 @@ class NotificationOutboxStore:
         return dict(row)
 
     def migrate_existing_events(self) -> int:
-        """Adopt durable Codex and due todo events created before the Outbox."""
+        """Adopt due todo events created before the shared Outbox."""
 
         now = self._iso(self.now_provider())
         migrated = 0
         with self.registry.database.transaction(immediate=True) as connection:
             sources: List[Dict[str, Any]] = []
-            codex_rows = connection.execute(
-                "SELECT event_id, event_key, tenant_id, message, delivery_status, "
-                "attempt_count, next_attempt_at, created_at, last_error "
-                "FROM codex_task_events WHERE delivery_status IN "
-                "('pending','sending','retry','waiting_recipient')"
-            ).fetchall()
-            for row in codex_rows:
-                sources.append(
-                    {
-                        "sort_at": str(row["created_at"]),
-                        "tenant_id": str(row["tenant_id"]),
-                        "source_type": "codex",
-                        "source_key": str(row["event_key"]),
-                        "source_ref": str(row["event_id"]),
-                        "text": str(row["message"]),
-                        "status": (
-                            "waiting_recipient"
-                            if row["delivery_status"] == "waiting_recipient"
-                            else "retry"
-                            if row["delivery_status"] == "retry"
-                            else "pending"
-                        ),
-                        "attempt_count": int(row["attempt_count"]),
-                        "next_attempt_at": (
-                            row["next_attempt_at"] or now
-                            if row["delivery_status"] == "retry"
-                            else None
-                        ),
-                        "last_error": row["last_error"],
-                    }
-                )
             todo_rows = connection.execute(
                 "SELECT event.tenant_id, event.todo_number, event.due_at, "
                 "event.delivery_status, event.attempt_count, event.created_at, "
@@ -439,13 +408,7 @@ class NotificationOutboxStore:
                 if not inserted:
                     continue
                 migrated += 1
-                if item["source_type"] == "codex" and item["status"] != "waiting_recipient":
-                    connection.execute(
-                        "UPDATE codex_task_events SET delivery_status='sending', "
-                        "next_attempt_at=NULL WHERE event_id=?",
-                        (int(item["source_ref"]),),
-                    )
-                elif item["source_type"] == "todo":
+                if item["source_type"] == "todo":
                     connection.execute(
                         "UPDATE todo_reminder_events SET delivery_status='sending', "
                         "updated_at=? WHERE tenant_id=? AND todo_number=?",
@@ -575,37 +538,7 @@ class NotificationOutboxStore:
     ) -> None:
         source_type = str(row.get("source_type") or "")
         source_ref = str(row.get("source_ref") or "")
-        if source_type == "codex" and source_ref.isdigit():
-            delivery_status = {
-                "sent": "sent",
-                "waiting_recipient": "waiting_recipient",
-                "failed": "failed",
-            }.get(status, "retry")
-            connection.execute(
-                "UPDATE codex_task_events SET delivery_status=?, attempt_count=?, "
-                "next_attempt_at=NULL, sent_at=?, last_error=? WHERE event_id=?",
-                (
-                    delivery_status,
-                    attempts,
-                    timestamp if status == "sent" else None,
-                    None if status == "sent" else (error[:1000] or None),
-                    int(source_ref),
-                ),
-            )
-            if status in ("sent", "failed"):
-                event = connection.execute(
-                    "SELECT thread_id, event_type FROM codex_task_events WHERE event_id=?",
-                    (int(source_ref),),
-                ).fetchone()
-                if event is not None and event["event_type"] in (
-                    "completed", "failed", "interrupted"
-                ):
-                    connection.execute(
-                        "UPDATE codex_task_runs SET notification_status=? "
-                        "WHERE thread_id=?",
-                        (status, event["thread_id"]),
-                    )
-        elif source_type == "todo" and source_ref.isdigit():
+        if source_type == "todo" and source_ref.isdigit():
             number = int(source_ref)
             if status == "sent":
                 connection.execute(

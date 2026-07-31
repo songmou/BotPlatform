@@ -174,7 +174,7 @@ def read_keychain_password(account: str, service: str) -> str:
     )
     password = completed.stdout.rstrip("\r\n")
     if completed.returncode != 0 or not password:
-        raise CredentialError("未能从 macOS 钥匙串读取 OA 密码，请先运行 setup_keychain.py")
+        raise CredentialError("未能从 macOS 钥匙串读取 OA 密码，请在机器人私聊中使用 /integration setup ctsehr 配置凭据")
     return password
 
 
@@ -578,7 +578,7 @@ def generate_ai_summary(
             "alerts": result["alerts"],
         }
         prompt = (
-            "你是企业OA双日考勤汇总助手。只根据给定JSON写3到5行简洁中文摘要，"
+            "你是企业 EHR 双日考勤汇总助手。只根据给定JSON写3到5行简洁中文摘要，"
             "分别概括昨天和今天，不得猜测；pending 必须表述为待检查，"
             "不得表述为缺卡或迟到，也不要输出Markdown标题。\n"
             + json.dumps(payload, ensure_ascii=False)
@@ -599,7 +599,7 @@ def generate_ai_summary(
 
 def build_markdown(result: Dict[str, Any]) -> str:
     lines = [
-        "# OA 双日考勤汇总",
+        "# EHR 双日考勤汇总",
         "",
         f"- 检查时间：{result['run_at']}",
         f"- 目标日期：{result['target_date']}",
@@ -695,7 +695,7 @@ def render_png(result: Dict[str, Any], target: Path, font_path: str) -> None:
     body_font = _load_font(font_path, 22)
     small_font = _load_font(font_path, 17)
     draw.rounded_rectangle((35, 30, width - 35, height - 30), 24, fill="white", outline="#DCE4EF", width=2)
-    draw.text((75, 65), "OA 双日考勤汇总", font=title_font, fill="#172B4D")
+    draw.text((75, 65), "EHR 双日考勤汇总", font=title_font, fill="#172B4D")
     draw.text((75, 125), f"检查时间 {result['run_at']}", font=small_font, fill="#6B778C")
 
     y = 180
@@ -817,13 +817,13 @@ def wechat_notification_text(result: Dict[str, Any]) -> str:
     if result.get("status") != "ok":
         return "\n".join(
             [
-                "【OA双日考勤汇总失败】",
+                "【EHR考勤双日汇总失败】",
                 f"日期：{result['target_date']}",
                 "任务执行失败，请查看本地脱敏日志。",
             ]
         )
 
-    lines = ["【OA双日考勤汇总】"]
+    lines = ["【EHR考勤双日汇总】"]
     for day in result.get("days", []):
         relation = "昨天" if day.get("relation") == "previous" else "今天"
         punches = "、".join(

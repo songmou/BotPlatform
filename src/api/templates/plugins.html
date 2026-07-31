@@ -1,34 +1,143 @@
 {% extends "base.html" %}
-{% block title %}消息渠道 - BotPlatform{% endblock %}
+{% block title %}插件中心 - BotPlatform{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/tools.css">
+<link rel="stylesheet" href="/static/css/plugins.css">
+{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
         <div class="page-header-row">
             <div>
-                <h2>消息渠道</h2>
-                <p class="page-desc">机器人消息渠道对接（企微 / 飞书 / iLink）</p>
+                <h2>插件中心</h2>
+                <p class="page-desc">集中管理可信插件、运行状态与工具配置</p>
             </div>
+            <button id="plugin-install-btn" class="btn-primary plugin-install-btn" type="button">
+                <span aria-hidden="true">+</span>
+                安装本地插件
+            </button>
         </div>
     </div>
+    <div class="plugin-notice" role="note">
+        <span class="plugin-notice-icon" aria-hidden="true">i</span>
+        <span>插件代码与主进程同权限运行，仅安装完全信任的本地插件。配置变更需完整重启后生效。</span>
+    </div>
+    <div class="toolbar plugin-toolbar">
+        <div class="toolbar-left">
+            <label class="search-box plugin-search" for="plugin-search">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <path d="M21 21l-4.35-4.35"></path>
+                </svg>
+                <input type="search" id="plugin-search" placeholder="搜索名称、ID 或描述"
+                       autocomplete="off">
+            </label>
+            <label class="plugin-filter">
+                <span class="sr-only">筛选插件状态</span>
+                <select id="plugin-filter-status" class="filter-select">
+                    <option value="">全部状态</option>
+                    <option value="running">运行中</option>
+                    <option value="disabled">已禁用</option>
+                    <option value="error">不可用</option>
+                </select>
+            </label>
+        </div>
+        <span id="plugin-result-summary" class="plugin-result-summary" aria-live="polite"></span>
+    </div>
+    <div id="plugin-list" class="plugin-card-grid" aria-live="polite">
+        <div class="empty-state">正在加载插件…</div>
+    </div>
+</div>
 
-    <div id="bot-list" class="plugin-card-grid"></div>
+<div id="plugin-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <div class="modal-title-row">
+                <div class="plugin-icon-lg" id="plugin-modal-icon"></div>
+                <div>
+                    <h3 id="plugin-modal-title">插件详情</h3>
+                    <span class="modal-subtitle" id="plugin-modal-subtitle"></span>
+                </div>
+            </div>
+            <button id="plugin-modal-close" class="modal-close-btn" type="button"
+                    aria-label="关闭插件详情">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="plugin-runtime-message" class="status-card" style="display:none"></div>
+            <div class="plugin-status-panel">
+                <div>
+                    <div class="detail-label">启用状态</div>
+                    <p class="plugin-status-help">保存后需完整重启，运行状态才会更新。</p>
+                </div>
+                <label class="switch-label">
+                    <input type="checkbox" id="plugin-enabled">
+                    <span class="switch"></span>
+                    <span id="plugin-status-text"></span>
+                </label>
+            </div>
+            <div class="plugin-detail-section">
+                <div class="plugin-section-heading">
+                    <div>
+                        <h4 class="section-title">工具定义</h4>
+                        <p>此插件向智能体提供的可调用能力</p>
+                    </div>
+                </div>
+                <div id="plugin-tools-table"></div>
+            </div>
+            <div class="plugin-detail-section">
+                <div class="plugin-section-heading">
+                    <div>
+                        <h4 class="section-title">插件设置</h4>
+                        <p>按需调整插件的运行参数</p>
+                    </div>
+                </div>
+                <div id="plugin-settings-form"></div>
+                <details class="tool-def-params plugin-json-preview">
+                    <summary>高级 JSON 预览</summary>
+                    <pre id="plugin-settings-json"></pre>
+                </details>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button id="plugin-clear-data-btn" class="btn-danger" type="button">清除数据</button>
+            <button id="plugin-update-package-btn" class="btn-secondary" type="button" style="display:none">更新插件包</button>
+            <button id="plugin-remove-btn" class="btn-danger" type="button" style="display:none">移除插件</button>
+            <button id="plugin-modal-cancel" class="btn-secondary" type="button">关闭</button>
+            <button id="plugin-save-btn" class="btn-primary" type="button">保存</button>
+        </div>
+    </div>
+</div>
 
-    <div class="empty-state" id="bot-empty" style="display:none;margin-top:48px">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:0.3;margin-bottom:16px">
-            <rect x="3" y="11" width="18" height="10" rx="2"/>
-            <circle cx="12" cy="5" r="2"/>
-            <path d="M12 7v4"/>
-            <line x1="8" y1="16" x2="8" y2="16"/>
-            <line x1="16" y1="16" x2="16" y2="16"/>
-        </svg>
-        <h3 style="font-size:16px;font-weight:600;margin-bottom:8px">暂无已配置的机器人适配器</h3>
-        <p class="text-muted" style="max-width:400px;margin:0 auto">
-            将支持企业微信、飞书、iLink 三种 IM 渠道的机器人对接。
-        </p>
+<div id="plugin-install-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <div>
+                <h3 id="plugin-install-title">安装本地插件</h3>
+                <p class="modal-subtitle">从本机目录载入可信插件包</p>
+            </div>
+            <button id="plugin-install-close" class="modal-close-btn" type="button"
+                    aria-label="关闭安装窗口">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="plugin-install-warning">
+                系统不会联网或自动安装依赖，请先确认目录内容及依赖均可信。
+            </div>
+            <div class="form-group plugin-path-field">
+                <label for="plugin-source-path">插件目录绝对路径</label>
+                <input id="plugin-source-path" type="text" placeholder="/path/to/plugin"
+                       autocomplete="off" spellcheck="false">
+                <small>目录内需包含有效的插件清单与入口文件</small>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button id="plugin-install-cancel" class="btn-secondary" type="button">取消</button>
+            <button id="plugin-install-submit" class="btn-primary" type="button">校验并安装</button>
+        </div>
     </div>
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/bots.js"></script>
-<script>initBots();</script>
+<script src="/static/js/plugins.js"></script>
+<script>initPlugins();</script>
 {% endblock %}

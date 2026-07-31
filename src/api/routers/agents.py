@@ -31,6 +31,7 @@ def _to_out(agent) -> AgentOut:
         system_prompt=agent.system_prompt,
         capabilities=[{"name": c.name, "description": c.description} for c in agent.capabilities],
         tools=agent.tools,
+        plugin_tools={key: list(value) for key, value in agent.plugin_tools.items()},
         skills=list(agent.skills),
         mcp_servers=list(agent.mcp_servers),
         model=agent.model,
@@ -51,6 +52,9 @@ def _agent_to_dict(agent) -> dict:
         "system_prompt": agent.system_prompt,
         "capabilities": [{"name": c.name, "description": c.description} for c in agent.capabilities],
         "tools": agent.tools,
+        "plugin_tools": {
+            key: list(value) for key, value in agent.plugin_tools.items()
+        },
         "skills": list(agent.skills),
         "mcp_servers": list(agent.mcp_servers),
         "enabled": agent.enabled,
@@ -165,6 +169,7 @@ def create_agent(body: AgentCreate, request: Request):
         system_prompt=body.system_prompt,
         capabilities=[Capability(name=c.name, description=c.description) for c in body.capabilities],
         tools=body.tools,
+        plugin_tools=body.plugin_tools,
         skills=body.skills,
         mcp_servers=body.mcp_servers,
         model=body.model or None,
@@ -200,6 +205,11 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
             else existing.capabilities
         ),
         tools=body.tools if body.tools is not None else existing.tools,
+        plugin_tools=(
+            body.plugin_tools
+            if body.plugin_tools is not None
+            else existing.plugin_tools
+        ),
         skills=body.skills if body.skills is not None else existing.skills,
         mcp_servers=body.mcp_servers if body.mcp_servers is not None else existing.mcp_servers,
         model=(body.model or None) if body.model is not None else existing.model,

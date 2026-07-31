@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlencode
 
-from src.core.integrations.embeddings import EmbeddingClient, EmbeddingError
+from src.core.modeling import (
+    EmbeddingClient,
+    EmbeddingError,
+    RerankClient,
+    RerankError,
+)
 from src.core.services.document_extract import DOCUMENT_SUFFIXES, extract_document_text
 from src.core.storage.tenants import TenantContext, TenantRegistry
 
@@ -26,6 +31,8 @@ TEXT_SUFFIXES = {".txt", ".md", ".markdown"}
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | DOCUMENT_SUFFIXES
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
+# Upper bound of fused candidates handed to the rerank model before trimming.
+RERANK_CANDIDATES = 32
 PUBLIC_DEFAULT_CATEGORY_ID = "public-default"
 ACTIVE_STATUSES = {"ready", "pending_embedding"}
 
@@ -94,10 +101,14 @@ class KnowledgeHit:
 
 class KnowledgeService:
     def __init__(
-        self, registry: TenantRegistry, embedding: Optional[EmbeddingClient] = None
+        self,
+        registry: TenantRegistry,
+        embedding: Optional[EmbeddingClient] = None,
+        rerank: Optional[RerankClient] = None,
     ) -> None:
         self.registry = registry
         self.embedding = embedding
+        self.rerank = rerank
         self.public_root = (registry.data_root / "public").resolve()
         self.public_root.mkdir(parents=True, exist_ok=True)
 
@@ -690,7 +701,7 @@ class KnowledgeService:
                         ") VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             chunk_id,
-                            self.embedding.profile.id,
+                            self.embedding.model_id,
                             len(vectors[position]),
                             vector,
                             body_hash,
@@ -1170,7 +1181,7 @@ class KnowledgeService:
                     "JOIN knowledge_sources s ON s.source_id=c.source_id "
                     "WHERE c.category_id IN ({}) AND e.model_id=? "
                     "AND s.status='ready'".format(placeholders),
-                    [*allowed, self.embedding.profile.id],
+                    [*allowed, self.embedding.model_id],
                 ).fetchall()
                 scored = []
                 for row in rows:
@@ -1185,10 +1196,16 @@ class KnowledgeService:
             for ranked in (lexical, vector_rank):
                 for rank, chunk_id in enumerate(ranked, 1):
                     scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
-            selected = sorted(scores, key=scores.get, reverse=True)[:limit]
-            if not selected:
+            ordered = sorted(scores, key=scores.get, reverse=True)
+            if not ordered:
                 return []
-            detail_placeholders = ",".join("?" for _ in selected)
+            # A rerank model reorders a wider candidate pool before trimming;
+            # without one the fused ranking is trimmed directly.
+            if self.rerank is not None and len(ordered) > 1:
+                candidates = ordered[:RERANK_CANDIDATES]
+            else:
+                candidates = ordered[:limit]
+            detail_placeholders = ",".join("?" for _ in candidates)
             rows = connection.execute(
                 "SELECT ch.chunk_id, ch.source_id, s.name AS source_name, "
                 "s.source_type, s.drive_scope, s.drive_tenant_id, s.drive_path, "
@@ -1199,9 +1216,10 @@ class KnowledgeService:
                 "ON c.category_id=ch.category_id WHERE ch.chunk_id IN ({})".format(
                     detail_placeholders
                 ),
-                selected,
+                candidates,
             ).fetchall()
         details = {str(row["chunk_id"]): row for row in rows}
+        selected = self._rerank_candidates(query, candidates, details, limit)
         citation_by_source: Dict[str, int] = {}
         hits: List[Dict[str, Any]] = []
         for chunk_id in selected:
@@ -1237,6 +1255,41 @@ class KnowledgeService:
                 ).to_dict()
             )
         return hits
+
+    def _rerank_candidates(
+        self,
+        query: str,
+        candidates: List[str],
+        details: Dict[str, Any],
+        limit: int,
+    ) -> List[str]:
+        """Reorder fused candidates with the rerank model, degrading silently."""
+        if self.rerank is None or len(candidates) <= 1:
+            return candidates[:limit]
+        contents: List[str] = []
+        valid_ids: List[str] = []
+        for chunk_id in candidates:
+            row = details.get(chunk_id)
+            if row is None:
+                continue
+            contents.append(str(row["content"]))
+            valid_ids.append(chunk_id)
+        if len(valid_ids) <= 1:
+            return valid_ids[:limit]
+        try:
+            ranked = self.rerank.rerank(query, contents, top_n=limit)
+        except RerankError:
+            return valid_ids[:limit]
+        reordered = [
+            valid_ids[index]
+            for index, _ in ranked
+            if 0 <= index < len(valid_ids)
+        ]
+        seen = set(reordered)
+        for chunk_id in valid_ids:
+            if chunk_id not in seen:
+                reordered.append(chunk_id)
+        return reordered[:limit]
 
     @staticmethod
     def context_message(hits: Sequence[Dict[str, Any]]) -> str:
@@ -1319,7 +1372,7 @@ class KnowledgeService:
                 "AND e.chunk_id IS NULL ORDER BY c.source_id, c.position".format(
                     placeholders
                 ),
-                [self.embedding.profile.id, *allowed],
+                [self.embedding.model_id, *allowed],
             ).fetchall()
         completed = 0
         for offset in range(0, len(rows), 32):
@@ -1336,7 +1389,7 @@ class KnowledgeService:
                         ") VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             row["chunk_id"],
-                            self.embedding.profile.id,
+                            self.embedding.model_id,
                             len(vector),
                             array("f", vector).tobytes(),
                             row["content_hash"],
@@ -1353,6 +1406,6 @@ class KnowledgeService:
                 "WHERE c.source_id=knowledge_sources.source_id AND e.chunk_id IS NULL)".format(
                     placeholders
                 ),
-                [_now(), *allowed, self.embedding.profile.id],
+                [_now(), *allowed, self.embedding.model_id],
             )
         return {"completed": completed, "remaining": len(rows) - completed}

@@ -44,6 +44,239 @@
     margin-bottom: 18px;
 }
 
+/* Category sub-navigation (segmented control) */
+.model-subnav {
+    margin-bottom: 20px;
+}
+
+.segmented {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 4px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.seg-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 16px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.seg-btn:hover {
+    color: var(--text);
+}
+
+.seg-btn.active {
+    background: var(--bg);
+    color: var(--accent);
+    box-shadow: var(--shadow);
+}
+
+.seg-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.seg-btn.active .seg-count {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+/* Modality badges on model cards */
+.badge-modality {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+}
+
+.badge-modality-chat {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+.badge-modality-embedding {
+    background: #e8f0fe;
+    color: #1967d2;
+}
+
+.badge-modality-rerank {
+    background: #fce8f3;
+    color: #b5179e;
+}
+
+[data-theme="dark"] .badge-modality-embedding {
+    background: #16263f;
+    color: #7cb0ff;
+}
+
+[data-theme="dark"] .badge-modality-rerank {
+    background: #331631;
+    color: #e879c9;
+}
+
+/* Dedicated model role binding cards */
+.model-roles-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--card-gap);
+}
+
+.role-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: var(--card-padding);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg);
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.role-card:hover {
+    box-shadow: var(--shadow);
+    border-color: var(--accent);
+}
+
+.role-card-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.role-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: var(--accent-light);
+    font-size: 20px;
+    line-height: 1;
+}
+
+.role-card-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+}
+
+.role-card-title strong {
+    font-size: 14px;
+    color: var(--text);
+}
+
+.role-tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.role-tag-live {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.role-tag-restart {
+    background: #fff3cd;
+    color: #856404;
+}
+
+[data-theme="dark"] .role-tag-live {
+    background: #1b3a1e;
+    color: #66bb6a;
+}
+
+[data-theme="dark"] .role-tag-restart {
+    background: #3a3320;
+    color: #e0b048;
+}
+
+.role-desc {
+    flex: 1;
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-muted);
+}
+
+.role-card .form-group {
+    margin-bottom: 0;
+}
+
+.model-roles-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+
+.model-editor-modal {
+    width: min(760px, calc(100vw - 32px));
+    max-width: 760px;
+    max-height: 92vh;
+}
+
+.model-editor-modal .modal-header {
+    flex: 0 0 auto;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.model-editor-modal #model-form {
+    padding-top: 18px;
+}
+
+.model-editor-modal .checkbox-row .checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    margin-bottom: 0;
+}
+
+.model-editor-modal .checkbox-row input[type="checkbox"],
+.model-editor-modal > .modal-body input[type="checkbox"] {
+    width: auto;
+}
+
+.model-editor-modal .modal-footer {
+    position: sticky;
+    bottom: -20px;
+    margin: 20px -24px -20px;
+    padding: 16px 24px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+
 .analytics-toolbar,
 .budget-form {
     display: flex;
@@ -244,6 +477,32 @@
 }
 
 @media (max-width: 560px) {
+    .segmented {
+        display: flex;
+        width: 100%;
+    }
+
+    .seg-btn {
+        flex: 1;
+        justify-content: center;
+        padding: 7px 8px;
+    }
+
+    .model-roles-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .model-editor-modal {
+        width: calc(100vw - 20px);
+        max-height: 94vh;
+    }
+
+    .model-editor-modal .form-row {
+        flex-direction: column;
+        gap: 0;
+    }
+
     .analytics-stats {
         grid-template-columns: 1fr;
     }

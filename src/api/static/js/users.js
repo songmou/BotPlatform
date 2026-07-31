@@ -319,6 +319,8 @@ function initUsers() {
         { key: "tenants.delete", label: "删除机器人用户", desc: "清除租户及其全部数据" },
         { key: "panel.read", label: "查看面板配置", desc: "读取模型、智能体等配置" },
         { key: "panel.write", label: "修改面板配置", desc: "编辑模型、智能体、定时任务等" },
+        { key: "plugins.read", label: "查看插件", desc: "浏览已安装插件及运行状态" },
+        { key: "plugins.manage", label: "管理插件", desc: "安装、配置、禁用和移除可信插件" },
         { key: "model_analytics.read", label: "查看模型分析", desc: "查看用量、成本、质量与预算进度" },
         { key: "model_analytics.manage", label: "管理模型预算", desc: "创建、修改和删除月度预算" },
         { key: "admins.manage", label: "管理账号与角色", desc: "增删管理员并分配角色权限" }

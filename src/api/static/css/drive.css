@@ -9,6 +9,7 @@
 
 .drive-toolbar button {
     min-height: 36px;
+    white-space: nowrap;
 }
 
 .drive-panel-toolbar {
@@ -139,6 +140,11 @@
     gap: 8px;
 }
 
+.drive-batch-actions button,
+.drive-actions button {
+    white-space: nowrap;
+}
+
 .drive-batch-actions button:disabled {
     opacity: .45;
     cursor: not-allowed;
@@ -187,6 +193,15 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    max-width: min(360px, 34vw);
+    vertical-align: middle;
+}
+
+.drive-entry-name > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .drive-entry-name svg {
@@ -217,8 +232,26 @@
     color: var(--accent);
 }
 
+.drive-actions {
+    white-space: nowrap;
+}
+
 .drive-actions button {
-    margin-right: 4px;
+    margin: 2px 4px 2px 0;
+}
+
+#drive-table {
+    min-width: 720px;
+}
+
+#drive-table th,
+#drive-table td {
+    white-space: nowrap;
+}
+
+#drive-table th:nth-child(2),
+#drive-table td:nth-child(2) {
+    width: 100%;
 }
 
 /* ---- audit panel ---- */
@@ -439,7 +472,18 @@
     }
 
     .drive-toolbar {
-        justify-content: flex-end;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        justify-content: stretch;
+    }
+
+    .drive-toolbar button {
+        width: 100%;
+        padding-inline: 10px;
+    }
+
+    .drive-toolbar #drive-upload-btn {
+        grid-column: 1 / -1;
     }
 
     .drive-main-toolbar {
@@ -448,6 +492,19 @@
     }
 
     .drive-batch-actions {
-        flex-wrap: wrap;
+        width: 100%;
+        padding-bottom: 3px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+    }
+
+    .drive-entry-name {
+        max-width: 240px;
+    }
+
+    .drive-drop-box {
+        max-width: calc(100vw - 32px);
+        padding: 28px 24px;
+        text-align: center;
     }
 }

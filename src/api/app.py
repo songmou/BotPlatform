@@ -36,12 +36,14 @@ STATIC_DIR = API_DIR / "static"
 
 def create_app(config, model_router, registry, conversation_store,
                tool_runtime=None, knowledge_service=None, plugin_context=None,
+               plugin_manager=None,
                scheduler=None, tool_audit_store=None,
                model_analytics_store=None,
                admin_auth=None, admin_user_store=None, admin_role_store=None,
                script_service=None, script_registry=None,
                script_schedule_service=None,
                drive_service=None, drive_audit_store=None,
+               channel_statuses=None,
                secure_cookies=False, owns_services=True) -> FastAPI:
     # When the panel shares its service graph with the bot process
     # (owns_services=False), shutdown is handled by the bot runtime and the
@@ -72,6 +74,9 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.tool_runtime = tool_runtime
     app.state.knowledge_service = knowledge_service
     app.state.plugin_context = plugin_context
+    app.state.plugin_manager = plugin_manager or getattr(
+        tool_runtime, "plugin_manager", None
+    )
     app.state.scheduler = scheduler
     app.state.tool_audit_store = tool_audit_store
     app.state.model_analytics_store = model_analytics_store
@@ -83,6 +88,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.script_schedule_service = script_schedule_service
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
+    app.state.channel_statuses = channel_statuses
     app.state.secure_cookies = secure_cookies
     app.state.owns_services = owns_services
     if drive_service is not None and knowledge_service is not None:
@@ -108,7 +114,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(schedules.router)
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
-    app.include_router(bots.bots_router)
+    app.include_router(bots.channels_router)
     app.include_router(skills.router)
     app.include_router(scripts.router)
     app.include_router(mcp.router)

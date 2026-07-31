@@ -107,7 +107,9 @@ class ConfigAndDefinitionTests(unittest.TestCase):
         plugin_config = project.plugins["web_research"]
         self.assertTrue(plugin_config.enabled)
         for agent_id in ("researcher", "general"):
-            tools = set(project.agents[agent_id].tools)
+            tools = set(
+                project.agents[agent_id].plugin_tools["web_research"]
+            )
             self.assertLessEqual(
                 {"web_search_duckduckgo", "web_fetch", "web_fetch_browser"}, tools
             )

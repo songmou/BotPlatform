@@ -34,6 +34,11 @@ from src.core.storage.schema import (  # noqa: F401
     SCHEMA_V18,
     SCHEMA_V19,
     SCHEMA_V20,
+    SCHEMA_V21,
+    SCHEMA_V22,
+    SCHEMA_V22_PERMISSIONS,
+    SCHEMA_V23,
+    SCHEMA_V23_PERMISSIONS,
 )
 
 
@@ -113,6 +118,10 @@ class Database:
                         self._migrate_v12(connection)
                     elif version == 13:
                         self._migrate_v13(connection)
+                    elif version == 22:
+                        self._migrate_v22(connection)
+                    elif version == 23:
+                        self._migrate_v23(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -140,6 +149,55 @@ class Database:
         ).format(version)
         connection.executescript(
             "BEGIN IMMEDIATE;\n" + script + "\n" + record + "\nCOMMIT;"
+        )
+
+    @classmethod
+    def _migrate_v22(cls, connection: sqlite3.Connection) -> None:
+        """Remove retired plugin data while tolerating partial legacy schemas."""
+        has_outbox = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='notification_outbox'"
+        ).fetchone()
+        cleanup = (
+            "DELETE FROM notification_outbox WHERE source_type = 'codex';\n"
+            if has_outbox
+            else ""
+        )
+        has_roles = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='admin_roles'"
+        ).fetchone()
+        permissions = SCHEMA_V22_PERMISSIONS if has_roles else ""
+        cls._apply_schema_script(
+            connection, 22, cleanup + SCHEMA_SCRIPTS[22] + permissions
+        )
+
+    @classmethod
+    def _migrate_v23(cls, connection: sqlite3.Connection) -> None:
+        """Add conversation sessions and channel bindings idempotently."""
+        script = ""
+        for table in (
+            "conversation_context_messages",
+            "conversation_events",
+        ):
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info({})".format(table)
+                ).fetchall()
+            }
+            if "session_key" not in columns:
+                script += (
+                    "ALTER TABLE {} ADD COLUMN session_key TEXT "
+                    "NOT NULL DEFAULT 'direct';\n"
+                ).format(table)
+        has_roles = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='admin_roles'"
+        ).fetchone()
+        permissions = SCHEMA_V23_PERMISSIONS if has_roles else ""
+        cls._apply_schema_script(
+            connection, 23, script + SCHEMA_SCRIPTS[23] + permissions
         )
 
     @staticmethod

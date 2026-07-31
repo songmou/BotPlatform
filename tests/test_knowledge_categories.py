@@ -194,6 +194,29 @@ class KnowledgeCategoryServiceTests(unittest.TestCase):
                 created_at TEXT NOT NULL, deleting INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(bot_id, user_id)
             );
+            CREATE TABLE conversation_context_messages(
+                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE conversation_events(
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                image INTEGER NOT NULL DEFAULT 0,
+                event_type TEXT NOT NULL DEFAULT 'message',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE admin_roles(
+                role_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                permissions TEXT NOT NULL DEFAULT '[]',
+                builtin INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE knowledge_sources(
                 source_id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,

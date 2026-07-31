@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import tempfile
@@ -22,13 +23,20 @@ from src.core.integrations.ilink import Credentials
 from src.core.infrastructure.instance_lock import SingleInstanceLock
 from src.core.infrastructure.logging import log_interaction
 from src.core.application import (
-    WeChatBot,
+    MessageBot,
     load_credentials,
     parse_args,
     run_channel_command,
     run_notify_command,
-    run_codex_hook_command,
     save_credentials,
+)
+from src.core.messaging import (
+    DIRECT,
+    GROUP,
+    AttachmentRef,
+    ChannelCapabilities,
+    InboundMessage,
+    MessageRouter,
 )
 from src.core.modeling import (
     CanonicalMessage,
@@ -40,49 +48,96 @@ from src.core.modeling import (
 from src.core.tooling import ApprovalRequired, FinalAnswer
 
 
-def text_message(user: str, text: str, **extra):
-    message = {
-        "message_type": 1,
-        "from_user_id": user,
-        "context_token": "context-{}".format(user),
-        "item_list": [{"type": 1, "text_item": {"text": text}}],
-    }
-    message.update(extra)
-    return message
+_EVENT_IDS = itertools.count(1)
 
 
-def image_message(user: str, text: str = ""):
-    items = [{"type": 2, "image_item": {"media": {"id": "image"}}}]
-    if text:
-        items.insert(0, {"type": 1, "text_item": {"text": text}})
-    return {
-        "message_type": 1,
-        "from_user_id": user,
-        "context_token": "context-{}".format(user),
-        "item_list": items,
-    }
+def text_message(user: str, text: str) -> InboundMessage:
+    return InboundMessage(
+        event_id="event-{}".format(next(_EVENT_IDS)),
+        channel_id="wechat-main",
+        platform="wechat_ilink",
+        account_id="bot",
+        sender_id=user,
+        conversation_type=DIRECT,
+        conversation_id=user,
+        text=text,
+        reply_context={"context_token": "context-{}".format(user)},
+    )
 
 
-class FakeILink:
+def group_message(
+    user: str, text: str, addressed_to_bot: bool = False
+) -> InboundMessage:
+    return InboundMessage(
+        event_id="event-{}".format(next(_EVENT_IDS)),
+        channel_id="wechat-main",
+        platform="wechat_ilink",
+        account_id="bot",
+        sender_id=user,
+        conversation_type=GROUP,
+        conversation_id="group",
+        text=text,
+        addressed_to_bot=addressed_to_bot,
+    )
+
+
+def image_message(user: str, text: str = "") -> InboundMessage:
+    return InboundMessage(
+        event_id="event-{}".format(next(_EVENT_IDS)),
+        channel_id="wechat-main",
+        platform="wechat_ilink",
+        account_id="bot",
+        sender_id=user,
+        conversation_type=DIRECT,
+        conversation_id=user,
+        text=text,
+        attachments=(AttachmentRef(kind="image", adapter_ref={"id": "image"}),),
+        reply_context={"context_token": "context-{}".format(user)},
+    )
+
+
+class FakeChannel:
+    channel_id = "wechat-main"
+    platform = "wechat_ilink"
+    account_id = "bot"
+    capabilities = ChannelCapabilities(
+        receive_image=True,
+        send_image=True,
+        typing=True,
+    )
+
     def __init__(self) -> None:
         self.sent = []
         self.downloaded = []
         self.typing_events = []
 
+    def start(self, emit, stop_event) -> None:
+        raise AssertionError("tests call handle_inbound directly")
+
+    def send(self, endpoint, message) -> None:
+        self.sent.append(
+            (
+                endpoint.recipient_id,
+                str(endpoint.route_context.get("context_token") or ""),
+                message.text,
+            )
+        )
+
     @contextmanager
-    def typing(self, user_id, context_token, on_error=None):
-        self.typing_events.append(("start", user_id, context_token))
+    def typing(self, endpoint):
+        token = str(endpoint.route_context.get("context_token") or "")
+        self.typing_events.append(("start", endpoint.recipient_id, token))
         try:
             yield
         finally:
-            self.typing_events.append(("stop", user_id, context_token))
+            self.typing_events.append(("stop", endpoint.recipient_id, token))
 
-    def send_text(self, user_id, context_token, text):
-        self.sent.append((user_id, context_token, text))
-
-    def download_image(self, image_item):
-        self.downloaded.append(image_item)
+    def load_attachment(self, attachment) -> bytes:
+        self.downloaded.append(attachment)
         return b"image-bytes"
+
+    def close(self) -> None:
+        pass
 
 
 class FakeOllama:
@@ -142,15 +197,15 @@ class ManualTimer:
 
 class MainBotTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.ilink = FakeILink()
+        self.channel = FakeChannel()
         self.ollama = FakeOllama()
         config = load_project_config(Path(__file__).resolve().parents[1] / "config")
         self.agent_service = AgentService(self.ollama, config.app, config.agents)
         self.logs = []
         self.recipients = []
-        self.bot = WeChatBot(
-            self.ilink,
+        self.bot = MessageBot(
             self.agent_service,
+            MessageRouter([self.channel]),
             interaction_logger=lambda direction, user, content: self.logs.append(
                 (direction, user, content)
             ),
@@ -160,19 +215,19 @@ class MainBotTests(unittest.TestCase):
         )
 
     def test_text_history_is_isolated_by_user_and_limited(self) -> None:
-        self.bot.handle_message(text_message("user-a", "第一问"))
-        self.bot.handle_message(text_message("user-b", "另一个用户"))
-        self.bot.handle_message(text_message("user-a", "第二问"))
+        self.bot.handle_inbound(text_message("user-a", "第一问"))
+        self.bot.handle_inbound(text_message("user-b", "另一个用户"))
+        self.bot.handle_inbound(text_message("user-a", "第二问"))
 
         third_call_messages = self.ollama.calls[2].messages
         self.assertIn(CanonicalMessage("user", "第一问"), third_call_messages)
         self.assertNotIn(CanonicalMessage("user", "另一个用户"), third_call_messages)
 
         for index in range(7):
-            self.bot.handle_message(text_message("user-a", "追加{}".format(index)))
+            self.bot.handle_inbound(text_message("user-a", "追加{}".format(index)))
         self.assertEqual(len(self.agent_service.histories["user-a"]), 12)
-        self.assertEqual(self.ilink.typing_events[0][0], "start")
-        self.assertEqual(self.ilink.typing_events[1][0], "stop")
+        self.assertEqual(self.channel.typing_events[0][0], "start")
+        self.assertEqual(self.channel.typing_events[1][0], "stop")
 
     def test_thinking_is_combined_with_answer_after_typing_stops(self) -> None:
         class ThinkingOllama(FakeOllama):
@@ -191,19 +246,19 @@ class MainBotTests(unittest.TestCase):
 
         ollama = ThinkingOllama()
         config = load_project_config(Path(__file__).resolve().parents[1] / "config")
-        bot = WeChatBot(
-            self.ilink,
+        bot = MessageBot(
             AgentService(ollama, config.app, config.agents),
+            MessageRouter([self.channel]),
             interaction_logger=lambda *_args: None,
         )
-        bot.handle_message(text_message("user-a", "问题"))
+        bot.handle_inbound(text_message("user-a", "问题"))
 
         self.assertEqual(
-            self.ilink.sent[-1][2],
+            self.channel.sent[-1][2],
             "思考过程：\n原始思考\n\n回答：\n最终答案",
         )
         self.assertEqual(
-            [event[0] for event in self.ilink.typing_events[-2:]],
+            [event[0] for event in self.channel.typing_events[-2:]],
             ["start", "stop"],
         )
 
@@ -213,82 +268,80 @@ class MainBotTests(unittest.TestCase):
                 raise ModelError("模型暂不可用", provider="fake")
 
         config = load_project_config(Path(__file__).resolve().parents[1] / "config")
-        bot = WeChatBot(
-            self.ilink,
+        bot = MessageBot(
             AgentService(FailingOllama(), config.app, config.agents),
+            MessageRouter([self.channel]),
             interaction_logger=lambda *_args: None,
         )
-        bot.handle_message(text_message("user-a", "问题"))
+        bot.handle_inbound(text_message("user-a", "问题"))
 
         self.assertEqual(
-            [event[0] for event in self.ilink.typing_events[-2:]],
+            [event[0] for event in self.channel.typing_events[-2:]],
             ["start", "stop"],
         )
-        self.assertIn("处理消息失败", self.ilink.sent[-1][2])
+        self.assertIn("处理消息失败", self.channel.sent[-1][2])
 
     def test_clear_command_clears_only_current_user(self) -> None:
-        self.bot.handle_message(text_message("user-a", "你好"))
-        self.bot.handle_message(text_message("user-b", "你好"))
-        self.bot.handle_message(text_message("user-a", "/clear"))
+        self.bot.handle_inbound(text_message("user-a", "你好"))
+        self.bot.handle_inbound(text_message("user-b", "你好"))
+        self.bot.handle_inbound(text_message("user-a", "/clear"))
         self.assertNotIn("user-a", self.agent_service.histories)
         self.assertIn("user-b", self.agent_service.histories)
-        self.assertEqual(self.ilink.sent[-1][2], "对话上下文已清空。")
+        self.assertEqual(self.channel.sent[-1][2], "对话上下文已清空。")
 
     def test_image_is_downloaded_and_sent_to_ollama_immediately(self) -> None:
-        self.bot.handle_message(image_message("user-a"))
+        self.bot.handle_inbound(image_message("user-a"))
         request = self.ollama.calls[0]
         self.assertEqual(request.image, b"image-bytes")
         self.assertEqual(request.messages[-1].content, "请描述这张图片，并识别图片中的文字。")
 
-        self.bot.handle_message(image_message("user-a", "图片里有几个人？"))
+        self.bot.handle_inbound(image_message("user-a", "图片里有几个人？"))
         request = self.ollama.calls[1]
         self.assertEqual(request.messages[-1].content, "图片里有几个人？")
         self.assertEqual(request.image, b"image-bytes")
 
-    def test_group_and_bot_messages_are_ignored(self) -> None:
-        self.bot.handle_message(text_message("user", "群消息", group_id="group"))
-        self.bot.handle_message(
-            {
-                "message_type": 2,
-                "from_user_id": "bot",
-                "context_token": "context",
-                "item_list": [{"type": 1, "text_item": {"text": "自己"}}],
-            }
-        )
+    def test_group_messages_are_ignored_unless_addressed_to_bot(self) -> None:
+        self.bot.handle_inbound(group_message("user", "群消息"))
         self.assertEqual(self.ollama.calls, [])
+        self.assertEqual(self.channel.sent, [])
+
+        self.bot.handle_inbound(
+            group_message("user", "@bot 群消息", addressed_to_bot=True)
+        )
+        self.assertEqual(len(self.ollama.calls), 1)
 
     def test_agent_help_and_recipient_recording(self) -> None:
-        self.bot.handle_message(text_message("user-a", "/agent"))
-        self.assertIn("当前 Agent：通用 AI 助手", self.ilink.sent[-1][2])
-        self.assertIn("支持能力", self.ilink.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/agent"))
+        self.assertIn("当前 Agent：通用 AI 助手", self.channel.sent[-1][2])
+        self.assertIn("支持能力", self.channel.sent[-1][2])
 
-        self.bot.handle_message(text_message("user-a", "/help"))
-        self.assertIn("/agent", self.ilink.sent[-1][2])
-        self.assertIn("/clear", self.ilink.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/help"))
+        self.assertIn("/agent", self.channel.sent[-1][2])
+        self.assertIn("/clear", self.channel.sent[-1][2])
         self.assertEqual(
             self.recipients[-1], ("user-a", "context-user-a")
         )
 
-        self.bot.handle_message(text_message("user-a", "/tools"))
-        self.assertIn("未启用本机工具", self.ilink.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/tools"))
+        self.assertIn("未启用本机工具", self.channel.sent[-1][2])
 
     def test_model_command_is_scoped_to_current_user(self) -> None:
-        self.bot.handle_message(text_message("user-a", "/model"))
-        self.assertIn("当前模型模式", self.ilink.sent[-1][2])
-        self.bot.handle_message(text_message("user-a", "/model flash"))
-        self.assertIn("当前模型模式", self.ilink.sent[-1][2])
-        self.bot.handle_message(text_message("user-b", "/model"))
-        self.assertIn("auto", self.ilink.sent[-1][2])
-        self.bot.handle_message(text_message("user-a", "/model invalid"))
-        self.assertIn("未知模型模式", self.ilink.sent[-1][2])
-        self.bot.handle_message(text_message("user-a", "/model auto extra"))
-        self.assertIn("格式错误", self.ilink.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/model"))
+        self.assertIn("当前模型模式", self.channel.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/model flash"))
+        self.assertIn("当前模型模式", self.channel.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-b", "/model"))
+        self.assertIn("auto", self.channel.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/model invalid"))
+        self.assertIn("未知模型模式", self.channel.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/model auto extra"))
+        self.assertIn("格式错误", self.channel.sent[-1][2])
 
     def test_approval_command_requires_exact_format_and_pending_request(self) -> None:
-        self.bot.handle_message(text_message("user-a", "/approve"))
-        self.assertIn("格式错误", self.ilink.sent[-1][2])
-        self.bot.handle_message(text_message("user-a", "/approve abc123"))
-        self.assertIn("没有待确认", self.ilink.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/approve"))
+        self.assertIn("格式错误", self.channel.sent[-1][2])
+        self.bot.handle_inbound(text_message("user-a", "/approve abc123"))
+        self.assertIn("没有待确认", self.channel.sent[-1][2])
 
     def test_chinese_approval_words_are_exact_and_only_apply_when_pending(self) -> None:
         for word in ("同意", "确认", "不同意", "拒绝", "取消"):
@@ -299,16 +352,16 @@ class MainBotTests(unittest.TestCase):
                 "resolve_pending_approval",
                 return_value=FinalAnswer("已处理"),
             ) as resolve:
-                self.bot.handle_message(text_message("user-a", "  {}  ".format(word)))
+                self.bot.handle_inbound(text_message("user-a", "  {}  ".format(word)))
                 resolve.assert_called_once_with(
                     "user-a", approved=word in {"同意", "确认"}
                 )
-                self.assertEqual(self.ilink.sent[-1][2], "已处理")
+                self.assertEqual(self.channel.sent[-1][2], "已处理")
 
         calls_before = len(self.ollama.calls)
-        self.bot.handle_message(text_message("user-a", "我还没有确认"))
-        self.bot.handle_message(text_message("user-a", "确认。"))
-        self.bot.handle_message(text_message("user-a", "同意"))
+        self.bot.handle_inbound(text_message("user-a", "我还没有确认"))
+        self.bot.handle_inbound(text_message("user-a", "确认。"))
+        self.bot.handle_inbound(text_message("user-a", "同意"))
         self.assertEqual(len(self.ollama.calls), calls_before + 3)
 
     def test_approval_timeout_discards_request_and_notifies_once(self) -> None:
@@ -319,9 +372,9 @@ class MainBotTests(unittest.TestCase):
             timers.append(timer)
             return timer
 
-        bot = WeChatBot(
-            self.ilink,
+        bot = MessageBot(
             self.agent_service,
+            MessageRouter([self.channel]),
             interaction_logger=lambda direction, user, content: self.logs.append(
                 (direction, user, content)
             ),
@@ -337,7 +390,7 @@ class MainBotTests(unittest.TestCase):
         ) as chat, patch.object(
             self.agent_service, "expire_approval", side_effect=[True, False]
         ) as expire:
-            bot.handle_message(text_message("user-a", "创建文件"))
+            bot.handle_inbound(text_message("user-a", "创建文件"))
             self.assertTrue(timers[0].started)
             self.assertTrue(timers[0].daemon)
             self.assertEqual(timers[0].delay, 0)
@@ -348,7 +401,7 @@ class MainBotTests(unittest.TestCase):
         chat.assert_called_once()
         self.assertEqual(expire.call_count, 2)
         timeout_messages = [
-            item for item in self.ilink.sent if "确认已超时" in item[2]
+            item for item in self.channel.sent if "确认已超时" in item[2]
         ]
         self.assertEqual(len(timeout_messages), 1)
         self.assertEqual(timeout_messages[0][1], "context-user-a")
@@ -361,9 +414,9 @@ class MainBotTests(unittest.TestCase):
             timers.append(timer)
             return timer
 
-        bot = WeChatBot(
-            self.ilink,
+        bot = MessageBot(
             self.agent_service,
+            MessageRouter([self.channel]),
             interaction_logger=lambda *_args: None,
             timer_factory=timer_factory,
         )
@@ -380,29 +433,29 @@ class MainBotTests(unittest.TestCase):
         with patch.object(
             self.agent_service, "chat", side_effect=[first, second]
         ):
-            bot.handle_message(text_message("user-a", "第一次"))
-            bot.handle_message(text_message("user-a", "第二次"))
+            bot.handle_inbound(text_message("user-a", "第一次"))
+            bot.handle_inbound(text_message("user-a", "第二次"))
 
         self.assertTrue(timers[0].cancelled)
         self.assertFalse(timers[1].cancelled)
-        bot.handle_message(text_message("user-a", "/clear"))
+        bot.handle_inbound(text_message("user-a", "/clear"))
         self.assertTrue(timers[1].cancelled)
 
     def test_input_and_output_are_logged_and_user_id_is_masked(self) -> None:
         output = StringIO()
-        bot = WeChatBot(
-            self.ilink,
+        bot = MessageBot(
             self.agent_service,
+            MessageRouter([self.channel]),
             interaction_logger=log_interaction,
         )
         user_id = "o9cq800kum_secret@im.wechat"
         with redirect_stdout(output):
-            bot.handle_message(text_message(user_id, "你好，机器人"))
+            bot.handle_inbound(text_message(user_id, "你好，机器人"))
 
         log_text = output.getvalue()
-        self.assertIn("微信输入", log_text)
+        self.assertIn("消息输入", log_text)
         self.assertIn("你好，机器人", log_text)
-        self.assertIn("微信输出", log_text)
+        self.assertIn("消息输出", log_text)
         self.assertIn("回答1", log_text)
         self.assertNotIn(user_id, log_text)
 
@@ -498,7 +551,10 @@ class MainBotTests(unittest.TestCase):
             output_stream=output,
         )
         self.assertEqual(result, 0)
-        self.assertIn("wechat-main\twechat_ilink\t启用", output.getvalue())
+        self.assertIn(
+            "wechat-main\twechat_ilink\t启用\tgeneral",
+            output.getvalue(),
+        )
 
     def test_notify_cli_supports_local_or_remote_image_with_optional_caption(self) -> None:
         service = FakeNotificationService()
@@ -584,31 +640,9 @@ class MainBotTests(unittest.TestCase):
             self.assertEqual(result, 0)
             notify.assert_called_once()
 
-    def test_malformed_codex_hook_is_non_blocking_and_bypasses_lock(self) -> None:
-        stdout = StringIO()
-        stderr = StringIO()
-        result = run_codex_hook_command(
-            Namespace(stdin=True),
-            input_stream=StringIO("{not-json"),
-            output_stream=stdout,
-            error_stream=stderr,
-        )
-        self.assertEqual(result, 0)
-        self.assertEqual(json.loads(stdout.getvalue()), {})
-        self.assertIn("采集失败", stderr.getvalue())
-
-        with tempfile.TemporaryDirectory() as directory:
-            lock_path = Path(directory) / "bot.lock"
-            with SingleInstanceLock(lock_path):
-                with patch.object(main_module, "INSTANCE_LOCK_PATH", lock_path):
-                    with patch.object(
-                        main_module,
-                        "run_codex_hook_command",
-                        return_value=0,
-                    ) as hook:
-                        result = main_module.main(["codex-hook", "--stdin"])
-        self.assertEqual(result, 0)
-        hook.assert_called_once()
+    def test_codex_hook_is_not_a_cli_command(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["codex-hook", "--stdin"])
 
 
 if __name__ == "__main__":

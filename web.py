@@ -184,6 +184,7 @@ def _run_combined(args) -> int:
                 drive_service=services.drive_service,
                 drive_audit_store=drive_audit_store,
                 plugin_context=runtime.plugin_context,
+                plugin_manager=runtime.plugin_manager,
                 scheduler=runtime.scheduler,
                 tool_audit_store=tool_audit_store,
                 model_analytics_store=services.model_analytics_store,
@@ -193,6 +194,7 @@ def _run_combined(args) -> int:
                 script_service=runtime.script_service,
                 script_registry=runtime.external_script_registry,
                 script_schedule_service=runtime.script_schedule_service,
+                channel_statuses=runtime.channel_statuses,
                 secure_cookies=args.behind_https,
                 owns_services=False,
             )
@@ -248,8 +250,9 @@ def _run_panel_only(args) -> int:
     from src.core.storage.tool_audit import ToolAuditStore
     from src.core.storage.drive_audit import DriveAuditStore
     from src.core.tooling import ToolRuntime
-    from src.core.plugins.registry import build_plugins
+    from src.core.plugins.registry import build_plugin_manager
     from src.core.plugins.base import PluginContext
+    from src.core.services.notification import NotificationService
     from src.core.paths import PROJECT_ROOT, SYSTEM_DATA_DIR
     from src.api.app import create_app
 
@@ -307,14 +310,20 @@ def _run_panel_only(args) -> int:
         config.app.timezone,
     )
 
+    notification_service = NotificationService(
+        credentials_loader=lambda: credentials,
+        recipient_store=recipient_store,
+    )
     plugin_context = PluginContext(
         project_root=PROJECT_ROOT,
         tenant_registry=registry,
+        notification_service=notification_service,
+        timezone=config.app.timezone,
+        data_root=DATA_DIR / "plugins",
     )
-    platform_plugins = (
-        build_plugins(config.plugins, context=plugin_context)
-        if config.tools.enabled
-        else []
+    plugin_manager = build_plugin_manager(
+        config.plugins if config.tools.enabled else {},
+        context=plugin_context,
     )
 
     tool_audit_store = ToolAuditStore(registry)
@@ -329,13 +338,16 @@ def _run_panel_only(args) -> int:
         mcp_manager.start()
         mcp_manager.reload(config.mcp_servers)
 
+    from src.core.services.ocr import OcrService
+
+    ocr_service = OcrService(config.tools.ocr) if config.tools.enabled else None
     tool_runtime = (
         ToolRuntime(
             config.tools,
             config.app.timezone,
             tenant_registry=registry,
             knowledge_service=knowledge_service,
-            plugins=platform_plugins,
+            plugin_manager=plugin_manager,
             script_service=script_service,
             script_schedule_service=script_schedule_service,
             tool_audit_store=tool_audit_store,
@@ -343,6 +355,7 @@ def _run_panel_only(args) -> int:
             mcp_manager=mcp_manager,
             drive_service=services.drive_service,
             drive_audit_store=drive_audit_store,
+            ocr_service=ocr_service,
         )
         if config.tools.enabled
         else None
@@ -357,7 +370,12 @@ def _run_panel_only(args) -> int:
         knowledge_service=knowledge_service,
         model_analytics_store=model_analytics_store,
         skills=config.skills,
+        ocr_service=ocr_service,
     )
+    if ocr_service is not None and config.tools.ocr.enabled:
+        ocr_available, ocr_reason = ocr_service.availability()
+        if not ocr_available:
+            print("警告：OCR 工具不可用：{}".format(ocr_reason), file=sys.stderr)
 
     scheduler = SchedulerService(
         credentials=credentials,
@@ -369,8 +387,10 @@ def _run_panel_only(args) -> int:
         script_schedule_service=script_schedule_service,
         tenant_registry=registry,
         schedule_store=schedule_store,
-        plugins=platform_plugins,
+        plugin_manager=plugin_manager,
+        notification_service=notification_service,
     )
+    plugin_manager.start()
     scheduler.start()
 
     admin_auth, admin_user_store, admin_role_store, initial_password = (
@@ -384,6 +404,7 @@ def _run_panel_only(args) -> int:
         drive_service=services.drive_service,
         drive_audit_store=drive_audit_store,
         plugin_context=plugin_context,
+        plugin_manager=plugin_manager,
         scheduler=scheduler,
         tool_audit_store=tool_audit_store,
         model_analytics_store=model_analytics_store,

@@ -508,37 +508,27 @@ function initKnowledge() {
 
     function loadEmbeddingConfig() {
         return jsonFetch("/api/knowledge/embedding-config").then(function (data) {
-            document.getElementById("knowledge-embedding-id").value = data.id;
-            document.getElementById("knowledge-embedding-enabled").checked = data.enabled;
-            document.getElementById("knowledge-embedding-url").value = data.base_url;
-            document.getElementById("knowledge-embedding-model").value = data.model;
-            document.getElementById("knowledge-embedding-dimensions").value = data.dimensions;
-            document.getElementById("knowledge-embedding-timeout").value = data.timeout_seconds;
+            var badge = document.getElementById("knowledge-embedding-badge");
+            document.getElementById("knowledge-embedding-id").textContent = data.profile_id || "—";
+            document.getElementById("knowledge-embedding-model").textContent = data.model || "—";
+            document.getElementById("knowledge-embedding-dimensions").textContent =
+                data.dimensions != null ? String(data.dimensions) : "—";
             document.getElementById("knowledge-embedding-runtime").textContent =
                 data.runtime_enabled
                     ? "当前进程：向量服务已启用"
                     : "当前进程：向量服务未启用";
+            if (!data.bound) {
+                badge.textContent = "未绑定";
+                badge.className = "badge badge-fallback";
+            } else if (data.runtime_enabled) {
+                badge.textContent = "已启用";
+                badge.className = "badge badge-primary";
+            } else {
+                badge.textContent = "已绑定（未启用）";
+                badge.className = "badge badge-fallback";
+            }
         }).catch(function (err) { showToast(err.message, "error"); });
     }
-    document.getElementById("knowledge-embedding-form").addEventListener("submit", function (evt) {
-        evt.preventDefault();
-        var payload = {
-            id: document.getElementById("knowledge-embedding-id").value.trim(),
-            enabled: document.getElementById("knowledge-embedding-enabled").checked,
-            base_url: document.getElementById("knowledge-embedding-url").value.trim(),
-            model: document.getElementById("knowledge-embedding-model").value.trim(),
-            dimensions: Number(document.getElementById("knowledge-embedding-dimensions").value),
-            timeout_seconds: Number(document.getElementById("knowledge-embedding-timeout").value)
-        };
-        jsonFetch("/api/knowledge/embedding-config", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        }).then(function () {
-            showToast("向量配置已保存，完整重启服务后生效", "success");
-            loadEmbeddingConfig();
-        }).catch(function (err) { showToast(err.message, "error"); });
-    });
 
     loadTenants();
 }

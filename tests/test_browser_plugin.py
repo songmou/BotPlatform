@@ -169,7 +169,10 @@ class PluginFrameworkTests(unittest.TestCase):
         self.assertTrue(plugin_config.enabled)
         plugin = BrowserAutomationPlugin(plugin_config.settings)
         try:
-            self.assertIn("browser_open", config.active_agent.tools)
+            self.assertIn(
+                "browser_open",
+                config.active_agent.plugin_tools["browser_automation"],
+            )
             self.assertFalse(plugin.tool_definitions["browser_interact"].requires_approval)
             self.assertEqual(plugin.config.session_ttl_seconds, 600)
             self.assertEqual(plugin.config.max_snapshot_chars, 12_000)

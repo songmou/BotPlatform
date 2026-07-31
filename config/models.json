@@ -66,6 +66,16 @@
       "assistant_passthrough_fields": [
         "reasoning_content"
       ]
+    },
+    "bge_m3_local": {
+      "enabled": false,
+      "modality": "embedding",
+      "type": "ollama",
+      "provider": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "bge-m3",
+      "dimensions": 1024,
+      "timeout_seconds": 60
     }
   }
 }

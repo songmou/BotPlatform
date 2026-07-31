@@ -13,9 +13,18 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.core.config.loader import ProjectConfig
-from src.core.integrations.embeddings import EmbeddingClient
-from src.core.modeling import ModelClient, ModelError, ModelRouter
-from src.core.modeling.factory import create_model_client
+from src.core.modeling import (
+    EmbeddingClient,
+    ModelClient,
+    ModelError,
+    ModelRouter,
+    RerankClient,
+)
+from src.core.modeling.factory import (
+    create_embedding_client,
+    create_model_client,
+    create_rerank_client,
+)
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.drive import DriveService
 from src.core.services.notification import TenantRecipientStore
@@ -36,6 +45,7 @@ class CoreServices:
     tenant_registry: TenantRegistry
     conversation_store: ConversationStore
     embedding_client: Optional[EmbeddingClient]
+    rerank_client: Optional[RerankClient]
     knowledge_service: KnowledgeService
     drive_service: DriveService
     recipient_store: TenantRecipientStore
@@ -48,6 +58,8 @@ class CoreServices:
             client.close()
         if self.embedding_client:
             self.embedding_client.close()
+        if self.rerank_client:
+            self.rerank_client.close()
 
 
 def build_core_services(
@@ -73,10 +85,31 @@ def build_core_services(
     )
     recipient_store = TenantRecipientStore(tenant_registry)
     schedule_store = ScheduleStore(tenant_registry)
-    embedding_client = (
-        EmbeddingClient(config.embedding) if config.embedding.enabled else None
+    warnings: List[str] = []
+
+    def _build_role_client(binding: str, builder, kind: str):
+        if not binding:
+            return None
+        profile = config.models.get(binding)
+        if profile is None or not profile.enabled:
+            return None
+        try:
+            return builder(profile)
+        except Exception as exc:
+            if strict_models:
+                raise
+            warnings.append("{} {} 初始化失败：{}".format(kind, binding, exc))
+            return None
+
+    embedding_client = _build_role_client(
+        config.app.embedding_model, create_embedding_client, "向量模型"
     )
-    knowledge_service = KnowledgeService(tenant_registry, embedding_client)
+    rerank_client = _build_role_client(
+        config.app.rerank_model, create_rerank_client, "重排模型"
+    )
+    knowledge_service = KnowledgeService(
+        tenant_registry, embedding_client, rerank_client
+    )
     knowledge_service.bootstrap_agent_bindings(
         agent.id for agent in config.agents.values() if agent.enabled
     )
@@ -85,7 +118,6 @@ def build_core_services(
     )
 
     clients: Dict[str, ModelClient] = {}
-    warnings: List[str] = []
 
     def analytics_logger(*values) -> None:
         model_analytics_store.record_model_call(*values)
@@ -94,7 +126,7 @@ def build_core_services(
 
     try:
         for profile_id, profile in config.models.items():
-            if not profile.enabled:
+            if not profile.enabled or profile.modality != "chat":
                 continue
             try:
                 clients[profile_id] = create_model_client(
@@ -132,6 +164,8 @@ def build_core_services(
             client.close()
         if embedding_client:
             embedding_client.close()
+        if rerank_client:
+            rerank_client.close()
         raise
 
     return CoreServices(
@@ -140,6 +174,7 @@ def build_core_services(
         tenant_registry=tenant_registry,
         conversation_store=conversation_store,
         embedding_client=embedding_client,
+        rerank_client=rerank_client,
         knowledge_service=knowledge_service,
         drive_service=drive_service,
         recipient_store=recipient_store,
