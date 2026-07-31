@@ -1204,6 +1204,35 @@ class CodexTaskService:
                 self._client = self._new_client()
             return self._client
 
+    def _discard_client_if_broken(self, exc: Exception) -> None:
+        """Drop the cached client when its codex subprocess pipe is dead.
+
+        Writing to a dead child's stdin raises BrokenPipeError (POSIX) or
+        OSError EINVAL (Windows). The cached client can never recover, so
+        discard it and let the next call spawn a fresh subprocess.
+        """
+        current: Optional[BaseException] = exc
+        broken = False
+        while current is not None:
+            if isinstance(current, BrokenPipeError):
+                broken = True
+                break
+            if isinstance(current, OSError) and current.errno in (22, 32):
+                broken = True
+                break
+            current = current.__cause__ or current.__context__
+        if not broken:
+            return
+        with self._client_lock:
+            client = self._client
+            self._client = None
+        if client is not None:
+            LOGGER.warning("Codex 子进程连接已断开，将在下次调用时自动重启。")
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - the process is already gone
+                pass
+
     @staticmethod
     def _safe_error(exc: Exception) -> str:
         message = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
@@ -1810,6 +1839,7 @@ class CodexTaskService:
                     use_state_db_only=True,
                 )
             except Exception as exc:
+                self._discard_client_if_broken(exc)
                 raise PluginError("读取 Codex 任务列表失败：{}".format(self._safe_error(exc))) from exc
             for thread in list(_value(response, "data", []) or []):
                 thread_id = str(_value(thread, "id", "") or "")
@@ -1966,6 +1996,7 @@ class CodexTaskService:
                 if latest:
                     summary["result"] = latest[: self.RESULT_LIMIT]
             except Exception as exc:
+                self._discard_client_if_broken(exc)
                 summary["read_warning"] = self._safe_error(exc)
             return summary
         external = self._external_task(task_id)
@@ -1978,6 +2009,7 @@ class CodexTaskService:
             if latest:
                 external["result"] = latest[: self.RESULT_LIMIT]
         except Exception as exc:
+            self._discard_client_if_broken(exc)
             external["read_warning"] = self._safe_error(exc)
         return external
 

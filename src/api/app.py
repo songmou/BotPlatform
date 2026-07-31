@@ -21,6 +21,7 @@ from src.api.routers import (
     models,
     mcp,
     plugins,
+    publish,
     scripts,
     schedules,
     skills,
@@ -42,6 +43,7 @@ def create_app(config, model_router, registry, conversation_store,
                script_service=None, script_registry=None,
                script_schedule_service=None,
                drive_service=None, drive_audit_store=None,
+               publish_store=None,
                secure_cookies=False, owns_services=True) -> FastAPI:
     # When the panel shares its service graph with the bot process
     # (owns_services=False), shutdown is handled by the bot runtime and the
@@ -83,6 +85,9 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.script_schedule_service = script_schedule_service
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
+    from src.core.services.publish import PublishStore
+
+    app.state.publish_store = publish_store or PublishStore()
     app.state.secure_cookies = secure_cookies
     app.state.owns_services = owns_services
     if drive_service is not None and knowledge_service is not None:
@@ -108,6 +113,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(schedules.router)
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
+    app.include_router(publish.router)
     app.include_router(bots.bots_router)
     app.include_router(skills.router)
     app.include_router(scripts.router)

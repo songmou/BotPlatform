@@ -78,6 +78,42 @@
     flex-wrap: wrap;
 }
 
+/* ===== Agent card publish row ===== */
+.agent-publish-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+}
+.agent-publish-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+.agent-publish-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.agent-publish-icon:hover {
+    border-color: var(--accent);
+    box-shadow: var(--shadow);
+}
+.agent-publish-icon img {
+    width: 18px;
+    height: 18px;
+    display: block;
+}
+
 /* ===== Agent tool picker ===== */
 .tool-picker {
     border: 1px solid var(--border, #e2e8f0);
@@ -187,4 +223,112 @@
     color: var(--text-muted, #94a3b8);
     font-size: 12px;
     padding: 4px;
+}
+
+/* ===== Publish modal ===== */
+.publish-platform-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.publish-platform-list .plugin-tile {
+    width: 100%;
+    box-sizing: border-box;
+}
+.plugin-avatar-img {
+    background: var(--bg-secondary) !important;
+}
+.plugin-avatar-img img {
+    width: 22px;
+    height: 22px;
+    display: block;
+}
+.wecom-methods {
+    display: flex;
+    gap: 20px;
+    margin: 12px 0;
+}
+.wecom-method {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    cursor: pointer;
+}
+.wecom-panel {
+    margin-bottom: 8px;
+}
+.wecom-qr-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    width: 180px;
+    height: 180px;
+    margin: 0 auto 12px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.6;
+    background: var(--bg-secondary);
+}
+.wechat-connect {
+    margin: 12px 0;
+    text-align: left;
+}
+.wechat-connect-status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.wecom-configured {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    text-align: left;
+}
+.wechat-qr {
+    display: block;
+    width: 180px;
+    height: 180px;
+    margin: 0 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.wechat-connect-hint {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 4px 0 8px;
+}
+.wechat-connect-error {
+    font-size: 12px;
+    color: #dc2626;
+    margin: 4px 0 8px;
+}
+.publish-advanced {
+    margin: 10px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0 12px;
+}
+.publish-advanced > summary {
+    cursor: pointer;
+    padding: 8px 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+    user-select: none;
+}
+.publish-advanced[open] {
+    padding-bottom: 8px;
+}
+.btn-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
 }

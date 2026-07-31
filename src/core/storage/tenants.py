@@ -339,6 +339,23 @@ class ConversationStore:
                     (tenant_id, "用户清除了当前对话上下文。", _utc_now()),
                 )
 
+    def clear_contexts_for_bots(self, bot_ids: Iterable[str]) -> int:
+        """Clear short-term context for every tenant under the given bots.
+
+        Used when a channel switches its bound agent so the new agent starts
+        without the previous conversation's memory. Durable transcripts in
+        conversation_events are preserved.
+        """
+        targets = {str(b) for b in bot_ids if b}
+        if not targets:
+            return 0
+        cleared = 0
+        for context in self.registry.list_contexts():
+            if context.bot_id in targets:
+                self.clear_context(context.tenant_id)
+                cleared += 1
+        return cleared
+
 
 class SettingsStore:
     def __init__(self, registry: TenantRegistry) -> None:

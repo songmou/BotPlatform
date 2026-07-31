@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 21
+LATEST_SCHEMA_VERSION = 22
 
 
 SCHEMA_V1 = r"""
@@ -1051,8 +1051,8 @@ WHERE category_id = 'public-default'
 """
 
 
-# Versions applied as plain SQL scripts. 12 and 13 are intentionally absent:
-# they require Python-side logic and run via dedicated Database methods.
+# Versions applied as plain SQL scripts. 12, 13 and 22 are intentionally
+# absent: they require Python-side logic and run via dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
     1: SCHEMA_V1,
     2: SCHEMA_V2,

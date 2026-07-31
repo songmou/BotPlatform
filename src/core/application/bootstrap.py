@@ -24,6 +24,7 @@ from src.core.infrastructure.logging import (
     log_tool_call,
 )
 from src.core.integrations.ilink import ILinkClient, ILinkError, SessionExpired
+from src.core.integrations.wecom_bot import WeComBotService
 from src.core.messaging import (
     AuthenticationExpired,
     ChannelAddressStore,
@@ -48,6 +49,7 @@ from src.core.services.notification import (
     NotificationDispatcher,
     NotificationService,
 )
+from src.core.services.publish import PublishStore
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
 from src.core.services.script_registry import ExternalScriptRegistry
@@ -107,6 +109,7 @@ class BotRuntime:
     tool_runtime: Optional[ToolRuntime]
     agent_service: AgentService
     scheduler: SchedulerService
+    wecom_bot_service: Optional[Any] = None
     _started: bool = field(default=False, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -117,6 +120,9 @@ class BotRuntime:
         self._started = True
         self.notification_dispatcher.start()
         self.scheduler.start()
+        if self.wecom_bot_service is not None:
+            self.wecom_bot_service.start()
+            print("企业微信智能机器人长连接服务已启动（发布后自动连接）。")
         print(
             "定时任务已启动：启用 {} / 共 {} 项，时区 {}。".format(
                 self.scheduler.enabled_count,
@@ -130,6 +136,8 @@ class BotRuntime:
         if self._closed:
             return
         self._closed = True
+        if self.wecom_bot_service is not None:
+            self.wecom_bot_service.stop()
         self.scheduler.shutdown()
         self.script_service.shutdown()
         if self.tool_runtime:
@@ -276,6 +284,14 @@ def build_bot_runtime(
         memory_service.close()
         raise
 
+    publish_store = PublishStore()
+    wecom_bot_service = WeComBotService(
+        agent_service,
+        publish_store,
+        tenant_registry=tenant_registry,
+        conversation_store=services.conversation_store,
+    )
+
     return BotRuntime(
         project_config=project_config,
         services=services,
@@ -297,6 +313,7 @@ def build_bot_runtime(
         tool_runtime=tool_runtime,
         agent_service=agent_service,
         scheduler=scheduler,
+        wecom_bot_service=wecom_bot_service,
     )
 
 
@@ -377,6 +394,7 @@ def run_channel_loop(runtime: BotRuntime, project_config: ProjectConfig) -> int:
                     notification_dispatcher=runtime.notification_dispatcher,
                     message_router=runtime.message_router,
                     address_store=runtime.address_store,
+                    publish_store=PublishStore(),
                 )
                 channel_manager = ChannelManager(
                     adapters,

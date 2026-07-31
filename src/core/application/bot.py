@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,11 @@ from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService
 from src.core.plugins import PluginError
+from src.core.services.publish import (
+    PLATFORM_WECHAT,
+    AgentBindingResolver,
+    PublishStore,
+)
 from src.core.services.script import ScriptService
 from src.core.services.notification import NotificationDispatcher, TenantRecipientStore
 from src.core.tooling import ApprovalRequired, ToolError
@@ -194,6 +200,7 @@ class MessageBot:
         notification_dispatcher: Optional[NotificationDispatcher] = None,
         message_router: Optional[MessageRouter] = None,
         address_store: Optional[ChannelAddressStore] = None,
+        publish_store: Optional[PublishStore] = None,
     ) -> None:
         self.ilink = ilink
         self._legacy_mode = message_router is None
@@ -217,6 +224,9 @@ class MessageBot:
         self.codex_tasks_plugin = codex_tasks_plugin
         self.integration_service = integration_service
         self.notification_dispatcher = notification_dispatcher
+        self._binding_resolver = (
+            AgentBindingResolver(publish_store) if publish_store is not None else None
+        )
         self._approval_timer_lock = threading.Lock()
         self._approval_timers: Dict[str, Tuple[str, Any]] = {}
         self._deletion_pending: Dict[str, Tuple[str, datetime]] = {}
@@ -896,6 +906,24 @@ class MessageBot:
         if not text and not image_item:
             return
 
+        resolved_agent_id: Optional[str] = None
+        if (
+            self._binding_resolver is not None
+            and endpoint.platform == "wechat_ilink"
+        ):
+            routing = self._binding_resolver.resolve(
+                PLATFORM_WECHAT,
+                self._subject_key(subject),
+                "" if image_item else normalized_text,
+                self.agent_service.agents,
+            )
+            if routing.reply is not None:
+                self._log(self._direction("输入", endpoint), user_id, text)
+                self._reply(endpoint, routing.reply, tenant)
+                self._log(self._direction("输出", endpoint), user_id, routing.reply)
+                return
+            resolved_agent_id = routing.agent_id
+
         question = text or self.agent_service.image_prompt
         input_log = "[图片] {}".format(question) if image_item else question
         self._log(self._direction("输入", endpoint), user_id, input_log)
@@ -908,7 +936,10 @@ class MessageBot:
                         image_item,
                     )
                 outcome = self.agent_service.chat(
-                    subject, question, image_bytes=image_bytes
+                    subject,
+                    question,
+                    image_bytes=image_bytes,
+                    agent_id=resolved_agent_id,
                 )
             answer = self._outcome_text(outcome)
         except SessionExpired:
@@ -918,6 +949,22 @@ class MessageBot:
             error_reply = "处理消息失败：{}。请稍后重试。".format(exc)
             self._reply(endpoint, error_reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, error_reply)
+            return
+        except Exception as exc:  # noqa: BLE001 - never let one message loop forever
+            # Any other error must not propagate: the inbox consumer would
+            # mark it "retry" and re-deliver the same message endlessly. Log
+            # the full traceback, tell the user, and finish this message.
+            traceback.print_exc()
+            print("处理用户消息异常：{}".format(repr(exc)), file=sys.stderr)
+            try:
+                self._reply(endpoint, "处理消息时出现内部错误，请稍后重试。", tenant)
+                self._log(
+                    self._direction("输出", endpoint),
+                    user_id,
+                    "处理消息时出现内部错误，请稍后重试。",
+                )
+            except Exception:  # noqa: BLE001 - best effort on the error reply
+                pass
             return
 
         self._track_approval_outcome(subject, endpoint, outcome)

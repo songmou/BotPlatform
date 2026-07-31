@@ -953,6 +953,11 @@ body {
     animation: fadeIn 0.15s ease;
 }
 
+/* The confirm dialog must stack above any open modal that triggers it. */
+#confirm-overlay {
+    z-index: 1600;
+}
+
 .modal {
     background: var(--bg);
     border-radius: var(--radius-lg);

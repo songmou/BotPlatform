@@ -482,3 +482,17 @@ class DriveAuditOut(BaseModel):
     size_bytes: int
     status: str
     error: Optional[str] = None
+
+
+class PublishAgentIn(BaseModel):
+    agent_id: str
+
+
+class PublishEnabledIn(BaseModel):
+    enabled: bool
+
+
+class WeComConfigIn(BaseModel):
+    bot_id: str
+    secret: str
+

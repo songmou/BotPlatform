@@ -1,4 +1,9 @@
 /* ===== Agents page ===== */
+// Brand icon file per platform (WeCom/Feishu ship as PNG, others as SVG).
+var PUBLISH_ICON_EXT = { wechat: "svg", wecom: "png", dingtalk: "svg", feishu: "png" };
+function publishIconSrc(platform) {
+    return "/static/img/publish/" + platform + "." + (PUBLISH_ICON_EXT[platform] || "svg");
+}
 function initAgents() {
     var listEl = document.getElementById("agent-list");
     var modal = document.getElementById("agent-modal");
@@ -267,6 +272,14 @@ function initAgents() {
         }
         actions += "</div>";
 
+        var publishRow = '<div class="agent-publish-row"><span class="agent-publish-label">发布：</span>' +
+            ["wechat", "wecom", "feishu", "dingtalk"].map(function (p) {
+                return '<button class="agent-publish-icon" data-action="publish-platform" data-id="' + a.id +
+                    '" data-platform="' + p + '" title="' +
+                    ({ wechat: "微信", wecom: "企业微信", feishu: "飞书", dingtalk: "钉钉" })[p] + '">' +
+                    '<img src="' + publishIconSrc(p) + '" alt="' + p + '"></button>';
+            }).join("") + "</div>";
+
         return '<div class="agent-card' + (enabled ? "" : " disabled") + '" data-id="' + a.id + '">' +
             "<h5>" + escapeHtml(a.name) + " " + badges + "</h5>" +
             '<p class="agent-card-role">' + escapeHtml(a.role || "") + "</p>" +
@@ -275,6 +288,7 @@ function initAgents() {
             "<p>模型：" + escapeHtml(modelInfo) + "</p>" +
             "<p>" + counts + "</p>" +
             actions +
+            publishRow +
             "</div>";
     }
 
@@ -312,6 +326,15 @@ function initAgents() {
                     })
                     .catch(function (err) { showToast("删除失败：" + err.message, "error"); });
             });
+        }
+
+        if (action === "publish-platform") {
+            var platform = btn.getAttribute("data-platform");
+            if (platform === "dingtalk" || platform === "feishu") {
+                showToast(({ dingtalk: "钉钉", feishu: "飞书" })[platform] + "发布暂未开放，敬请期待", "info");
+                return;
+            }
+            openPublishModal(id, platform);
         }
 
         if (action === "edit") {
@@ -413,4 +436,367 @@ function initAgents() {
             })
             .catch(function (err) { showToast("保存失败：" + err.message, "error"); });
     });
+
+    /* ===== Publish ===== */
+    var publishModal = document.getElementById("publish-modal");
+    var publishPlatforms = document.getElementById("publish-platforms");
+    var publishTitle = document.getElementById("publish-modal-title");
+    var publishAgentId = null;
+    var publishPlatform = null;
+    // Per-open-session guard so auto-association fires at most once per
+    // platform after a successful scan/config, avoiding render loops.
+    var autoAssocDone = {};
+    var boundByPlatform = {};
+    // Guard so the WeChat panel auto-starts a login (to show a QR) only once
+    // per open session, not on every 2s status poll.
+    var wechatAutoStarted = false;
+
+    document.getElementById("publish-modal-close").addEventListener("click", closePublishModal);
+    document.getElementById("publish-modal-cancel").addEventListener("click", closePublishModal);
+    publishModal.addEventListener("click", function (e) {
+        if (e.target === publishModal) closePublishModal();
+    });
+
+    function closePublishModal() {
+        publishModal.style.display = "none";
+        stopWechatPoll();
+    }
+
+    function openPublishModal(agentId, platform) {
+        publishAgentId = agentId;
+        publishPlatform = platform || null;
+        autoAssocDone = {};
+        boundByPlatform = {};
+        wechatAutoStarted = false;
+        publishTitle.textContent = "发布智能体「" + agentId + "」到" + platformName(platform);
+        renderPublish();
+        publishModal.style.display = "";
+    }
+
+    // Associate the current agent to a platform once its bot connection is
+    // ready (WeChat scanned / WeCom configured). Guarded to fire once per
+    // open session so re-renders do not loop.
+    function autoAssociate(platform) {
+        if (autoAssocDone[platform]) return;
+        autoAssocDone[platform] = true;
+        fetch("/api/publish/" + platform + "/agents", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ agent_id: publishAgentId }),
+        }).then(handleRes).then(function () {
+            showToast("已关联到" + platformName(platform), "success");
+            loadAgents();
+            renderPublish();
+        }).catch(function (err) {
+            showToast("关联失败：" + err.message, "error");
+        });
+    }
+
+    function renderPublish() {
+        publishPlatforms.innerHTML = '<div class="tool-empty">加载中…</div>';
+        fetch("/api/publish")
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var platforms = (data && data.platforms) || [];
+                if (publishPlatform) {
+                    platforms = platforms.filter(function (p) {
+                        return p.platform === publishPlatform;
+                    });
+                }
+                platforms.forEach(function (p) {
+                    boundByPlatform[p.platform] = p.agent ? p.agent.agent_id : null;
+                });
+                publishPlatforms.innerHTML = platforms.map(platformCardHtml).join("");
+                if (publishPlatforms.querySelector('[data-role="wechat-connect"]')) {
+                    refreshWechatConnect();
+                }
+                // WeCom: once credentials are configured, auto-associate only
+                // when the platform has no binding yet. If it is bound to a
+                // different agent, switching requires explicit confirmation.
+                platforms.forEach(function (p) {
+                    if (p.platform === "wecom" && p.config && p.config.configured &&
+                        !boundByPlatform.wecom) {
+                        autoAssociate("wecom");
+                    }
+                });
+            })
+            .catch(function () {
+                publishPlatforms.innerHTML = '<div class="tool-empty">加载失败</div>';
+            });
+    }
+
+    var wechatPollTimer = null;
+
+    function stopWechatPoll() {
+        if (wechatPollTimer) {
+            clearTimeout(wechatPollTimer);
+            wechatPollTimer = null;
+        }
+    }
+
+    function refreshWechatConnect() {
+        stopWechatPoll();
+        var box = publishPlatforms.querySelector('[data-role="wechat-connect"]');
+        if (!box || publishModal.style.display === "none") return;
+        fetch("/api/publish/wechat/status")
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+                box = publishPlatforms.querySelector('[data-role="wechat-connect"]');
+                if (!box) return;
+                renderWechatConnect(box, s);
+                if (s.state === "pending" || s.state === "scanned") {
+                    wechatPollTimer = setTimeout(refreshWechatConnect, 2000);
+                }
+            })
+            .catch(function () {
+                if (box) box.innerHTML = '<div class="tool-empty">连接状态获取失败</div>';
+            });
+    }
+
+    function renderWechatConnect(box, s) {
+        // A re-scan keeps the old credentials until confirmed, so `connected`
+        // may still be true while a new login is in progress. Show the QR
+        // first whenever a login is pending/scanning.
+        if (s.state === "pending" || s.state === "scanned") {
+            var hint = s.state === "scanned"
+                ? "已扫码，请在手机上确认…"
+                : "打开微信，扫描二维码连接机器人";
+            box.innerHTML = (s.qr
+                ? '<img class="wechat-qr" src="' + s.qr + '" alt="微信登录二维码">'
+                : '<div class="wecom-qr-placeholder">正在生成二维码…</div>') +
+                '<p class="wechat-connect-hint">' + hint + "</p>";
+            return;
+        }
+        if (s.connected) {
+            box.innerHTML = '<div class="wechat-connect-status">' +
+                '<span class="badge badge-success">机器人已连接</span>' +
+                (s.bot_id ? '<span class="text-muted"> bot_id: ' + escapeHtml(s.bot_id) + "</span>" : "") +
+                "</div>" +
+                '<p class="wechat-connect-hint">若在别处重新绑定了该微信号导致掉线，可点此重新扫码夺回连接。</p>' +
+                '<button type="button" class="btn-secondary" data-pub-action="wechat-login">重新扫码（换号/重连）</button>';
+            // Auto-associate only when the platform has no binding yet;
+            // switching from another agent needs explicit confirmation.
+            if (!boundByPlatform.wechat) {
+                autoAssociate("wechat");
+            }
+            return;
+        }
+        if (s.state === "failed") {
+            box.innerHTML = '<div class="wechat-connect-status">' +
+                '<span class="badge badge-muted">机器人未连接</span></div>' +
+                (s.error ? '<p class="wechat-connect-error">' + escapeHtml(s.error) + "</p>" : "") +
+                '<button type="button" class="btn-primary" data-pub-action="wechat-login">刷新二维码</button>';
+            return;
+        }
+        // idle & not connected: auto-start a login so a QR is always shown.
+        box.innerHTML = '<div class="wechat-connect-status">' +
+            '<span class="badge badge-muted">机器人未连接</span></div>' +
+            '<div class="wecom-qr-placeholder">正在生成二维码…</div>';
+        if (!wechatAutoStarted) {
+            wechatAutoStarted = true;
+            fetch("/api/publish/wechat/login", { method: "POST" })
+                .then(handleRes)
+                .then(function () { refreshWechatConnect(); })
+                .catch(function (err) { showToast("生成二维码失败：" + err.message, "error"); });
+        }
+    }
+
+    function platformCardHtml(platform) {
+        var header = '<div class="plugin-tile-header">' +
+            '<div class="plugin-avatar plugin-avatar-img">' +
+            '<img src="' + publishIconSrc(platform.platform) + '" alt="' + platform.platform + '"></div>' +
+            '<div class="plugin-tile-info"><div class="plugin-tile-name">' + escapeHtml(platform.name) + "</div>";
+
+        if (!platform.supported) {
+            return '<div class="plugin-tile" style="opacity:0.55" data-placeholder="' + platform.platform + '">' +
+                header + '<div class="plugin-tile-meta"><span class="badge badge-muted">暂未开放</span></div></div></div>' +
+                '<button type="button" class="btn-secondary" data-pub-action="placeholder">敬请期待</button></div>';
+        }
+
+        var bound = platform.agent || null;
+        var isThis = bound && bound.agent_id === publishAgentId;
+        var statusBadge;
+        if (isThis) {
+            statusBadge = bound.enabled
+                ? '<span class="badge badge-success">已关联本智能体</span>'
+                : '<span class="badge badge-fallback">已禁用</span>';
+        } else if (bound) {
+            statusBadge = '<span class="badge badge-muted">已关联：' +
+                escapeHtml(bound.agent_name || bound.agent_id) + "</span>";
+        } else {
+            statusBadge = '<span class="badge badge-muted">未关联</span>';
+        }
+        header += '<div class="plugin-tile-meta">' + statusBadge + "</div></div></div>";
+
+        var body = "";
+        if (platform.platform === "wechat") {
+            body += '<div class="wechat-connect" data-role="wechat-connect">' +
+                '<div class="tool-empty">正在获取连接状态…</div></div>';
+        }
+        if (platform.platform === "wecom") {
+            var cfg = platform.config || {};
+            if (cfg.configured) {
+                body += '<div class="wechat-connect-status wecom-configured">' +
+                    '<span class="badge badge-success">机器人已配置</span>' +
+                    '<span class="text-muted">Bot ID: ' + escapeHtml(cfg.bot_id || "") + "</span>" +
+                    '<button type="button" class="btn-link" data-pub-action="wecom-reconfig">重新配置</button>' +
+                    "</div>";
+                body += '<div class="wecom-setup" style="display:none">';
+            } else {
+                body += '<div class="wecom-setup">';
+            }
+            body += '<div class="wecom-methods">' +
+                '<label class="wecom-method"><input type="radio" name="wecom-method" value="quick" checked> 快捷绑定（推荐）</label>' +
+                '<label class="wecom-method"><input type="radio" name="wecom-method" value="manual"> 手动配置</label>' +
+                "</div>" +
+                '<div class="wecom-panel" data-panel="quick">' +
+                '<div class="wecom-qr-placeholder">扫码创建机器人暂未开放<br>请先使用「手动配置」填入 Bot ID / Secret</div>' +
+                "</div>" +
+                '<div class="wecom-panel" data-panel="manual" style="display:none">' +
+                '<p class="wechat-connect-hint">在企微后台为智能机器人开启「API 模式 - 长连接」后，填入凭证；保存并发布后机器人进程会自动建立连接。</p>' +
+                '<div class="form-group"><label>Bot ID</label>' +
+                '<input type="text" data-field="bot_id" value="' + escapeHtml(cfg.bot_id || "") + '" placeholder="企业微信智能机器人 Bot ID"></div>' +
+                '<div class="form-group"><label>Secret</label>' +
+                '<input type="password" data-field="secret" placeholder="' +
+                (cfg.configured ? "已配置，如需修改请重新填写" : "机器人 Secret") + '"></div>' +
+                '<button type="button" class="btn-secondary" data-pub-action="wecom-config">保存配置</button>' +
+                "</div></div>";
+        }
+
+        var actions = "";
+        if (isThis) {
+            actions = '<div class="model-card-footer">' +
+                '<button type="button" class="btn-secondary" data-pub-action="toggle" data-enabled="' +
+                (bound.enabled ? "1" : "0") + '">' + (bound.enabled ? "禁用" : "启用") + "</button> " +
+                '<button type="button" class="btn-danger" data-pub-action="delete" data-agent="' +
+                escapeHtml(bound.agent_id) + '">取消关联</button></div>';
+        } else if (bound) {
+            actions = '<div class="model-card-footer"><button type="button" class="btn-primary" ' +
+                'data-pub-action="publish">改为关联本智能体（替换当前）</button></div>';
+        }
+
+        return '<div class="plugin-tile" data-platform="' + platform.platform +
+            '" data-bound="' + (bound ? escapeHtml(bound.agent_id) : "") + '">' +
+            header + body + actions + "</div>";
+    }
+
+    publishPlatforms.addEventListener("change", function (e) {
+        var radio = e.target.closest('input[name="wecom-method"]');
+        if (!radio) return;
+        var tile = radio.closest("[data-platform]");
+        if (!tile) return;
+        tile.querySelectorAll(".wecom-panel").forEach(function (panel) {
+            panel.style.display = panel.getAttribute("data-panel") === radio.value ? "" : "none";
+        });
+    });
+
+    publishPlatforms.addEventListener("click", function (e) {
+        var btn = e.target.closest("[data-pub-action]");
+        if (!btn) return;
+        var action = btn.getAttribute("data-pub-action");
+        if (action === "placeholder") {
+            showToast("该平台暂未开放，敬请期待", "info");
+            return;
+        }
+        var tile = btn.closest("[data-platform]");
+        if (!tile) return;
+        var platform = tile.getAttribute("data-platform");
+
+        function field(name) { return tile.querySelector('[data-field="' + name + '"]'); }
+
+        if (action === "wechat-login") {
+            fetch("/api/publish/wechat/login", { method: "POST" })
+                .then(handleRes)
+                .then(function () { refreshWechatConnect(); })
+                .catch(function (err) { showToast("启动扫码失败：" + err.message, "error"); });
+            return;
+        }
+
+        if (action === "wecom-reconfig") {
+            var setup = tile.querySelector(".wecom-setup");
+            if (setup) setup.style.display = setup.style.display === "none" ? "" : "none";
+            return;
+        }
+
+        if (action === "wecom-config") {
+            var payload = {
+                bot_id: field("bot_id").value.trim(),
+                secret: field("secret").value.trim(),
+            };
+            if (!payload.bot_id || !payload.secret) {
+                showToast("请填写 Bot ID 和 Secret", "error");
+                return;
+            }
+            var saveBtn = btn;
+            var oldText = saveBtn.textContent;
+            saveBtn.disabled = true;
+            saveBtn.textContent = "校验中…";
+            fetch("/api/publish/wecom/config", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            }).then(handleRes).then(function () {
+                showToast("企业微信凭证校验通过并已保存", "success");
+                renderPublish();
+            }).catch(function (err) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = oldText;
+                showToast("保存失败：" + err.message, "error");
+            });
+            return;
+        }
+
+        if (action === "publish") {
+            showConfirm(
+                "确定将「" + platformName(platform) + "」切换为关联本智能体吗？" +
+                "切换后会清空该平台的会话上下文，新助手将从头开始。"
+            ).then(function (ok) {
+                if (!ok) return;
+                fetch("/api/publish/" + platform + "/agents", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ agent_id: publishAgentId }),
+                }).then(handleRes).then(function () {
+                    showToast("已关联到" + platformName(platform), "success");
+                    closePublishModal();
+                    loadAgents();
+                }).catch(function (err) { showToast("关联失败：" + err.message, "error"); });
+            });
+            return;
+        }
+
+        if (action === "toggle") {
+            var nextEnabled = btn.getAttribute("data-enabled") !== "1";
+            fetch("/api/publish/" + platform + "/agents/" + encodeURIComponent(publishAgentId) + "/enabled", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ enabled: nextEnabled }),
+            }).then(handleRes).then(function () {
+                showToast(nextEnabled ? "已启用" : "已禁用", "success");
+                renderPublish();
+            }).catch(function (err) { showToast("操作失败：" + err.message, "error"); });
+            return;
+        }
+
+        if (action === "delete") {
+            showConfirm("确定要取消" + platformName(platform) + "与本智能体的关联吗？").then(function (ok) {
+                if (!ok) return;
+                fetch("/api/publish/" + platform + "/agents/" + encodeURIComponent(publishAgentId), {
+                    method: "DELETE",
+                }).then(handleRes).then(function () {
+                    showToast("已取消关联", "success");
+                    renderPublish();
+                }).catch(function (err) { showToast("取消失败：" + err.message, "error"); });
+            });
+        }
+    });
+
+    function handleRes(r) {
+        if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail || "请求失败"); });
+        return r.json();
+    }
+
+    function platformName(platform) {
+        return { wechat: "微信", wecom: "企业微信", dingtalk: "钉钉", feishu: "飞书" }[platform] || platform;
+    }
 }

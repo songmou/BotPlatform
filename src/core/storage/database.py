@@ -113,6 +113,8 @@ class Database:
                         self._migrate_v12(connection)
                     elif version == 13:
                         self._migrate_v13(connection)
+                    elif version == 22:
+                        self._migrate_v22(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -257,6 +259,41 @@ class Database:
                 "INSERT INTO schema_migrations(version, applied_at) "
                 "VALUES (13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_v22(connection: sqlite3.Connection) -> None:
+        """Backfill codex_task_runs.source_cwd on installs that passed V6.
+
+        The column was added to SCHEMA_V6 after that migration had already
+        shipped, so databases which recorded version 6 (or higher) before the
+        edit never gained the column. Add it idempotently here.
+        """
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            migrated_version = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+                ).fetchone()[0]
+            )
+            if migrated_version < 22:
+                columns = {
+                    str(info[1])
+                    for info in connection.execute(
+                        "PRAGMA table_info(codex_task_runs)"
+                    ).fetchall()
+                }
+                if columns and "source_cwd" not in columns:
+                    connection.execute(
+                        "ALTER TABLE codex_task_runs ADD COLUMN source_cwd TEXT"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) "
+                    "VALUES (22, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                )
             connection.commit()
         except Exception:
             connection.rollback()

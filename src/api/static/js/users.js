@@ -2,6 +2,10 @@
 
 function initUsers() {
     var roleCache = [];
+    var CHANNEL_NAMES = { ilink: "微信", "wechat-main": "微信", wecom: "企业微信", web: "网页" };
+    function channelName(botId) {
+        return CHANNEL_NAMES[botId] || botId;
+    }
     var VIEWS = {
         tenants: { title: "机器人用户", desc: "管理通过机器人接入的终端用户（租户）" },
         admins: { title: "管理员账号", desc: "管理可登录面板的管理员账号" },
@@ -62,7 +66,7 @@ function initUsers() {
                 tbody.innerHTML = items.map(function (t) {
                     return "<tr>" +
                         '<td><code class="mono">' + escapeHtml(t.tenant_id.slice(0, 8)) + "…</code></td>" +
-                        "<td>" + escapeHtml(t.bot_id) + "</td>" +
+                        "<td>" + escapeHtml(channelName(t.bot_id)) + "</td>" +
                         "<td>" + escapeHtml(t.user_id) + "</td>" +
                         "<td>" + fmtTime(t.created_at) + "</td>" +
                         "<td>" + t.message_count + "</td>" +
@@ -137,7 +141,7 @@ function initUsers() {
                 body.innerHTML =
                     '<section class="tenant-summary">' +
                         '<div class="tenant-identity">' +
-                            '<div><span>渠道</span><strong>' + escapeHtml(t.bot_id) + "</strong></div>" +
+                            '<div><span>渠道</span><strong>' + escapeHtml(channelName(t.bot_id)) + "</strong></div>" +
                             '<div><span>用户标识</span><strong>' + escapeHtml(t.user_id) + "</strong></div>" +
                             '<div class="tenant-id"><span>租户 ID</span><code>' +
                                 escapeHtml(t.tenant_id) + "</code></div>" +

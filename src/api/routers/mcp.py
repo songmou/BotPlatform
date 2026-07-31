@@ -18,6 +18,7 @@ from src.core.config.mcp_headers import (
     merge_headers,
     save_headers,
 )
+from src.core.integrations.keychain import KeychainError
 from src.core.paths import CONFIG_DIR
 from src.core.tooling.mcp_client import namespaced_name
 
@@ -62,10 +63,32 @@ def _describe_error(exc: Exception, context: str) -> str:
     return message
 
 
+def _persist_headers(server_id: str, headers: dict) -> None:
+    """Store header secrets, converting keychain failures into a clear 500.
+
+    The credential store rejects a world-readable file (permissions must be
+    0600) and can fail to lock the file down on Windows; surface the reason
+    instead of letting it bubble up as an opaque 500.
+    """
+    try:
+        save_headers(server_id, headers)
+    except KeychainError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="保存 MCP 请求头失败：{}".format(exc),
+        ) from exc
+
+
 def _load() -> list:
     if MCP_FILE.exists():
         servers = json.loads(MCP_FILE.read_text(encoding="utf-8")).get("servers", [])
-        return merge_headers(servers)
+        try:
+            return merge_headers(servers)
+        except KeychainError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="读取 MCP 请求头失败：{}".format(exc),
+            ) from exc
     return []
 
 
@@ -153,7 +176,7 @@ def create_server(body: McpServerCreate, request: Request):
         "enabled": body.enabled,
     }
     servers.append(item)
-    save_headers(body.id, body.headers)
+    _persist_headers(body.id, body.headers)
     _sync(request, servers)
     return _to_out(item)
 
@@ -179,7 +202,7 @@ def update_server(server_id: str, body: McpServerUpdate, request: Request):
                 s["url"] = body.url
             if body.headers is not None:
                 s["headers"] = body.headers
-                save_headers(server_id, body.headers)
+                _persist_headers(server_id, body.headers)
             if body.enabled is not None:
                 s["enabled"] = body.enabled
             _sync(request, servers)
