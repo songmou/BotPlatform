@@ -317,11 +317,15 @@ def check_configuration(
                 )
             )
 
-    if config.tools.ocr.enabled:
+    ocr_plugin = config.plugins.get("ocr")
+    if ocr_plugin is not None and ocr_plugin.enabled:
         from src.core.integrations.paddle_ocr import paddle_ocr_availability
+        from src.core.plugins.ocr import build_config
 
-        ocr_available, ocr_reason = paddle_ocr_availability(config.tools.ocr)
-        target = config_dir / "tools.json"
+        ocr_available, ocr_reason = paddle_ocr_availability(
+            build_config(ocr_plugin.settings)
+        )
+        target = config_dir / "plugins.json"
         if ocr_available:
             report.ready.append(Diagnostic("本地 OCR 依赖和模型可用", target))
         else:

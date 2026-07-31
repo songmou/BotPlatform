@@ -28,6 +28,8 @@ from src.core.modeling.factory import (
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.drive import DriveService
 from src.core.services.notification import TenantRecipientStore
+from src.core.services.resources import ScopedResourceStore
+from src.core.storage.organizations import OrganizationStore
 from src.core.storage.tenants import (
     ConversationStore,
     ScheduleStore,
@@ -52,6 +54,8 @@ class CoreServices:
     schedule_store: ScheduleStore
     model_analytics_store: ModelAnalyticsStore
     model_warnings: List[str] = field(default_factory=list)
+    organization_store: Optional[OrganizationStore] = None
+    resource_store: Optional[ScopedResourceStore] = None
 
     def close(self) -> None:
         for client in self.clients.values():
@@ -79,6 +83,8 @@ def build_core_services(
     every client created before a failure is closed again.
     """
     tenant_registry = TenantRegistry(data_dir)
+    organization_store = OrganizationStore(tenant_registry)
+    resource_store = ScopedResourceStore(organization_store, config)
     model_analytics_store = ModelAnalyticsStore(tenant_registry, config)
     conversation_store = ConversationStore(
         tenant_registry, config.app.history_rounds * 2
@@ -180,5 +186,7 @@ def build_core_services(
         recipient_store=recipient_store,
         schedule_store=schedule_store,
         model_analytics_store=model_analytics_store,
+        organization_store=organization_store,
+        resource_store=resource_store,
         model_warnings=warnings,
     )

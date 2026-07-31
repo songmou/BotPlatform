@@ -170,7 +170,9 @@ class UserManagementApiTest(unittest.TestCase):
         response = self.client.get("/api/admins/roles")
         self.assertEqual(response.status_code, 200)
         roles = {role["code"]: role for role in response.json()}
-        self.assertEqual(set(roles), {"admin", "editor", "viewer"})
+        self.assertEqual(
+            set(roles), {"admin", "editor", "viewer", "tenant_user"}
+        )
 
         editor = roles["editor"]
         response = self.client.put(

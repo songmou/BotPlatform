@@ -29,6 +29,7 @@ from src.api.schemas import (
     ToolStateUpdate,
 )
 from src.core.paths import CONFIG_DIR, DATA_DIR, PROJECT_ROOT, SYSTEM_DATA_DIR
+from src.core.plugins.base import PluginError
 from src.core.plugins.manifest import (
     PLUGIN_ID_PATTERN,
     PluginManifestError,
@@ -38,6 +39,11 @@ from src.core.plugins.registry import (
     default_catalog,
     normalize_plugin_settings,
     refresh_catalog,
+)
+from src.core.plugins.setup import (
+    STATUS_IDLE,
+    PluginSetupBusyError,
+    default_setup_service,
 )
 
 
@@ -50,7 +56,6 @@ PLUGIN_TRASH_DIR = SYSTEM_DATA_DIR / "plugin_trash"
 TOOL_STATE_FILE = DATA_DIR / "tool_state.json"
 
 TOOL_CATEGORIES = [
-    ("文档识别", ["ocr_extract_text"]),
     ("知识库", [
         "knowledge_add_text", "knowledge_index_file", "knowledge_search",
         "knowledge_list", "knowledge_delete",
@@ -167,6 +172,10 @@ def _build_plugin_out(
     missing = manifest.missing_dependencies
     if missing:
         runtime_status = "dependency_missing"
+    setup_snapshot = default_setup_service().status(plugin_id)
+    setup_status = (
+        setup_snapshot if setup_snapshot.get("status") != STATUS_IDLE else None
+    )
     tools = [
         PluginToolOut(
             name=name,
@@ -191,6 +200,7 @@ def _build_plugin_out(
         restart_required=restart_required or pending_restart,
         missing_dependencies=missing,
         load_error=error,
+        setup_status=setup_status,
         tool_count=len(tools),
         tools=tools,
         settings=settings,
@@ -346,7 +356,8 @@ def update_plugin(
         "enabled": False,
         "settings": {},
     }
-    enabled = body.enabled if body.enabled is not None else bool(current["enabled"])
+    was_enabled = bool(current["enabled"])
+    enabled = body.enabled if body.enabled is not None else was_enabled
     settings = body.settings if body.settings is not None else dict(current["settings"])
     try:
         settings = manifest.normalize_settings(settings)
@@ -367,12 +378,48 @@ def update_plugin(
     else:
         entries.append(replacement)
     _atomic_json(PLUGINS_FILE, data)
+    if enabled and not was_enabled and manifest.missing_dependencies:
+        # Kick off dependency installation when the plugin gets enabled.
+        try:
+            default_setup_service().start(manifest, settings)
+        except PluginError:
+            pass
     return _build_plugin_out(
         plugin_id,
         request,
         configured=replacement,
         restart_required=True,
     )
+
+
+@router.post("/{plugin_id}/setup")
+def start_plugin_setup(
+    plugin_id: str,
+    _principal=Depends(require_permission("plugins.manage")),
+):
+    manifest = default_catalog().get(plugin_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="插件不存在")
+    configured = _configured_entry(plugin_id) or {"settings": {}}
+    settings = manifest.normalize_settings(
+        dict(configured.get("settings", {}) or {})
+    )
+    try:
+        return default_setup_service().start(manifest, settings)
+    except PluginSetupBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PluginError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{plugin_id}/setup")
+def get_plugin_setup(
+    plugin_id: str,
+    _principal=Depends(require_permission("plugins.manage")),
+):
+    if default_catalog().get(plugin_id) is None:
+        raise HTTPException(status_code=404, detail="插件不存在")
+    return default_setup_service().status(plugin_id)
 
 
 @router.delete("/{plugin_id}")

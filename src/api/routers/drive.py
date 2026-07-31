@@ -127,7 +127,13 @@ def create_drive_folder(
     service = _drive_service(request)
     tenant_id = body.tenant_id or None
     try:
-        result = service.create_folder(body.scope, tenant_id, body.path, body.name)
+        result = service.create_folder(
+            body.scope,
+            tenant_id,
+            body.path,
+            body.name,
+            exist_ok=body.exist_ok,
+        )
     except ValueError as exc:
         _record(
             request,
@@ -140,7 +146,8 @@ def create_drive_folder(
             error=str(exc),
         )
         raise _bad_request(exc) from exc
-    _record(request, principal, body.scope, tenant_id, "mkdir", result["path"])
+    if result["created"]:
+        _record(request, principal, body.scope, tenant_id, "mkdir", result["path"])
     return result
 
 

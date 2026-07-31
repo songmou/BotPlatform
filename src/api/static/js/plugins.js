@@ -6,6 +6,12 @@ function initPlugins() {
     var tenants = [];
     var editing = null;
     var packageUpdateId = null;
+    var setupTimer = null;
+
+    var SETUP_STEP_LABELS = {
+        install_dependencies: "正在安装依赖",
+        prepare_components: "正在准备组件"
+    };
 
     function escapeAttribute(value) {
         return escapeHtml(String(value))
@@ -227,6 +233,82 @@ function initPlugins() {
         return result;
     }
 
+    function stopSetupPolling() {
+        if (setupTimer) {
+            clearInterval(setupTimer);
+            setupTimer = null;
+        }
+    }
+
+    function renderSetupStatus(status) {
+        var progress = document.getElementById("plugin-setup-progress");
+        var statusText = document.getElementById("plugin-setup-status-text");
+        var logEl = document.getElementById("plugin-setup-log");
+        var button = document.getElementById("plugin-setup-btn");
+        if (!status || status.status === "idle") {
+            progress.style.display = "none";
+            button.disabled = false;
+            return;
+        }
+        progress.style.display = "";
+        var lines = status.log || [];
+        logEl.textContent = lines.join("\n");
+        logEl.scrollTop = logEl.scrollHeight;
+        if (status.status === "running") {
+            button.disabled = true;
+            statusText.textContent = SETUP_STEP_LABELS[status.step] || "正在安装…";
+        } else if (status.status === "succeeded") {
+            button.disabled = false;
+            statusText.textContent = status.restart_required
+                ? "安装完成，重启后生效"
+                : "安装完成";
+        } else if (status.status === "failed") {
+            button.disabled = false;
+            statusText.textContent = "安装失败：" + (status.error || "未知错误");
+        }
+    }
+
+    function pollSetup(pluginId) {
+        stopSetupPolling();
+        setupTimer = setInterval(function () {
+            request("/api/plugins/" + encodeURIComponent(pluginId) + "/setup")
+                .then(function (status) {
+                    if (!editing || editing.id !== pluginId) {
+                        stopSetupPolling();
+                        return;
+                    }
+                    renderSetupStatus(status);
+                    if (status.status === "succeeded" || status.status === "failed") {
+                        stopSetupPolling();
+                        if (status.status === "succeeded") {
+                            showToast(status.restart_required
+                                ? "安装完成，重启后生效"
+                                : "安装完成", "success");
+                        }
+                    }
+                })
+                .catch(function () { stopSetupPolling(); });
+        }, 1500);
+    }
+
+    function renderSetupPanel(plugin) {
+        var panel = document.getElementById("plugin-setup-panel");
+        var hint = document.getElementById("plugin-setup-hint");
+        var missing = (plugin.missing_dependencies || []).length;
+        var setup = plugin.setup_status;
+        var running = setup && setup.status === "running";
+        if (!missing && !running) {
+            panel.style.display = "none";
+            return;
+        }
+        panel.style.display = "";
+        hint.textContent = missing
+            ? "缺少依赖：" + plugin.missing_dependencies.join("、")
+            : "可安装依赖或下载组件";
+        renderSetupStatus(setup);
+        if (running) pollSetup(plugin.id);
+    }
+
     function openDetail(plugin) {
         editing = plugin;
         modal.style.display = "";
@@ -258,6 +340,7 @@ function initPlugins() {
                     escapeHtml(tool.description) + "</p></div>";
             }).join("") || '<p class="text-muted">无工具定义</p>';
         renderSettings(plugin);
+        renderSetupPanel(plugin);
         document.getElementById("plugin-settings-json").textContent =
             JSON.stringify(plugin.settings || {}, null, 2);
         document.getElementById("plugin-remove-btn").style.display =
@@ -298,8 +381,17 @@ function initPlugins() {
                 enabled: document.getElementById("plugin-enabled").checked,
                 settings: settings
             })
-        }).then(function () {
+        }).then(function (updated) {
             showToast("配置已保存，完整重启后生效", "success");
+            if (updated && updated.setup_status &&
+                updated.setup_status.status === "running") {
+                editing = updated;
+                renderSetupPanel(updated);
+                pollSetup(updated.id);
+                showToast("已开始自动安装依赖", "success");
+                load();
+                return;
+            }
             modal.style.display = "none";
             load();
         }).catch(function (error) { showToast("保存失败：" + error.message, "error"); });
@@ -344,7 +436,23 @@ function initPlugins() {
         });
     });
 
+    document.getElementById("plugin-setup-btn").addEventListener("click", function () {
+        if (!editing) return;
+        var pluginId = editing.id;
+        document.getElementById("plugin-setup-btn").disabled = true;
+        request("/api/plugins/" + encodeURIComponent(pluginId) + "/setup", {
+            method: "POST"
+        }).then(function (status) {
+            renderSetupStatus(status);
+            pollSetup(pluginId);
+        }).catch(function (error) {
+            document.getElementById("plugin-setup-btn").disabled = false;
+            showToast("启动安装失败：" + error.message, "error");
+        });
+    });
+
     function closeModals() {
+        stopSetupPolling();
         modal.style.display = "none";
         installModal.style.display = "none";
     }

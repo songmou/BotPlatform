@@ -95,13 +95,19 @@ def _remove_from_memory(request: Request, agent_id: str) -> None:
 
 
 @router.get("", response_model=list[AgentOut])
-def list_agents(request: Request):
+def list_agents(
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     return [_to_out(agent) for agent in config.agents.values()]
 
 
 @router.get("/active", response_model=AgentOut)
-def active_agent(request: Request):
+def active_agent(
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     return _to_out(config.active_agent)
 
@@ -142,7 +148,11 @@ def update_agent_knowledge_categories(
 
 
 @router.get("/{agent_id}", response_model=AgentOut)
-def get_agent(agent_id: str, request: Request):
+def get_agent(
+    agent_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     agent = config.agents.get(agent_id)
     if agent is None:
@@ -151,7 +161,11 @@ def get_agent(agent_id: str, request: Request):
 
 
 @router.post("", response_model=AgentOut, status_code=201)
-def create_agent(body: AgentCreate, request: Request):
+def create_agent(
+    body: AgentCreate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     agent_id = body.id.strip()
     if not agent_id or not re.match(r"^[a-z][a-z0-9_]{0,63}$", agent_id):
@@ -189,7 +203,12 @@ def create_agent(body: AgentCreate, request: Request):
 
 
 @router.put("/{agent_id}", response_model=AgentOut)
-def update_agent(agent_id: str, body: AgentUpdate, request: Request):
+def update_agent(
+    agent_id: str,
+    body: AgentUpdate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     existing = config.agents.get(agent_id)
     if existing is None:
@@ -229,7 +248,11 @@ def update_agent(agent_id: str, body: AgentUpdate, request: Request):
 
 
 @router.delete("/{agent_id}")
-def delete_agent(agent_id: str, request: Request):
+def delete_agent(
+    agent_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     if agent_id not in config.agents:
         raise HTTPException(status_code=404, detail="智能体不存在")

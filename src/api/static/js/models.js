@@ -17,6 +17,7 @@ function initModels() {
     loadModels();
     initAnalyticsTabs();
     initCategoryNav();
+    initEditorTabs();
 
     createBtn.addEventListener("click", function () {
         editingId = null;
@@ -69,8 +70,31 @@ function initModels() {
         });
     }
 
-    function openModal() { modal.style.display = ""; }
+    function openModal() {
+        activateEditorTab("basic");
+        modal.style.display = "";
+    }
     function closeModal() { modal.style.display = "none"; }
+
+    // Editor modal sub-tabs: switch panels, keep footer always visible.
+    function initEditorTabs() {
+        form.querySelectorAll("[data-editor-tab]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                activateEditorTab(btn.getAttribute("data-editor-tab"));
+            });
+        });
+    }
+
+    function activateEditorTab(name) {
+        form.querySelectorAll("[data-editor-tab]").forEach(function (btn) {
+            var active = btn.getAttribute("data-editor-tab") === name;
+            btn.classList.toggle("active", active);
+            btn.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        form.querySelectorAll("[data-editor-panel]").forEach(function (panel) {
+            panel.hidden = panel.getAttribute("data-editor-panel") !== name;
+        });
+    }
 
     var modalityEl = document.getElementById("model-modality");
     modalityEl.addEventListener("change", applyModalityVisibility);
@@ -83,6 +107,20 @@ function initModels() {
         form.querySelectorAll(".embedding-only").forEach(function (el) {
             el.style.display = modality === "embedding" ? "" : "none";
         });
+        // Rerank models have no tunable parameters; pricing only applies to chat.
+        var tabVisibility = {
+            basic: true,
+            connection: true,
+            params: modality !== "rerank",
+            pricing: modality === "chat",
+        };
+        var activeHidden = false;
+        form.querySelectorAll("[data-editor-tab]").forEach(function (btn) {
+            var tab = btn.getAttribute("data-editor-tab");
+            btn.style.display = tabVisibility[tab] ? "" : "none";
+            if (!tabVisibility[tab] && btn.classList.contains("active")) activeHidden = true;
+        });
+        if (activeHidden) activateEditorTab("basic");
     }
 
     var roleVision = document.getElementById("role-vision");
@@ -249,7 +287,7 @@ function initModels() {
                 ? "已配置 " + (m.billing_currency || "CNY") + " 计价"
                 : "未计价") + "</p>";
         }
-        return '<div class="model-card">' +
+        return '<div class="model-card' + (m.is_primary ? ' is-primary' : '') + '">' +
             "<h5>" + escapeHtml(m.id || "未命名档案") + " " + badges + "</h5>" +
             "<p>" + escapeHtml(m.provider || "未指定厂商") + " / " +
             escapeHtml(m.model || "未指定模型") + "</p>" +
@@ -334,6 +372,17 @@ function initModels() {
 
     form.addEventListener("submit", function (e) {
         e.preventDefault();
+        // The form is novalidate so hidden tab panels never block submit
+        // silently: jump to the panel owning the first invalid field.
+        if (!form.checkValidity()) {
+            var invalid = form.querySelector(":invalid");
+            if (invalid) {
+                var panel = invalid.closest("[data-editor-panel]");
+                if (panel) activateEditorTab(panel.getAttribute("data-editor-panel"));
+                invalid.reportValidity();
+            }
+            return;
+        }
         var modality = document.getElementById("model-modality").value;
         var payload = {
             modality: modality,
@@ -356,6 +405,7 @@ function initModels() {
             var inputPrice = document.getElementById("price-input").value.trim();
             var outputPrice = document.getElementById("price-output").value.trim();
             if ((inputPrice && !outputPrice) || (!inputPrice && outputPrice)) {
+                activateEditorTab("pricing");
                 showToast("普通输入与普通输出价格必须同时填写", "error");
                 return;
             }
@@ -372,6 +422,8 @@ function initModels() {
         } else if (modality === "embedding") {
             var dims = document.getElementById("model-dimensions").value.trim();
             if (!dims) {
+                activateEditorTab("params");
+                document.getElementById("model-dimensions").focus();
                 showToast("向量模型必须填写向量维度", "error");
                 return;
             }

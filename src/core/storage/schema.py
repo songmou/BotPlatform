@@ -1,14 +1,14 @@
 """Versioned SQLite schema scripts for the BotPlatform database.
 
 Each ``SCHEMA_V{n}`` script upgrades the schema from version ``n - 1`` to
-``n``. Versions 12 and 13 additionally need Python-side inspection and are
+``n``. Versions 12, 13, 22, 23, and 24 additionally need Python-side inspection and are
 applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 """
 
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 23
+LATEST_SCHEMA_VERSION = 27
 
 
 SCHEMA_V1 = r"""
@@ -966,8 +966,278 @@ WHERE code = 'editor'
 """
 
 
-# Versions applied as plain SQL scripts. 12 and 13 are intentionally absent:
-# they require Python-side logic and run via dedicated Database methods.
+SCHEMA_V24 = r"""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY REFERENCES admin_users(user_id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    organization_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+        status IN ('active', 'suspended', 'deleting')
+    ),
+    legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS organization_memberships (
+    membership_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+    legacy_subject_id TEXT,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+        status IN ('invited', 'active', 'disabled')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (organization_id, user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_org_memberships_legacy_owner
+    ON organization_memberships(organization_id, legacy_subject_id)
+    WHERE legacy_subject_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_org_memberships_user
+    ON organization_memberships(user_id, status, organization_id);
+
+CREATE TABLE IF NOT EXISTS organization_invitations (
+    invitation_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    accepted_at TEXT,
+    accepted_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS ix_org_invitations_expiry
+    ON organization_invitations(expires_at, accepted_at);
+
+CREATE TABLE IF NOT EXISTS user_organization_preferences (
+    user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+    active_organization_id TEXT
+        REFERENCES organizations(organization_id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS web_conversations (
+    conversation_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '新对话',
+    legacy_tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_web_conversations_owner
+    ON web_conversations(organization_id, user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS scoped_resources (
+    resource_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('public', 'organization')),
+    organization_id TEXT
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    base_resource_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'published' CHECK (
+        status IN ('draft', 'published', 'deprecated', 'disabled')
+    ),
+    payload_json TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (scope = 'public' AND organization_id IS NULL)
+        OR (scope = 'organization' AND organization_id IS NOT NULL)
+    ),
+    UNIQUE (resource_type, resource_id, scope, organization_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_scoped_resources_public
+    ON scoped_resources(resource_type, resource_id)
+    WHERE scope = 'public';
+CREATE INDEX IF NOT EXISTS ix_scoped_resources_org
+    ON scoped_resources(organization_id, resource_type, status);
+
+CREATE TABLE IF NOT EXISTS organization_resource_overrides (
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    resource_type TEXT NOT NULL,
+    public_resource_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    list_modes_json TEXT NOT NULL DEFAULT '{}',
+    patch_json TEXT NOT NULL DEFAULT '{}',
+    base_revision INTEGER NOT NULL DEFAULT 1,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, resource_type, public_resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS organization_agent_knowledge_categories (
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
+    category_id TEXT NOT NULL
+        REFERENCES knowledge_categories(category_id) ON DELETE CASCADE,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, agent_id, category_id)
+);
+"""
+
+
+SCHEMA_V24_PERMISSIONS = r"""
+INSERT OR IGNORE INTO admin_roles(code, name, permissions, builtin) VALUES
+    ('tenant_user', '租户用户', '[]', 1);
+"""
+
+SCHEMA_V25 = r"""
+CREATE TABLE IF NOT EXISTS credential_metadata (
+    credential_id TEXT NOT NULL,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+    credential_scope TEXT NOT NULL CHECK (
+        credential_scope IN ('organization', 'personal')
+    ),
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    secret_service TEXT NOT NULL,
+    secret_account TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (credential_scope='organization' AND user_id IS NULL)
+        OR (credential_scope='personal' AND user_id IS NOT NULL)
+    ),
+    PRIMARY KEY (organization_id, credential_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_credential_org_resource
+    ON credential_metadata(organization_id, resource_type, resource_id)
+    WHERE credential_scope='organization';
+CREATE UNIQUE INDEX IF NOT EXISTS ix_credential_personal_resource
+    ON credential_metadata(
+        organization_id, user_id, resource_type, resource_id
+    )
+    WHERE credential_scope='personal';
+
+CREATE TABLE IF NOT EXISTS security_audit_log (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL,
+    request_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    actor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    organization_id TEXT,
+    action TEXT NOT NULL,
+    resource TEXT NOT NULL DEFAULT '',
+    status_code INTEGER NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_security_audit_org_time
+    ON security_audit_log(organization_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS ix_security_audit_actor_time
+    ON security_audit_log(actor_user_id, occurred_at DESC);
+"""
+
+
+SCHEMA_V26 = r"""
+ALTER TABLE credential_metadata RENAME TO credential_metadata_v25;
+
+CREATE TABLE credential_metadata (
+    credential_id TEXT NOT NULL,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+    credential_scope TEXT NOT NULL CHECK (
+        credential_scope IN ('organization', 'personal')
+    ),
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    secret_service TEXT NOT NULL,
+    secret_account TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (credential_scope='organization' AND user_id IS NULL)
+        OR (credential_scope='personal' AND user_id IS NOT NULL)
+    ),
+    PRIMARY KEY (organization_id, credential_id)
+);
+
+INSERT INTO credential_metadata(
+    credential_id, organization_id, user_id, credential_scope,
+    resource_type, resource_id, label, secret_service, secret_account,
+    created_by, created_at, updated_at
+)
+SELECT
+    credential_id, organization_id, user_id, credential_scope,
+    resource_type, resource_id, label, secret_service, secret_account,
+    created_by, created_at, updated_at
+FROM credential_metadata_v25;
+
+DROP TABLE credential_metadata_v25;
+
+CREATE UNIQUE INDEX ix_credential_org_resource
+    ON credential_metadata(organization_id, resource_type, resource_id)
+    WHERE credential_scope='organization';
+CREATE UNIQUE INDEX ix_credential_personal_resource
+    ON credential_metadata(
+        organization_id, user_id, resource_type, resource_id
+    )
+    WHERE credential_scope='personal';
+"""
+
+
+SCHEMA_V27 = r"""
+ALTER TABLE security_audit_log RENAME TO security_audit_log_v26;
+
+CREATE TABLE security_audit_log (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL,
+    request_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    actor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    organization_id TEXT,
+    action TEXT NOT NULL,
+    resource TEXT NOT NULL DEFAULT '',
+    status_code INTEGER NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+
+INSERT INTO security_audit_log(
+    audit_id, occurred_at, request_id, source, actor_user_id,
+    organization_id, action, resource, status_code, detail
+)
+SELECT
+    audit_id, occurred_at, request_id, source, actor_user_id,
+    organization_id, action, resource, status_code, detail
+FROM security_audit_log_v26;
+
+DROP TABLE security_audit_log_v26;
+
+CREATE INDEX ix_security_audit_org_time
+    ON security_audit_log(organization_id, occurred_at DESC);
+CREATE INDEX ix_security_audit_actor_time
+    ON security_audit_log(actor_user_id, occurred_at DESC);
+"""
+
+
+# Versions applied as plain SQL scripts. Specialized versions with inspection
+# or permission backfills are dispatched through dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
     1: SCHEMA_V1,
     2: SCHEMA_V2,
@@ -990,4 +1260,8 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     21: SCHEMA_V21,
     22: SCHEMA_V22,
     23: SCHEMA_V23,
+    24: SCHEMA_V24,
+    25: SCHEMA_V25,
+    26: SCHEMA_V26,
+    27: SCHEMA_V27,
 }

@@ -179,59 +179,109 @@
             <h3 id="model-modal-title">添加模型</h3>
             <button id="model-modal-close" class="modal-close-btn">&times;</button>
         </div>
-        <form id="model-form" class="modal-body">
-            <div class="form-group" id="model-id-group">
-                <label for="model-id">档案 ID</label>
-                <input type="text" id="model-id" placeholder="如 alibaba_qwen" required pattern="^[a-z][a-z0-9_]{0,63}$">
-                <small>小写字母开头，可含数字和下划线</small>
+        <form id="model-form" class="modal-body" novalidate>
+            <div class="tab-bar editor-tabs" role="tablist">
+                <button type="button" class="tab-btn active" data-editor-tab="basic" role="tab" aria-selected="true">基础信息</button>
+                <button type="button" class="tab-btn" data-editor-tab="connection" role="tab" aria-selected="false">连接与鉴权</button>
+                <button type="button" class="tab-btn" data-editor-tab="params" role="tab" aria-selected="false">能力与参数</button>
+                <button type="button" class="tab-btn" data-editor-tab="pricing" role="tab" aria-selected="false">计价设置</button>
             </div>
-            <div class="form-group">
-                <label for="model-modality">模型类型</label>
-                <select id="model-modality">
-                    <option value="chat">对话</option>
-                    <option value="embedding">向量</option>
-                    <option value="rerank">重排</option>
-                </select>
-                <small>向量 / 重排模型仅用于知识库检索，保存后需完整重启生效</small>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="model-provider">厂商</label>
-                    <div class="dropdown-wrap">
-                        <input type="text" id="model-provider" placeholder="如 alibaba, deepseek, openai" autocomplete="off">
-                        <div id="provider-dropdown" class="dropdown-list" style="display:none">
-                            <div class="dropdown-item" data-value="alibaba">alibaba</div>
-                            <div class="dropdown-item" data-value="deepseek">deepseek</div>
-                            <div class="dropdown-item" data-value="openai">openai</div>
-                            <div class="dropdown-item" data-value="ollama">ollama</div>
-                            <div class="dropdown-item" data-value="zhipu">zhipu</div>
-                            <div class="dropdown-item" data-value="moonshot">moonshot</div>
-                            <div class="dropdown-item" data-value="siliconflow">siliconflow</div>
+
+            <div class="tab-panel" data-editor-panel="basic">
+                <div class="form-row">
+                    <div class="form-group" id="model-id-group">
+                        <label for="model-id">档案 ID</label>
+                        <input type="text" id="model-id" placeholder="如 alibaba_qwen" required pattern="^[a-z][a-z0-9_]{0,63}$">
+                        <small>小写字母开头，可含数字和下划线</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-modality">模型类型</label>
+                        <select id="model-modality">
+                            <option value="chat">对话</option>
+                            <option value="embedding">向量</option>
+                            <option value="rerank">重排</option>
+                        </select>
+                        <small>向量 / 重排模型仅用于知识库检索，保存后需完整重启生效</small>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="model-provider">厂商</label>
+                        <div class="dropdown-wrap">
+                            <input type="text" id="model-provider" placeholder="如 alibaba, deepseek, openai" autocomplete="off">
+                            <div id="provider-dropdown" class="dropdown-list" style="display:none">
+                                <div class="dropdown-item" data-value="alibaba">alibaba</div>
+                                <div class="dropdown-item" data-value="deepseek">deepseek</div>
+                                <div class="dropdown-item" data-value="openai">openai</div>
+                                <div class="dropdown-item" data-value="ollama">ollama</div>
+                                <div class="dropdown-item" data-value="zhipu">zhipu</div>
+                                <div class="dropdown-item" data-value="moonshot">moonshot</div>
+                                <div class="dropdown-item" data-value="siliconflow">siliconflow</div>
+                            </div>
                         </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-type">类型</label>
+                        <select id="model-type">
+                            <option value="openai_compatible">OpenAI 兼容</option>
+                            <option value="ollama">Ollama 本地</option>
+                        </select>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label for="model-type">类型</label>
-                    <select id="model-type">
-                        <option value="openai_compatible">OpenAI 兼容</option>
-                        <option value="ollama">Ollama 本地</option>
-                    </select>
+                    <label for="model-name">模型名称</label>
+                    <input type="text" id="model-name" placeholder="如 qwen-plus, deepseek-chat, gpt-4o" required>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="model-enabled" checked> 启用</label>
                 </div>
             </div>
-            <div class="form-group chat-only" id="model-capabilities-group">
-                <label>能力</label>
-                <div class="checkbox-row">
-                    <label class="checkbox-label"><input type="checkbox" id="model-cap-tools"> 工具调用</label>
-                    <label class="checkbox-label"><input type="checkbox" id="model-cap-vision"> 视觉</label>
-                    <label class="checkbox-label"><input type="checkbox" id="model-cap-reasoning"> 推理</label>
+
+            <div class="tab-panel" data-editor-panel="connection" hidden>
+                <div class="form-group">
+                    <label for="model-base-url">API 地址</label>
+                    <input type="text" id="model-base-url" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="model-api-key-env">API Key 环境变量名</label>
+                        <input type="text" id="model-api-key-env" placeholder="如 DASHSCOPE_API_KEY, DEEPSEEK_API_KEY">
+                        <small>在 data/system/model.env 中配置对应的 KEY=值</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-timeout">超时(秒)</label>
+                        <input type="number" id="model-timeout" value="120" min="10">
+                    </div>
                 </div>
             </div>
-            <div class="form-group embedding-only" id="model-dimensions-group" style="display:none">
-                <label for="model-dimensions">向量维度</label>
-                <input type="number" id="model-dimensions" min="1" step="1" placeholder="如 1024">
+
+            <div class="tab-panel" data-editor-panel="params" hidden>
+                <div class="form-group chat-only" id="model-capabilities-group">
+                    <label>能力</label>
+                    <div class="checkbox-row">
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-tools"> 工具调用</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-vision"> 视觉</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-reasoning"> 推理</label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group chat-only">
+                        <label for="model-temperature">温度</label>
+                        <input type="number" id="model-temperature" value="0.7" min="0" max="2" step="0.1">
+                    </div>
+                    <div class="form-group chat-only">
+                        <label for="model-max-tokens">最大 Token</label>
+                        <input type="number" id="model-max-tokens" value="2048" min="256" step="256">
+                    </div>
+                </div>
+                <div class="form-group embedding-only" id="model-dimensions-group" style="display:none">
+                    <label for="model-dimensions">向量维度</label>
+                    <input type="number" id="model-dimensions" min="1" step="1" placeholder="如 1024">
+                </div>
             </div>
-            <fieldset class="pricing-fieldset chat-only" id="model-pricing-fieldset">
-                <legend>计价（每百万 Token，留空表示未计价）</legend>
+
+            <div class="tab-panel" data-editor-panel="pricing" hidden>
+                <p class="panel-hint">计价单位为每百万 Token，留空表示未计价。</p>
                 <div class="form-row">
                     <div class="form-group">
                         <label for="price-input">普通输入</label>
@@ -241,6 +291,8 @@
                         <label for="price-cached">缓存输入</label>
                         <input type="number" id="price-cached" min="0" step="0.000001">
                     </div>
+                </div>
+                <div class="form-row">
                     <div class="form-group">
                         <label for="price-output">普通输出</label>
                         <input type="number" id="price-output" min="0" step="0.000001">
@@ -250,38 +302,9 @@
                         <input type="number" id="price-reasoning" min="0" step="0.000001">
                     </div>
                 </div>
-                <small>统一使用系统结算币种；价格修改后需完整重启，历史调用保留原价格快照。</small>
-            </fieldset>
-            <div class="form-group">
-                <label for="model-base-url">API 地址</label>
-                <input type="text" id="model-base-url" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1">
+                <small class="panel-note">统一使用系统结算币种；价格修改后需完整重启，历史调用保留原价格快照。</small>
             </div>
-            <div class="form-group">
-                <label for="model-name">模型名称</label>
-                <input type="text" id="model-name" placeholder="如 qwen-plus, deepseek-chat, gpt-4o" required>
-            </div>
-            <div class="form-group">
-                <label for="model-api-key-env">API Key 环境变量名</label>
-                <input type="text" id="model-api-key-env" placeholder="如 DASHSCOPE_API_KEY, DEEPSEEK_API_KEY">
-                <small>在 data/system/model.env 中配置对应的 KEY=值</small>
-            </div>
-            <div class="form-row">
-                <div class="form-group chat-only">
-                    <label for="model-temperature">温度</label>
-                    <input type="number" id="model-temperature" value="0.7" min="0" max="2" step="0.1">
-                </div>
-                <div class="form-group chat-only">
-                    <label for="model-max-tokens">最大 Token</label>
-                    <input type="number" id="model-max-tokens" value="2048" min="256" step="256">
-                </div>
-                <div class="form-group">
-                    <label for="model-timeout">超时(秒)</label>
-                    <input type="number" id="model-timeout" value="120" min="10">
-                </div>
-            </div>
-            <div class="form-group">
-                <label class="checkbox-label"><input type="checkbox" id="model-enabled" checked> 启用</label>
-            </div>
+
             <div class="modal-footer">
                 <button type="button" id="model-modal-cancel" class="btn-secondary">取消</button>
                 <button type="submit" class="btn-primary">保存</button>

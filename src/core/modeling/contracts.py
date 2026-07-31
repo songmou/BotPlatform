@@ -47,6 +47,7 @@ class GenerationOptions:
 class ModelCallContext:
     run_id: Optional[str] = None
     tenant_id: Optional[str] = None
+    user_id: Optional[int] = None
     source: str = "internal"
     operation: str = "answer"
     agent_id: Optional[str] = None

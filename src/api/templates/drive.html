@@ -26,7 +26,9 @@
                 <button id="drive-mkdir-btn" class="btn-secondary" data-manage="1">+ 新建文件夹</button>
                 <button id="drive-newfile-btn" class="btn-secondary" data-manage="1">+ 新建文件</button>
                 <button id="drive-upload-btn" class="btn-primary" data-manage="1">+ 上传文件</button>
+                <button id="drive-upload-folder-btn" class="btn-secondary" data-manage="1">+ 上传文件夹</button>
                 <input type="file" id="drive-file-input" multiple style="display:none">
+                <input type="file" id="drive-folder-input" multiple webkitdirectory directory style="display:none">
             </div>
         </div>
         <div class="drive-layout">
@@ -200,9 +202,48 @@
     </div>
 </div>
 
+<!-- Folder upload confirmation and progress modal -->
+<div id="drive-folder-upload-modal" class="modal-overlay" style="display:none">
+    <div class="modal drive-folder-upload-modal">
+        <div class="modal-header">
+            <h3 id="drive-folder-upload-title">确认上传文件夹</h3>
+            <button id="drive-folder-upload-close" class="modal-close-btn" aria-label="关闭">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="drive-folder-upload-summary">
+                <span id="drive-folder-upload-target"></span>
+                <span id="drive-folder-upload-selection"></span>
+            </div>
+            <div class="drive-folder-upload-list" role="table" aria-label="待上传文件列表">
+                <div class="drive-folder-upload-row drive-folder-upload-head" role="row">
+                    <label class="drive-folder-upload-check" title="全选">
+                        <input type="checkbox" id="drive-folder-upload-select-all" checked aria-label="全选文件">
+                    </label>
+                    <span role="columnheader">相对路径</span>
+                    <span role="columnheader">大小</span>
+                    <span role="columnheader">状态</span>
+                    <span role="columnheader">操作</span>
+                </div>
+                <div id="drive-folder-upload-items"></div>
+            </div>
+            <div id="drive-folder-upload-progress" class="drive-folder-upload-progress" style="display:none">
+                <div class="drive-upload-progress-track" aria-hidden="true">
+                    <span id="drive-folder-upload-progress-bar"></span>
+                </div>
+                <div id="drive-folder-upload-progress-text" class="drive-upload-progress-text"></div>
+            </div>
+            <div id="drive-folder-upload-result" class="status-card" style="display:none"></div>
+            <div class="modal-footer">
+                <button type="button" id="drive-folder-upload-cancel" class="btn-secondary">取消</button>
+                <button type="button" id="drive-folder-upload-confirm" class="btn-primary">开始上传</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Drag-and-drop upload overlay -->
 <div id="drive-drop-overlay" style="display:none">
-    <div class="drive-drop-box">释放以上传到当前目录</div>
+    <div class="drive-drop-box">释放以上传文件或文件夹到当前目录</div>
 </div>
 {% endblock %}
 {% block scripts %}

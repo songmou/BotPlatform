@@ -284,6 +284,7 @@ class PluginOut(BaseModel):
     restart_required: bool = False
     missing_dependencies: List[str] = []
     load_error: Optional[str] = None
+    setup_status: Optional[Dict[str, Any]] = None
     tool_count: int
     tools: List[PluginToolOut] = []
     settings: Dict[str, Any] = {}
@@ -529,6 +530,7 @@ class DriveFolderIn(BaseModel):
     tenant_id: Optional[str] = None
     path: str = ""
     name: str
+    exist_ok: bool = False
 
 
 class DriveEntryActionIn(BaseModel):

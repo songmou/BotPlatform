@@ -10,7 +10,6 @@
     "find_files",
     "search_text",
     "read_text_file",
-    "ocr_extract_text",
     "get_path_info",
     "get_current_time",
     "get_system_info",
@@ -37,6 +36,7 @@
   ],
   "plugin_tools": {
     "todo": ["todo_manage"],
+    "ocr": ["ocr_extract_text"],
     "browser_automation": [
       "browser_open",
       "browser_snapshot",

@@ -74,6 +74,27 @@ def get_drive_audit_store(request: Request):
     return getattr(request.app.state, "drive_audit_store", None)
 
 
+def get_organization_store(request: Request):
+    service = getattr(request.app.state, "organization_store", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="组织服务不可用")
+    return service
+
+
+def get_resource_store(request: Request):
+    service = getattr(request.app.state, "resource_store", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="资源目录服务不可用")
+    return service
+
+
+def get_credential_service(request: Request):
+    service = getattr(request.app.state, "credential_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="凭据服务不可用")
+    return service
+
+
 def get_admin_auth(request: Request) -> "AdminAuthService":
     return request.app.state.admin_auth
 

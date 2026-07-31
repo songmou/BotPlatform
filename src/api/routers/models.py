@@ -7,9 +7,14 @@ import logging
 import re
 from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.api.deps import get_config, get_model_analytics_store, get_router
+from src.api.deps import (
+    get_config,
+    get_model_analytics_store,
+    get_router,
+    require_permission,
+)
 from src.api.schemas import (
     ModelCreate,
     ModelProfileOut,
@@ -232,14 +237,20 @@ def _client_logger(request: Request):
 
 
 @router.get("", response_model=list[ModelProfileOut])
-def list_models(request: Request):
+def list_models(
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     model_router = get_router(request)
     return [_profile_to_out(p, model_router) for p in config.models.values()]
 
 
 @router.get("/status", response_model=ModelStatusOut)
-def model_status(request: Request):
+def model_status(
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     model_router = get_router(request)
     return ModelStatusOut(
@@ -265,7 +276,10 @@ def _candidates(config, predicate) -> list:
 
 
 @router.get("/roles", response_model=ModelRolesOut)
-def get_roles(request: Request):
+def get_roles(
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     app = config.app
     return ModelRolesOut(
@@ -289,7 +303,11 @@ def get_roles(request: Request):
 
 
 @router.put("/roles")
-def update_roles(body: ModelRolesUpdate, request: Request):
+def update_roles(
+    body: ModelRolesUpdate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     model_router = get_router(request)
 
@@ -333,7 +351,11 @@ def update_roles(body: ModelRolesUpdate, request: Request):
 
 
 @router.put("/switch")
-def switch_model(body: ModelSwitchRequest, request: Request):
+def switch_model(
+    body: ModelSwitchRequest,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     model_router = get_router(request)
     profile_id = body.profile_id.strip()
     if profile_id not in model_router.clients:
@@ -347,7 +369,11 @@ def switch_model(body: ModelSwitchRequest, request: Request):
 
 
 @router.get("/{profile_id}", response_model=ModelProfileOut)
-def get_model(profile_id: str, request: Request):
+def get_model(
+    profile_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     model_router = get_router(request)
     profile = config.models.get(profile_id)
@@ -357,7 +383,11 @@ def get_model(profile_id: str, request: Request):
 
 
 @router.post("", response_model=ModelProfileOut, status_code=201)
-def create_model(body: ModelCreate, request: Request):
+def create_model(
+    body: ModelCreate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     model_router = get_router(request)
     profile_id = body.id.strip()
@@ -389,7 +419,12 @@ def create_model(body: ModelCreate, request: Request):
 
 
 @router.put("/{profile_id}", response_model=ModelProfileOut)
-def update_model(profile_id: str, body: ModelUpdate, request: Request):
+def update_model(
+    profile_id: str,
+    body: ModelUpdate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     model_router = get_router(request)
     existing = config.models.get(profile_id)
@@ -431,7 +466,11 @@ def update_model(profile_id: str, body: ModelUpdate, request: Request):
 
 
 @router.delete("/{profile_id}")
-def delete_model(profile_id: str, request: Request):
+def delete_model(
+    profile_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     config = get_config(request)
     model_router = get_router(request)
     if profile_id not in config.models:

@@ -265,17 +265,25 @@ class DriveService:
     # ---- write operations ----
 
     def create_folder(
-        self, scope: str, tenant_id: Optional[str], path: str, name: str
+        self,
+        scope: str,
+        tenant_id: Optional[str],
+        path: str,
+        name: str,
+        exist_ok: bool = False,
     ) -> Dict[str, Any]:
         parent = self._resolve(scope, tenant_id, path)
         if not parent.exists() or not parent.is_dir():
             raise ValueError("目录不存在")
         folder = parent / self._validate_name(name)
         if folder.exists():
+            if exist_ok and folder.is_dir() and not folder.is_symlink():
+                root = self._root(scope, tenant_id)
+                return {"path": self._relative(root, folder), "created": False}
             raise ValueError("同名文件或目录已存在")
         folder.mkdir(mode=0o700)
         root = self._root(scope, tenant_id)
-        return {"path": self._relative(root, folder)}
+        return {"path": self._relative(root, folder), "created": True}
 
     def save_file(
         self,

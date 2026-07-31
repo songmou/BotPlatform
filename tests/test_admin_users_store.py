@@ -39,7 +39,7 @@ class AdminStoreTests(unittest.TestCase):
 
     def test_builtin_roles_seeded(self):
         codes = {role.code for role in self.roles.list_roles()}
-        self.assertEqual(codes, {"admin", "editor", "viewer"})
+        self.assertEqual(codes, {"admin", "editor", "viewer", "tenant_user"})
         admin = self.roles.get_by_code("admin")
         self.assertTrue(admin.builtin)
         self.assertTrue(admin.allows("anything.at.all"))

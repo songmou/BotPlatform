@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from src.api.deps import get_config, get_router
 from src.api.schemas import HealthResponse, StatusResponse
@@ -33,6 +33,21 @@ def status(request: Request):
 def page_index(request: Request):
     templates = request.app.state.templates
     return templates.TemplateResponse(name="chat.html", request=request, context={"active": "chat"})
+
+
+@router.get("/admin")
+def page_admin():
+    return RedirectResponse("/", status_code=302)
+
+
+@router.get("/app", response_class=HTMLResponse)
+def page_tenant_app(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        name="tenant_app.html",
+        request=request,
+        context={},
+    )
 
 
 @router.get("/models", response_class=HTMLResponse)

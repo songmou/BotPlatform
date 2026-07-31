@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -37,9 +38,9 @@ if TYPE_CHECKING:
     from src.core.services.script_schedule import ScriptScheduleService
     from src.core.services.knowledge import KnowledgeService
     from src.core.services.drive import DriveService
-    from src.core.services.ocr import OcrService
     from src.core.tooling.mcp_client import McpClientManager
     from src.core.plugins.manager import PluginManager
+    from src.core.services.resources import ScopedResourceStore
 
 
 class ToolRuntime:
@@ -63,20 +64,25 @@ class ToolRuntime:
         script_schedule_service: Optional["ScriptScheduleService"] = None,
         drive_service: Optional["DriveService"] = None,
         drive_audit_store: Optional[Any] = None,
-        ocr_service: Optional["OcrService"] = None,
+        resource_store: Optional["ScopedResourceStore"] = None,
     ) -> None:
         self.base_config = config
-        self.config = config
         self.timezone = ZoneInfo(timezone_name)
-        self.roots = [Path(item).resolve() for item in config.allowed_roots]
-        self.default_directory = Path(config.default_working_directory).resolve()
-        self.trash_directory = trash_directory or (Path.home() / ".Trash" / "iLinkBot")
+        self._default_roots = [
+            Path(item).resolve() for item in config.allowed_roots
+        ]
+        self._default_directory = Path(
+            config.default_working_directory
+        ).resolve()
+        self._default_trash_directory = trash_directory or (
+            Path.home() / ".Trash" / "iLinkBot"
+        )
+        self._binding = threading.local()
         self.audit_logger = audit_logger
         self.script_service = script_service
         self.script_schedule_service = script_schedule_service
         self.tenant_registry = tenant_registry
         self.knowledge_service = knowledge_service
-        self.tenant: Optional[TenantContext] = None
         self.plugin_manager = plugin_manager
         self.plugins = list(plugins or []) if plugin_manager is None else []
         self._plugin_tools: Dict[str, PlatformPlugin] = {}
@@ -91,7 +97,7 @@ class ToolRuntime:
                         raise ValueError("平台插件工具名称重复：{}".format(tool_name))
                     self._plugin_tools[tool_name] = plugin
         self._sandbox_available = sandbox_available
-        self.command_runner = CommandRunner(
+        self._default_command_runner = CommandRunner(
             config, self.resolve_path, sandbox_available=sandbox_available
         )
         self.tool_audit_store = tool_audit_store
@@ -99,16 +105,70 @@ class ToolRuntime:
         self.mcp_manager = mcp_manager
         self.drive_service = drive_service
         self.drive_audit_store = drive_audit_store
-        self.ocr_service = ocr_service
-        # Audit context of the tool call currently being executed; used by
-        # drive tools to attribute the operator (agent:{agent_id}).
-        self._audit_context = ToolAuditContext()
+        self.resource_store = resource_store
+    @property
+    def tenant(self) -> Optional[TenantContext]:
+        return getattr(self._binding, "tenant", None)
+
+    @property
+    def config(self) -> ToolConfig:
+        return getattr(self._binding, "config", self.base_config)
+
+    @property
+    def roots(self) -> List[Path]:
+        return getattr(self._binding, "roots", self._default_roots)
+
+    @property
+    def default_directory(self) -> Path:
+        return getattr(
+            self._binding, "default_directory", self._default_directory
+        )
+
+    @property
+    def trash_directory(self) -> Path:
+        return getattr(
+            self._binding,
+            "trash_directory",
+            self._default_trash_directory,
+        )
+
+    @property
+    def command_runner(self) -> CommandRunner:
+        return getattr(
+            self._binding, "command_runner", self._default_command_runner
+        )
+
+    @property
+    def _audit_context(self) -> ToolAuditContext:
+        return getattr(self._binding, "audit_context", ToolAuditContext())
+
+    @_audit_context.setter
+    def _audit_context(self, value: ToolAuditContext) -> None:
+        self._binding.audit_context = value
 
     def is_tool_enabled(self, name: str) -> bool:
         state = self._tool_states.get(name)
-        if state is not None:
-            return state.get("enabled", True)
+        if state is not None and not state.get("enabled", True):
+            return False
+        policy = self._organization_tool_policy()
+        if name in set(policy.get("disabled_tools") or []):
+            return False
+        allowed = policy.get("allowed_tools")
+        if isinstance(allowed, list) and allowed and name not in allowed:
+            return False
         return True
+
+    def _organization_tool_policy(self) -> Dict[str, Any]:
+        if self.resource_store is None or self.tenant is None:
+            return {}
+        try:
+            item = self.resource_store.get_effective(
+                self.tenant.tenant_id, "tools", "platform"
+            )
+            payload = item.get("payload")
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
 
     def get_tool_state(self, name: str) -> Dict[str, Any]:
         state = self._tool_states.get(name, {})
@@ -132,20 +192,38 @@ class ToolRuntime:
         workspace = self.tenant_registry.tenant_root(tenant.tenant_id) / "workspace"
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(str(workspace), 0o700)
-        self.tenant = tenant
-        self.roots = [workspace.resolve()]
-        self.default_directory = workspace.resolve()
-        self.trash_directory = self.tenant_registry.tenant_root(tenant.tenant_id) / ".trash"
-        self.config = replace(
+        default_directory = workspace.resolve()
+        config = replace(
             self.base_config,
-            allowed_roots=[str(self.default_directory)],
-            default_working_directory=str(self.default_directory),
+            allowed_roots=[str(default_directory)],
+            default_working_directory=str(default_directory),
         )
-        self.command_runner = CommandRunner(
-            self.config,
+        self._binding.tenant = tenant
+        self._binding.roots = [default_directory]
+        self._binding.default_directory = default_directory
+        self._binding.trash_directory = (
+            self.tenant_registry.tenant_root(tenant.tenant_id) / ".trash"
+        )
+        self._binding.config = config
+        self._binding.command_runner = CommandRunner(
+            config,
             self.resolve_path,
             sandbox_available=self._sandbox_available,
         )
+
+    def clear_tenant(self) -> None:
+        """Clear the current thread's tenant binding after a request."""
+        for name in (
+            "tenant",
+            "roots",
+            "default_directory",
+            "trash_directory",
+            "config",
+            "command_runner",
+            "audit_context",
+        ):
+            if hasattr(self._binding, name):
+                delattr(self._binding, name)
 
     def _require_tenant(self) -> Optional[TenantContext]:
         if self.tenant_registry is not None and self.tenant is None:
@@ -177,8 +255,6 @@ class ToolRuntime:
             return self.script_schedule_service is not None
         if name.startswith("knowledge_"):
             return self.knowledge_service is not None
-        if name == "ocr_extract_text":
-            return self.ocr_service is not None and self.ocr_service.available
         return True
 
     def _definition(self, name: str) -> Optional[Dict[str, Any]]:
@@ -250,6 +326,10 @@ class ToolRuntime:
     def requires_approval(
         self, name: str, arguments: Optional[Dict[str, Any]] = None
     ) -> bool:
+        if name in set(
+            self._organization_tool_policy().get("require_approval_tools") or []
+        ):
+            return True
         definition = (
             self.plugin_manager.definition(name)
             if self.plugin_manager is not None
@@ -558,6 +638,15 @@ class ToolRuntime:
                         output_bytes=output_size,
                         args_hash=args_hash,
                         error=error_msg or None,
+                        user_id=(
+                            ctx.member_user_id
+                            if ctx.member_user_id is not None
+                            else (
+                                self.tenant.member_user_id
+                                if self.tenant is not None
+                                else None
+                            )
+                        ),
                     )
                 except Exception:  # noqa: BLE001 - audit must never break tool calls
                     logger.warning("写入工具审计记录失败：工具=%s", name, exc_info=True)
@@ -583,11 +672,6 @@ class ToolRuntime:
                 self.mcp_manager.close()
             except Exception:  # noqa: BLE001 - best effort on shutdown
                 logger.warning("关闭 MCP 管理器失败", exc_info=True)
-        if self.ocr_service is not None:
-            try:
-                self.ocr_service.close()
-            except Exception:  # noqa: BLE001 - best effort on shutdown
-                logger.warning("关闭 OCR 服务失败", exc_info=True)
 
     def reload_plugins(self, plugins: Iterable[PlatformPlugin]) -> None:
         if self.plugin_manager is not None:
@@ -610,17 +694,6 @@ class ToolRuntime:
             "default_working_directory": str(self.default_directory),
             "allowed_roots": [str(root) for root in self.roots],
         }
-
-    def _tool_ocr_extract_text(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        if self.ocr_service is None:
-            raise ToolError("OCR 服务不可用")
-        from src.core.services.ocr import OcrError
-
-        path = self.resolve_path(self._string(arguments, "path"), must_exist=True)
-        try:
-            return self.ocr_service.recognize_path(path).payload()
-        except OcrError as exc:
-            raise ToolError(str(exc)) from exc
 
     def _tool_list_scripts(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:
         if not self.script_service:

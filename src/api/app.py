@@ -9,7 +9,11 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from src.api.auth import SecurityHeadersMiddleware, SessionAuthMiddleware
+from src.api.auth import (
+    OrganizationAuditMiddleware,
+    SecurityHeadersMiddleware,
+    SessionAuthMiddleware,
+)
 from src.api.routers import (
     admins,
     agents,
@@ -27,6 +31,7 @@ from src.api.routers import (
     system,
     tenants,
     model_analytics,
+    v2,
 )
 
 API_DIR = Path(__file__).resolve().parent
@@ -44,7 +49,66 @@ def create_app(config, model_router, registry, conversation_store,
                script_schedule_service=None,
                drive_service=None, drive_audit_store=None,
                channel_statuses=None,
+               organization_store=None, resource_store=None,
+               credential_service=None,
                secure_cookies=False, owns_services=True) -> FastAPI:
+    if organization_store is None:
+        from src.core.storage.organizations import OrganizationStore
+
+        organization_store = OrganizationStore(registry)
+    unified_database = (
+        admin_user_store is not None
+        and getattr(getattr(organization_store, "database", None), "path", None)
+        == getattr(getattr(admin_user_store, "database", None), "path", None)
+    )
+    if unified_database:
+        organization_store.sync_users(admin_user_store)
+        users = admin_user_store.list_users()
+        platform_owner = None
+        if admin_role_store is not None:
+            for user in users:
+                try:
+                    if admin_role_store.get(user.role_id).code == "admin":
+                        platform_owner = user
+                        break
+                except Exception:  # noqa: BLE001 - migration must not block startup
+                    continue
+        if platform_owner is not None:
+            legacy_root = getattr(registry, "system_root", None)
+            if isinstance(legacy_root, Path):
+                organization_store.migrate_legacy_web_conversations(
+                    legacy_root / "web_conversations.json",
+                    platform_owner.user_id,
+                    platform_owner.username,
+                )
+    if resource_store is None:
+        from src.core.services.resources import ScopedResourceStore
+
+        resource_store = ScopedResourceStore(organization_store, config)
+    if credential_service is None:
+        from src.core.integrations.keychain import KeychainService
+        from src.core.services.credentials import CredentialService
+
+        credential_root = getattr(organization_store.registry, "system_root", None)
+        if not isinstance(credential_root, Path):
+            credential_root = getattr(admin_auth, "system_root", None)
+        if not isinstance(credential_root, Path):
+            database_path = getattr(organization_store.database, "path", None)
+            credential_root = (
+                database_path.parent
+                if isinstance(database_path, Path)
+                else API_DIR
+            )
+        credential_service = CredentialService(
+            organization_store,
+            KeychainService(
+                storage_path=credential_root / "organization_credentials.json"
+            ),
+            KeychainService(
+                storage_path=credential_root / "integration_credentials.json"
+            ),
+        )
+
     # When the panel shares its service graph with the bot process
     # (owns_services=False), shutdown is handled by the bot runtime and the
     # lifespan hook must not close the shared services a second time.
@@ -89,6 +153,9 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
     app.state.channel_statuses = channel_statuses
+    app.state.organization_store = organization_store
+    app.state.resource_store = resource_store
+    app.state.credential_service = credential_service
     app.state.secure_cookies = secure_cookies
     app.state.owns_services = owns_services
     if drive_service is not None and knowledge_service is not None:
@@ -97,6 +164,7 @@ def create_app(config, model_router, registry, conversation_store,
             attach(knowledge_service)
 
     app.add_middleware(SessionAuthMiddleware)
+    app.add_middleware(OrganizationAuditMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -120,5 +188,6 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(mcp.router)
     app.include_router(tenants.router)
     app.include_router(admins.router)
+    app.include_router(v2.router)
 
     return app

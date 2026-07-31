@@ -189,6 +189,8 @@ def _run_combined(args) -> int:
                 scheduler=runtime.scheduler,
                 tool_audit_store=tool_audit_store,
                 model_analytics_store=services.model_analytics_store,
+                organization_store=services.organization_store,
+                resource_store=services.resource_store,
                 admin_auth=admin_auth,
                 admin_user_store=admin_user_store,
                 admin_role_store=admin_role_store,
@@ -339,9 +341,6 @@ def _run_panel_only(args) -> int:
         mcp_manager.start()
         mcp_manager.reload(config.mcp_servers)
 
-    from src.core.services.ocr import OcrService
-
-    ocr_service = OcrService(config.tools.ocr) if config.tools.enabled else None
     tool_runtime = (
         ToolRuntime(
             config.tools,
@@ -356,7 +355,6 @@ def _run_panel_only(args) -> int:
             mcp_manager=mcp_manager,
             drive_service=services.drive_service,
             drive_audit_store=drive_audit_store,
-            ocr_service=ocr_service,
         )
         if config.tools.enabled
         else None
@@ -371,12 +369,7 @@ def _run_panel_only(args) -> int:
         knowledge_service=knowledge_service,
         model_analytics_store=model_analytics_store,
         skills=config.skills,
-        ocr_service=ocr_service,
     )
-    if ocr_service is not None and config.tools.ocr.enabled:
-        ocr_available, ocr_reason = ocr_service.availability()
-        if not ocr_available:
-            print("警告：OCR 工具不可用：{}".format(ocr_reason), file=sys.stderr)
 
     scheduler = SchedulerService(
         credentials=credentials,
@@ -409,6 +402,8 @@ def _run_panel_only(args) -> int:
         scheduler=scheduler,
         tool_audit_store=tool_audit_store,
         model_analytics_store=model_analytics_store,
+        organization_store=services.organization_store,
+        resource_store=services.resource_store,
         admin_auth=admin_auth,
         admin_user_store=admin_user_store,
         admin_role_store=admin_role_store,

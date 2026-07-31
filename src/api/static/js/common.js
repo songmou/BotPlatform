@@ -116,7 +116,7 @@ function loadMe() {
             var el = document.getElementById("current-user");
             if (el) el.textContent = me.user.username + " · " + me.user.role.name;
             if (!hasPermission("admins.manage")) {
-                ["nav-sub-admins", "nav-sub-roles"].forEach(function (id) {
+                ["nav-sub-organizations", "nav-sub-admins", "nav-sub-roles"].forEach(function (id) {
                     var item = document.getElementById(id);
                     if (item) item.style.display = "none";
                 });
@@ -136,4 +136,3 @@ function loadMe() {
     }
     if (document.getElementById("current-user")) loadMe().catch(function () {});
 })();
-

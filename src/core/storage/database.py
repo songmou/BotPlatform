@@ -39,6 +39,11 @@ from src.core.storage.schema import (  # noqa: F401
     SCHEMA_V22_PERMISSIONS,
     SCHEMA_V23,
     SCHEMA_V23_PERMISSIONS,
+    SCHEMA_V24,
+    SCHEMA_V24_PERMISSIONS,
+    SCHEMA_V25,
+    SCHEMA_V26,
+    SCHEMA_V27,
 )
 
 
@@ -122,6 +127,8 @@ class Database:
                         self._migrate_v22(connection)
                     elif version == 23:
                         self._migrate_v23(connection)
+                    elif version == 24:
+                        self._migrate_v24(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -198,6 +205,67 @@ class Database:
         permissions = SCHEMA_V23_PERMISSIONS if has_roles else ""
         cls._apply_schema_script(
             connection, 23, script + SCHEMA_SCRIPTS[23] + permissions
+        )
+
+    @classmethod
+    def _migrate_v24(cls, connection: sqlite3.Connection) -> None:
+        """Add organization identity, scoped resources, and member attribution."""
+        script = ""
+        member_columns = {
+            "conversation_events": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "conversation_context_messages": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "memory_items": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "soul_profiles": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "todos": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "integrations": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "notification_outbox": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "script_runs": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "model_runs": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "tool_audit_log": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "drive_audit_log": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "channel_identities": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+        }
+        for table, definition in member_columns.items():
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                continue
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info({})".format(table)
+                ).fetchall()
+            }
+            if "user_id" not in columns:
+                script += "ALTER TABLE {} ADD COLUMN {};\n".format(
+                    table, definition
+                )
+        channel_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='channel_identities'"
+        ).fetchone()
+        if channel_exists:
+            channel_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_identities)"
+                ).fetchall()
+            }
+            if "active_organization_id" not in channel_columns:
+                script += (
+                    "ALTER TABLE channel_identities ADD COLUMN "
+                    "active_organization_id TEXT "
+                    "REFERENCES tenants(tenant_id) ON DELETE SET NULL;\n"
+                )
+        has_roles = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='admin_roles'"
+        ).fetchone()
+        permissions = SCHEMA_V24_PERMISSIONS if has_roles else ""
+        cls._apply_schema_script(
+            connection, 24, script + SCHEMA_SCRIPTS[24] + permissions
         )
 
     @staticmethod

@@ -45,6 +45,8 @@ class ToolResult:
 @dataclass(frozen=True)
 class ToolAuditContext:
     user_id: str = ""
+    member_user_id: Optional[int] = None
+    organization_id: str = ""
     provider: str = "-"
     profile_id: str = "-"
     model: str = "-"

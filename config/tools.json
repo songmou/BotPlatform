@@ -31,19 +31,5 @@
     "npm_script",
     "ollama_readonly",
     "workspace_script"
-  ],
-  "ocr": {
-    "enabled": true,
-    "auto_process_chat_images": true,
-    "engine": "paddleocr",
-    "device": "cpu",
-    "model_tier": "small",
-    "model_directory": "$SYSTEM_DATA_DIR/ocr_models",
-    "max_input_bytes": 20971520,
-    "max_pdf_pages": 10,
-    "max_image_pixels": 25000000,
-    "max_output_chars": 20000,
-    "startup_timeout_seconds": 120,
-    "request_timeout_seconds": 60
-  }
+  ]
 }

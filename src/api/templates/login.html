@@ -19,7 +19,11 @@
     <div class="login-page">
         <form id="login-form" class="login-card">
             <h1 class="login-title">BotPlatform</h1>
-            <p class="login-subtitle">管理面板登录</p>
+            <p id="login-subtitle" class="login-subtitle">统一账号登录</p>
+            <div id="claim-group" class="form-group" style="display:none">
+                <label for="claim-token">组织认领码 / 邀请码</label>
+                <input type="text" id="claim-token" autocomplete="one-time-code">
+            </div>
             <div class="form-group">
                 <label for="login-username">用户名</label>
                 <input type="text" id="login-username" autocomplete="username" required autofocus>
@@ -29,35 +33,83 @@
                 <input type="password" id="login-password" autocomplete="current-password" required>
             </div>
             <p id="login-error" class="login-error" style="display:none"></p>
-            <button type="submit" class="btn-primary login-btn">登 录</button>
+            <button id="login-submit" type="submit" class="btn-primary login-btn">登 录</button>
+            <button id="claim-toggle" type="button" class="btn-secondary login-btn">使用认领码或邀请码</button>
         </form>
     </div>
     <script>
+        var params = new URLSearchParams(window.location.search);
+        var claimGroup = document.getElementById("claim-group");
+        var claimInput = document.getElementById("claim-token");
+        var submitButton = document.getElementById("login-submit");
+        var claimToggle = document.getElementById("claim-toggle");
+        function setClaimMode(enabled) {
+            claimGroup.style.display = enabled ? "" : "none";
+            claimInput.required = enabled;
+            submitButton.textContent = enabled ? "创建账号并加入组织" : "登 录";
+            document.getElementById("login-subtitle").textContent =
+                enabled ? "认领或加入组织" : "统一账号登录";
+            claimToggle.textContent = enabled ? "返回普通登录" : "使用认领码或邀请码";
+        }
+        var initialClaim = params.get("claim") || "";
+        if (initialClaim) {
+            claimInput.value = initialClaim;
+            setClaimMode(true);
+        }
+        claimToggle.addEventListener("click", function () {
+            setClaimMode(claimGroup.style.display === "none");
+        });
+
+        function login(username, password) {
+            return fetch("/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: username, password: password })
+            });
+        }
+
         document.getElementById("login-form").addEventListener("submit", function (evt) {
             evt.preventDefault();
             var errorEl = document.getElementById("login-error");
             errorEl.style.display = "none";
-            fetch("/api/auth/login", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    username: document.getElementById("login-username").value.trim(),
-                    password: document.getElementById("login-password").value
-                })
+            var username = document.getElementById("login-username").value.trim();
+            var password = document.getElementById("login-password").value;
+            var action = Promise.resolve();
+            if (claimGroup.style.display !== "none") {
+                action = fetch("/api/v2/invitations/accept", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        token: claimInput.value.trim(),
+                        username: username,
+                        password: password
+                    })
+                }).then(function (r) {
+                    if (r.ok) return r.json();
+                    return r.json().then(function (data) {
+                        throw new Error((data && data.detail) || "认领失败");
+                    });
+                });
+            }
+            action.then(function () {
+                return login(username, password);
             }).then(function (r) {
                 if (r.ok) {
-                    var params = new URLSearchParams(window.location.search);
-                    var next = params.get("next") || "/";
-                    if (next.charAt(0) !== "/" || next.charAt(1) === "/") next = "/";
-                    window.location.href = next;
-                    return;
+                    return r.json().then(function (me) {
+                        var defaultTarget = (me.permissions || []).length ? "/admin" : "/app";
+                        var next = params.get("next") || defaultTarget;
+                        if (next.charAt(0) !== "/" || next.charAt(1) === "/") {
+                            next = defaultTarget;
+                        }
+                        window.location.href = next;
+                    });
                 }
                 return r.json().then(function (data) {
                     errorEl.textContent = (data && data.detail) || "登录失败";
                     errorEl.style.display = "";
                 });
-            }).catch(function () {
-                errorEl.textContent = "网络错误，请重试";
+            }).catch(function (error) {
+                errorEl.textContent = error.message || "网络错误，请重试";
                 errorEl.style.display = "";
             });
         });

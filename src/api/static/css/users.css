@@ -350,6 +350,76 @@
     justify-content: center;
 }
 
+/* Organization management */
+.organization-toolbar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.organization-toolbar input {
+    flex: 1 1 280px;
+}
+
+.organization-toolbar select {
+    flex: 0 0 140px;
+}
+
+.organization-name-cell {
+    display: grid;
+    gap: 4px;
+    max-width: 330px;
+}
+
+.organization-name-cell strong {
+    overflow-wrap: anywhere;
+}
+
+.organization-id {
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-overflow: ellipsis;
+}
+
+.organization-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.organization-badge-warning {
+    color: #9a6700;
+    border-color: #f0c36d;
+    background: #fff8c5;
+}
+
+.organization-members {
+    display: grid;
+    gap: 8px;
+}
+
+.organization-members .tenant-detail-list li {
+    align-items: flex-start;
+}
+
+.organization-member-meta {
+    display: grid;
+    gap: 3px;
+}
+
+.organization-member-meta span {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.form-hint {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
 /* Recent conversation as chat bubbles */
 .chat-log {
     display: flex;
@@ -438,5 +508,13 @@
 
     .chat-bubble {
         max-width: 92%;
+    }
+
+    .organization-toolbar {
+        flex-direction: column;
+    }
+
+    .organization-toolbar select {
+        flex-basis: auto;
     }
 }

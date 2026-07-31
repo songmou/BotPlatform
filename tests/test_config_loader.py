@@ -68,14 +68,14 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(reminder.condition.after_hours, 20)
         self.assertEqual(reminder.condition.before_hours, 24)
         self.assertTrue(config.tools.enabled)
-        self.assertTrue(config.tools.ocr.enabled)
-        self.assertTrue(config.tools.ocr.auto_process_chat_images)
-        self.assertEqual(config.tools.ocr.model_tier, "small")
-        self.assertEqual(config.tools.ocr.max_pdf_pages, 10)
-        self.assertTrue(
-            config.tools.ocr.model_directory.endswith("data/system/ocr_models")
+        self.assertTrue(config.plugins["ocr"].enabled)
+        self.assertTrue(config.plugins["ocr"].settings["auto_process_chat_images"])
+        self.assertEqual(config.plugins["ocr"].settings["model_tier"], "small")
+        self.assertEqual(config.plugins["ocr"].settings["max_pdf_pages"], 10)
+        self.assertNotIn("ocr_extract_text", config.active_agent.tools)
+        self.assertIn(
+            "ocr_extract_text", config.active_agent.plugin_tools.get("ocr", [])
         )
-        self.assertIn("ocr_extract_text", config.active_agent.tools)
         self.assertIn("run_command", config.active_agent.tools)
         self.assertEqual(config.app.active_model, "deepseek_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
@@ -165,26 +165,6 @@ class ConfigLoaderTests(unittest.TestCase):
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "unknown_tool"):
                 load_project_config(config_dir)
-
-    def test_ocr_configuration_is_strictly_validated(self) -> None:
-        invalid_values = [
-            ("enabled", "yes", "布尔值"),
-            ("engine", "cloud", "paddleocr"),
-            ("device", "auto", "cpu"),
-            ("model_tier", "huge", "tiny"),
-            ("max_pdf_pages", 0, "正整数"),
-            ("model_directory", "relative/models", "绝对路径"),
-        ]
-        for field, value, message in invalid_values:
-            with self.subTest(field=field):
-                with tempfile.TemporaryDirectory() as directory:
-                    config_dir = self.copy_config(directory)
-                    path = config_dir / "tools.json"
-                    data = self.load_json(path)
-                    data["ocr"][field] = value
-                    self.save_json(path, data)
-                    with self.assertRaisesRegex(ConfigError, message):
-                        load_project_config(config_dir)
 
     def test_invalid_json_reports_file_and_position(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -161,7 +161,9 @@ class MessageBot:
 
     @staticmethod
     def _subject_key(subject: Any) -> str:
-        return subject.tenant_id if isinstance(subject, TenantContext) else str(subject)
+        if isinstance(subject, TenantContext):
+            return subject.personal_tenant_id or subject.tenant_id
+        return str(subject)
 
     def _resolve_tenant(self, message: InboundMessage) -> Optional[TenantContext]:
         if self.tenant_registry is None:
@@ -179,7 +181,7 @@ class MessageBot:
     ) -> None:
         if tenant is not None and self.conversation_store is not None:
             self.conversation_store.append_transcript(
-                tenant.tenant_id,
+                tenant.personal_tenant_id or tenant.tenant_id,
                 role,
                 content,
                 image=image,
@@ -381,7 +383,13 @@ class MessageBot:
                 return
             binding_completed = True
         if tenant is None:
-            tenant = self._resolve_tenant(message)
+            try:
+                tenant = self._resolve_tenant(message)
+            except ChannelBindingError as exc:
+                reply = str(exc)
+                self._reply(endpoint, reply, None, record=False)
+                self._log(self._direction("输出", endpoint), user_id, reply)
+                return
         if tenant is not None and self.address_store is not None:
             endpoint = self.address_store.record_endpoint(tenant, message)
         if binding_completed:
@@ -403,7 +411,7 @@ class MessageBot:
             if self.notification_dispatcher is not None:
                 try:
                     self.notification_dispatcher.on_recipient_refreshed(
-                        tenant.tenant_id
+                        tenant.personal_tenant_id or tenant.tenant_id
                     )
                 except Exception as exc:
                     print(
@@ -441,6 +449,73 @@ class MessageBot:
                         "跨渠道绑定码：{}\n"
                         "请在 10 分钟内通过新渠道首次私聊发送 /bind {}。"
                     ).format(code, code)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
+
+        if (
+            message.conversation_type == DIRECT
+            and not image_item
+            and lowered_text == "/claim"
+        ):
+            if tenant is None or self.address_store is None:
+                reply = "当前未启用组织认领。"
+            else:
+                try:
+                    token = self.address_store.issue_claim_token(message, tenant)
+                except ChannelBindingError as exc:
+                    reply = str(exc)
+                else:
+                    reply = (
+                        "组织认领码：{}\n"
+                        "请打开平台登录页，选择“认领组织”，并在 1 小时内完成账号创建。"
+                    ).format(token)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
+
+        if (
+            message.conversation_type == DIRECT
+            and not image_item
+            and (lowered_text == "/org" or lowered_text.startswith("/org "))
+        ):
+            if tenant is None or self.address_store is None:
+                reply = "当前未启用组织切换。"
+            else:
+                parts = normalized_text.split()
+                try:
+                    if len(parts) == 1 or (
+                        len(parts) == 2 and parts[1].lower() == "list"
+                    ):
+                        choices = self.address_store.organization_choices(message)
+                        lines = ["可用组织："]
+                        for item in choices:
+                            marker = (
+                                "（当前）"
+                                if str(item["organization_id"]) == tenant.tenant_id
+                                else ""
+                            )
+                            lines.append(
+                                "- {} [{}] {}".format(
+                                    item["name"],
+                                    str(item["organization_id"])[:8],
+                                    marker,
+                                ).rstrip()
+                            )
+                        reply = "\n".join(lines)
+                    elif len(parts) == 3 and parts[1].lower() == "use":
+                        tenant = self.address_store.switch_organization(
+                            message, parts[2]
+                        )
+                        subject = tenant
+                        organization = getattr(
+                            self.tenant_registry, "organization_store", None
+                        ).get(tenant.tenant_id)
+                        reply = "已切换到组织：{}。".format(organization["name"])
+                    else:
+                        reply = "格式错误，请使用 /org list 或 /org use <组织编号>。"
+                except (ChannelBindingError, ValueError) as exc:
+                    reply = str(exc)
             self._reply(endpoint, reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, reply)
             return
@@ -586,8 +661,9 @@ class MessageBot:
                 reply = "格式错误，请使用 /soul 或 /soul rebuild。"
             else:
                 try:
+                    private_key = tenant.personal_tenant_id or tenant.tenant_id
                     profile = self.memory_service.get_soul(
-                        tenant.tenant_id,
+                        private_key,
                         force_rebuild=lowered_text == "/soul rebuild",
                     )
                     reply = (
@@ -609,8 +685,9 @@ class MessageBot:
                 reply = "当前未启用长期记忆。"
             else:
                 parts = normalized_text.split()
+                private_key = tenant.personal_tenant_id or tenant.tenant_id
                 if len(parts) == 1:
-                    items = self.memory_service.list(tenant.tenant_id)
+                    items = self.memory_service.list(private_key)
                     lines = ["长期记忆：{} 项。".format(len(items))]
                     for item in items[:20]:
                         label = "有效" if item["status"] == "active" else "待确认"
@@ -622,29 +699,29 @@ class MessageBot:
                 elif len(parts) == 3 and parts[1].lower() == "confirm":
                     reply = (
                         "已确认该项长期记忆。"
-                        if self.memory_service.confirm(tenant.tenant_id, parts[2])
+                        if self.memory_service.confirm(private_key, parts[2])
                         else "未找到唯一的待确认记忆编号。"
                     )
                 elif len(parts) == 3 and parts[1].lower() == "forget":
                     reply = (
                         "已停用该项长期记忆。"
-                        if self.memory_service.forget(tenant.tenant_id, parts[2])
+                        if self.memory_service.forget(private_key, parts[2])
                         else "未找到唯一的有效记忆编号。"
                     )
                 elif len(parts) == 2 and parts[1].lower() == "clear":
                     code = new_confirmation_code()
-                    self._memory_clear_pending[tenant.tenant_id] = (
+                    self._memory_clear_pending[private_key] = (
                         code, datetime.now(timezone.utc) + timedelta(minutes=5)
                     )
                     reply = "此操作会停用全部长期记忆。如确定，请在 5 分钟内回复 /memory clear {}。".format(code)
                 elif len(parts) == 3 and parts[1].lower() == "clear":
-                    pending = self._memory_clear_pending.get(tenant.tenant_id)
+                    pending = self._memory_clear_pending.get(private_key)
                     if not pending or datetime.now(timezone.utc) >= pending[1] or parts[2] != pending[0]:
-                        self._memory_clear_pending.pop(tenant.tenant_id, None)
+                        self._memory_clear_pending.pop(private_key, None)
                         reply = "长期记忆清除确认无效或已经过期。"
                     else:
-                        self._memory_clear_pending.pop(tenant.tenant_id, None)
-                        count = self.memory_service.clear(tenant.tenant_id)
+                        self._memory_clear_pending.pop(private_key, None)
+                        count = self.memory_service.clear(private_key)
                         reply = "已停用全部长期记忆，共 {} 项。".format(count)
                 else:
                     reply = "格式错误，请使用 /memory、/memory confirm <编号>、/memory forget <编号> 或 /memory clear。"
@@ -704,7 +781,8 @@ class MessageBot:
                 reply = "当前未启用多用户存储。"
             else:
                 code = new_confirmation_code()
-                self._deletion_pending[tenant.tenant_id] = (
+                private_key = tenant.personal_tenant_id or tenant.tenant_id
+                self._deletion_pending[private_key] = (
                     code,
                     datetime.now(timezone.utc) + timedelta(minutes=5),
                 )
@@ -718,34 +796,71 @@ class MessageBot:
 
         if not image_item and lowered_text.startswith("/confirm-delete"):
             parts = normalized_text.split()
-            pending = self._deletion_pending.get(tenant.tenant_id) if tenant else None
+            private_key = (
+                tenant.personal_tenant_id or tenant.tenant_id
+                if tenant
+                else ""
+            )
+            pending = self._deletion_pending.get(private_key) if tenant else None
             if tenant is None or self.tenant_registry is None:
                 reply = "当前未启用多用户存储。"
             elif len(parts) != 2 or not pending or datetime.now(timezone.utc) >= pending[1]:
-                self._deletion_pending.pop(tenant.tenant_id, None)
+                self._deletion_pending.pop(private_key, None)
                 reply = "删除确认无效或已经过期，请重新使用 /delete-data。"
             elif parts[1] != pending[0]:
                 reply = "删除确认码不匹配。"
             else:
-                self._deletion_pending.pop(tenant.tenant_id, None)
-                self._memory_clear_pending.pop(tenant.tenant_id, None)
+                self._deletion_pending.pop(private_key, None)
+                self._memory_clear_pending.pop(private_key, None)
                 self._cancel_approval_timer(subject)
                 try:
-                    if self.script_service is not None:
+                    is_member = bool(
+                        tenant.member_user_id is not None
+                        and tenant.personal_tenant_id
+                    )
+                    if self.script_service is not None and not is_member:
                         self.script_service.cancel_tenant(tenant.tenant_id)
                     close_resources = getattr(
                         self.agent_service, "close_tenant_resources", None
                     )
-                    if callable(close_resources):
+                    if callable(close_resources) and not is_member:
                         close_resources(tenant.tenant_id)
+                    organization_store = getattr(
+                        self.tenant_registry, "organization_store", None
+                    )
+                    organization_backup = None
+                    if not is_member and organization_store is not None:
+                        with self.tenant_registry.database.read() as connection:
+                            registered = connection.execute(
+                                "SELECT 1 FROM organizations "
+                                "WHERE organization_id=?",
+                                (tenant.tenant_id,),
+                            ).fetchone()
+                        if registered is not None:
+                            organization_backup = (
+                                organization_store.backup_organization(
+                                    tenant.tenant_id
+                                )
+                            )
                     if self.integration_service is not None:
                         self.integration_service.delete_all(tenant)
-                    self.tenant_registry.delete(tenant)
+                    deletion_context = (
+                        self.tenant_registry.get(tenant.personal_tenant_id)
+                        if is_member
+                        else tenant
+                    )
+                    if organization_backup is not None:
+                        organization_store.delete_after_backup(tenant.tenant_id)
+                    else:
+                        self.tenant_registry.delete(deletion_context)
                 except (OSError, ValueError, TenantStoreError) as exc:
                     reply = "暂时无法删除用户数据：{}。请稍后重试。".format(exc)
                 else:
                     reply = (
-                        "你的全部 BotPlatform 租户数据已经删除；下次私聊将创建新的租户编号。"
+                        "你在当前组织中的个人对话、记忆、待办和个人凭据已经删除；"
+                        "组织共享资源及成员关系不受影响。"
+                        if is_member
+                        else "你的全部 BotPlatform 租户数据已经删除；下次私聊将创建新的租户编号。"
                     )
                     self._reply(endpoint, reply, None, record=False)
                     self._log(self._direction("输出", endpoint), user_id, reply)

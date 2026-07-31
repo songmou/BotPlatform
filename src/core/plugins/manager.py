@@ -118,15 +118,7 @@ class PluginManager:
 
     @staticmethod
     def _load_entrypoint(manifest: PluginManifest) -> Any:
-        module_name, attribute = manifest.entrypoint.split(":", 1)
-        if module_name.startswith("src."):
-            module = importlib.import_module(module_name)
-        else:
-            module = _load_external_module(manifest, module_name)
-        value = getattr(module, attribute, None)
-        if value is None:
-            raise ImportError("插件入口不存在：{}".format(manifest.entrypoint))
-        return value
+        return load_reference(manifest, manifest.entrypoint)
 
     @property
     def tool_names(self) -> List[str]:
@@ -216,6 +208,19 @@ class PluginManager:
             except Exception:  # noqa: BLE001
                 logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
         self._started = False
+
+
+def load_reference(manifest: PluginManifest, reference: str) -> Any:
+    """Load a module:attribute reference declared by a plugin manifest."""
+    module_name, attribute = reference.split(":", 1)
+    if module_name.startswith("src."):
+        module = importlib.import_module(module_name)
+    else:
+        module = _load_external_module(manifest, module_name)
+    value = getattr(module, attribute, None)
+    if value is None:
+        raise ImportError("插件入口不存在：{}".format(reference))
+    return value
 
 
 def _load_external_module(manifest: PluginManifest, module_name: str) -> ModuleType:

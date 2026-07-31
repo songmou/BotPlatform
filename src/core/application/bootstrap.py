@@ -49,7 +49,6 @@ from src.core.services.notification import (
     NotificationDispatcher,
     NotificationService,
 )
-from src.core.services.ocr import OcrService
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
 from src.core.services.script_registry import ExternalScriptRegistry
@@ -217,11 +216,6 @@ def build_bot_runtime(
             mcp_manager = McpClientManager()
             mcp_manager.start()
             mcp_manager.reload(project_config.mcp_servers)
-        ocr_service = (
-            OcrService(project_config.tools.ocr)
-            if project_config.tools.enabled
-            else None
-        )
         tool_runtime = (
             ToolRuntime(
                 project_config.tools,
@@ -237,7 +231,7 @@ def build_bot_runtime(
                 tool_states=tool_states,
                 drive_service=services.drive_service,
                 drive_audit_store=drive_audit_store,
-                ocr_service=ocr_service,
+                resource_store=services.resource_store,
             )
             if project_config.tools.enabled
             else None
@@ -251,13 +245,6 @@ def build_bot_runtime(
                 "警告：macOS 命令沙箱不可用，run_command 已禁用；文件和系统工具仍可使用。",
                 file=sys.stderr,
             )
-        if ocr_service is not None and project_config.tools.ocr.enabled:
-            ocr_available, ocr_reason = ocr_service.availability()
-            if not ocr_available:
-                print(
-                    "警告：OCR 工具不可用：{}".format(ocr_reason),
-                    file=sys.stderr,
-                )
         agent_service = AgentService(
             services.model_router,
             project_config.app,
@@ -269,7 +256,7 @@ def build_bot_runtime(
             memory_service=memory_service,
             model_analytics_store=services.model_analytics_store,
             skills=project_config.skills,
-            ocr_service=ocr_service,
+            resource_store=services.resource_store,
         )
         scheduler = SchedulerService(
             credentials=None,

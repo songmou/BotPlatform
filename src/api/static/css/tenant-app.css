@@ -1,0 +1,160 @@
+.tenant-header {
+    min-height: 64px;
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.tenant-header > div,
+.tenant-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.tenant-header strong {
+    font-size: 18px;
+}
+
+.tenant-header span {
+    color: var(--text-secondary);
+}
+
+.tenant-header select {
+    min-width: 220px;
+}
+
+.tenant-shell {
+    min-height: calc(100vh - 65px);
+    display: grid;
+    grid-template-columns: 210px minmax(0, 1fr);
+}
+
+.tenant-nav {
+    padding: 18px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-right: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.tenant-nav-item {
+    padding: 10px 14px;
+    border: 0;
+    border-radius: 8px;
+    text-align: left;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+}
+
+.tenant-nav-item:hover,
+.tenant-nav-item.active {
+    color: var(--accent);
+    background: var(--accent-light);
+}
+
+.tenant-content {
+    padding: 28px;
+}
+
+.tenant-title-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
+.tenant-title-row h1 {
+    margin: 0 0 6px;
+}
+
+.tenant-title-row p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+.tenant-summary {
+    margin-bottom: 16px;
+    color: var(--text-secondary);
+}
+
+.tenant-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+.tenant-resource-card {
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+}
+
+.tenant-resource-card h3 {
+    margin: 0 0 8px;
+}
+
+.tenant-resource-meta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.tenant-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+}
+
+.tenant-resource-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.tenant-resource-actions button {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.tenant-empty {
+    padding: 40px;
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+@media (max-width: 760px) {
+    .tenant-header {
+        align-items: flex-start;
+        padding: 14px;
+    }
+
+    .tenant-header,
+    .tenant-header-actions {
+        flex-direction: column;
+    }
+
+    .tenant-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .tenant-nav {
+        flex-direction: row;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+    }
+}

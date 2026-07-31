@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from src.core.storage.database import (
@@ -13,10 +14,65 @@ from src.core.storage.database import (
     SCHEMA_V3,
     SCHEMA_V4,
     SCHEMA_V5,
+    SCHEMA_V25,
 )
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_v26_makes_credential_ids_unique_within_organization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "botplatform.sqlite3"
+            connection = sqlite3.connect(str(path))
+            try:
+                connection.executescript(
+                    "PRAGMA foreign_keys=ON;"
+                    "CREATE TABLE schema_migrations("
+                    "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
+                    "INSERT INTO schema_migrations VALUES(25, 'now');"
+                    "CREATE TABLE users(user_id INTEGER PRIMARY KEY);"
+                    "CREATE TABLE organizations("
+                    "organization_id TEXT PRIMARY KEY);"
+                    + SCHEMA_V25
+                )
+                connection.execute(
+                    "INSERT INTO users(user_id) VALUES (1)"
+                )
+                connection.execute(
+                    "INSERT INTO organizations(organization_id) VALUES ('a')"
+                )
+                connection.execute(
+                    "INSERT INTO organizations(organization_id) VALUES ('b')"
+                )
+                connection.execute(
+                    "INSERT INTO credential_metadata("
+                    "credential_id, organization_id, credential_scope, "
+                    "resource_type, resource_id, label, secret_service, "
+                    "secret_account, created_by, created_at, updated_at"
+                    ") VALUES ("
+                    "'shared', 'a', 'organization', 'models', 'model', '', "
+                    "'service-a', 'credential', 1, 'now', 'now')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            Database(path)
+            with closing(sqlite3.connect(str(path))) as migrated:
+                migrated.execute(
+                    "INSERT INTO credential_metadata("
+                    "credential_id, organization_id, credential_scope, "
+                    "resource_type, resource_id, label, secret_service, "
+                    "secret_account, created_by, created_at, updated_at"
+                    ") VALUES ("
+                    "'shared', 'b', 'organization', 'models', 'model', '', "
+                    "'service-b', 'credential', 1, 'now', 'now')"
+                )
+                rows = migrated.execute(
+                    "SELECT organization_id FROM credential_metadata "
+                    "WHERE credential_id='shared' ORDER BY organization_id"
+                ).fetchall()
+            self.assertEqual(rows, [("a",), ("b",)])
+
     def test_latest_schema_has_proactive_context_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Database(Path(temporary) / "botplatform.sqlite3")
@@ -351,7 +407,10 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertLessEqual(
                 {"admin_users", "admin_roles", "admin_sessions"}, tables
             )
-            self.assertEqual(set(roles), {"admin", "editor", "viewer"})
+            self.assertEqual(
+                set(roles),
+                {"admin", "editor", "viewer", "tenant_user"},
+            )
             self.assertEqual(roles["admin"], ('["*"]', 1))
             self.assertIn("tenants.read", roles["viewer"][0])
             self.assertNotIn("tenants.delete", roles["viewer"][0])

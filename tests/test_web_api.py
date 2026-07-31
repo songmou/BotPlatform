@@ -5,7 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from unittest.mock import MagicMock, patch
 
 from bs4 import BeautifulSoup
@@ -174,6 +174,7 @@ class WebApiTest(unittest.TestCase):
             AdminUserStore,
         )
         from src.core.storage.database import Database
+        from src.core.storage.tenants import TenantContext
 
         self.config = _make_config()
         self.fake_client = FakeClient()
@@ -188,6 +189,10 @@ class WebApiTest(unittest.TestCase):
         self._db_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._db_dir.cleanup)
         database = Database(Path(self._db_dir.name) / "botplatform.sqlite3")
+        self.mock_registry.database = database
+        self.mock_registry.get.return_value = TenantContext(
+            "00000000-0000-0000-0000-000000000001", "web", "test-user"
+        )
         self.admin_users = AdminUserStore(database)
         self.admin_roles = AdminRoleStore(database)
         self.admin_sessions = AdminSessionStore(database, b"test-secret")
@@ -230,6 +235,11 @@ class WebApiTest(unittest.TestCase):
         response = self.client.post("/api/chat/conversations", params=self._auth_params())
         self.assertEqual(response.status_code, 201)
         return response.json()["id"]
+
+    def _publish_test_agent(self, agent):
+        self.app.state.resource_store.upsert_public(
+            "agents", agent.id, asdict(agent), 1
+        )
 
     def test_health_no_auth(self):
         response = self.client.get("/api/health")
@@ -300,8 +310,9 @@ class WebApiTest(unittest.TestCase):
         self.mock_store.save_context.assert_called_once()
 
     def test_chat_tools_use_conversation_workspace(self):
-        tenant = self.mock_registry.resolve.return_value
+        tenant = self.mock_registry.get.return_value
         self.config.agents["general"].tools.append("list_directory")
+        self._publish_test_agent(self.config.agents["general"])
         tool_runtime = MagicMock()
         tool_runtime.schemas.return_value = [
             {
@@ -364,6 +375,8 @@ class WebApiTest(unittest.TestCase):
         )
         self.config.agents["general"] = general
         self.config.agents["coder"] = coder
+        self._publish_test_agent(general)
+        self._publish_test_agent(coder)
 
         client = MultiAgentToolClient()
         self.model_router.clients["test_model"] = client
@@ -768,6 +781,8 @@ class WebApiTest(unittest.TestCase):
         self.assertIn("用户与权限 - BotPlatform", users.text)
         self.assertIn("tenant-detail-modal", users.text)
         self.assertIn("tenant-detail-title", users.text)
+        self.assertIn('data-tab="organizations"', users.text)
+        self.assertIn("organization-detail-modal", users.text)
 
     def test_management_layout_structure(self):
         tools = self.client.get("/tools")
@@ -793,6 +808,17 @@ class WebApiTest(unittest.TestCase):
         self.assertIsNotNone(files_panel.select_one("#drive-mkdir-btn"))
         self.assertIsNotNone(files_panel.select_one("#drive-newfile-btn"))
         self.assertIsNotNone(files_panel.select_one("#drive-upload-btn"))
+        self.assertIsNotNone(files_panel.select_one("#drive-upload-folder-btn"))
+        folder_input = files_panel.select_one("#drive-folder-input")
+        self.assertIsNotNone(folder_input)
+        self.assertIn("webkitdirectory", folder_input.attrs)
+        self.assertIn("directory", folder_input.attrs)
+        upload_modal = drive_dom.select_one("#drive-folder-upload-modal")
+        self.assertIsNotNone(upload_modal)
+        self.assertIsNotNone(upload_modal.select_one("#drive-folder-upload-select-all"))
+        self.assertIsNotNone(upload_modal.select_one("#drive-folder-upload-items"))
+        self.assertIsNotNone(upload_modal.select_one("#drive-folder-upload-progress"))
+        self.assertIsNotNone(upload_modal.select_one("#drive-folder-upload-result"))
         self.assertIsNone(drive_dom.select_one(".page-header .drive-toolbar"))
         self.assertIsNone(drive_dom.select_one("#drive-audit-panel .drive-toolbar"))
 

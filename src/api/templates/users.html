@@ -32,6 +32,31 @@
         </table>
     </div>
 
+    <div id="users-tab-organizations" class="users-tab" style="display:none">
+        <div class="organization-toolbar">
+            <input id="organization-search" type="search" placeholder="搜索组织名称或组织 ID" aria-label="搜索组织">
+            <select id="organization-status-filter" aria-label="按状态筛选组织">
+                <option value="">全部状态</option>
+                <option value="active">正常</option>
+                <option value="suspended">已暂停</option>
+            </select>
+        </div>
+        <div id="organization-empty" class="status-card" style="display:none">暂无组织</div>
+        <table class="data-table" id="organization-table" style="display:none">
+            <thead>
+                <tr>
+                    <th>组织</th>
+                    <th>类型与认领状态</th>
+                    <th>状态</th>
+                    <th>成员</th>
+                    <th>创建时间</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="organization-tbody"></tbody>
+        </table>
+    </div>
+
     <div id="users-tab-admins" class="users-tab" style="display:none">
         <table class="data-table" id="admin-table">
             <thead>
@@ -50,6 +75,38 @@
 
     <div id="users-tab-roles" class="users-tab" style="display:none">
         <div id="roles-container" class="role-list"></div>
+    </div>
+</div>
+
+<!-- Organization create modal -->
+<div id="organization-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>新建组织</h3>
+            <button id="organization-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="organization-form" class="modal-body">
+            <div class="form-group">
+                <label for="organization-name">组织名称</label>
+                <input id="organization-name" type="text" maxlength="100" required placeholder="1-100 个字符">
+            </div>
+            <p class="form-hint">创建后将生成一次性所有者邀请链接码，请立即安全地发送给组织所有者。</p>
+            <div class="modal-footer">
+                <button id="organization-modal-cancel" type="button" class="btn-secondary">取消</button>
+                <button type="submit" class="btn-primary">创建并生成邀请链接码</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Organization member detail modal -->
+<div id="organization-detail-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-xl tenant-detail-modal">
+        <div class="modal-header">
+            <h3 id="organization-detail-title">组织成员</h3>
+            <button id="organization-detail-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div id="organization-detail-body" class="modal-body"></div>
     </div>
 </div>
 

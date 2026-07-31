@@ -65,6 +65,21 @@
         </div>
         <div class="modal-body">
             <div id="plugin-runtime-message" class="status-card" style="display:none"></div>
+            <div id="plugin-setup-panel" class="plugin-setup-panel" style="display:none">
+                <div class="plugin-setup-header">
+                    <div>
+                        <h4 class="section-title">依赖与组件</h4>
+                        <p id="plugin-setup-hint" class="plugin-status-help"></p>
+                    </div>
+                    <button id="plugin-setup-btn" class="btn-primary" type="button">安装依赖/组件</button>
+                </div>
+                <div id="plugin-setup-progress" class="plugin-setup-progress" style="display:none">
+                    <div class="plugin-setup-status">
+                        <span id="plugin-setup-status-text"></span>
+                    </div>
+                    <pre id="plugin-setup-log" class="plugin-setup-log"></pre>
+                </div>
+            </div>
             <div class="plugin-status-panel">
                 <div>
                     <div class="detail-label">启用状态</div>

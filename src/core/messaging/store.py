@@ -11,7 +11,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 from src.core.messaging.contracts import DeliveryEndpoint, InboundMessage
-from src.core.storage.tenants import TenantContext, TenantRegistry
+from src.core.storage.tenants import (
+    TenantContext,
+    TenantRegistry,
+    TenantStoreError,
+)
 
 
 def _now() -> datetime:
@@ -142,8 +146,13 @@ class ChannelAddressStore:
             )
         with self.registry.database.transaction(immediate=True) as connection:
             binding = connection.execute(
-                "SELECT tenant_id FROM channel_binding_codes "
-                "WHERE token_hash=? AND used_at IS NULL AND expires_at>?",
+                "SELECT binding.tenant_id, identity.user_id, "
+                "identity.active_organization_id "
+                "FROM channel_binding_codes binding "
+                "JOIN channel_identities identity "
+                "ON identity.identity_id=binding.identity_id "
+                "WHERE binding.token_hash=? AND binding.used_at IS NULL "
+                "AND binding.expires_at>?",
                 (token_hash, _iso(now)),
             ).fetchone()
             if binding is None:
@@ -168,8 +177,9 @@ class ChannelAddressStore:
                 connection.execute(
                     "INSERT INTO channel_identities("
                     "identity_id, tenant_id, channel_id, platform, account_id, "
-                    "external_user_id, created_at, last_seen_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "external_user_id, user_id, active_organization_id, "
+                    "created_at, last_seen_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         identity_id,
                         target_tenant_id,
@@ -177,8 +187,23 @@ class ChannelAddressStore:
                         message.platform,
                         message.account_id,
                         message.sender_id,
+                        binding["user_id"],
+                        binding["active_organization_id"],
                         seen_at,
                         seen_at,
+                    ),
+                )
+            if existing is not None and binding["user_id"] is not None:
+                connection.execute(
+                    "UPDATE channel_identities SET user_id=?, "
+                    "active_organization_id=? WHERE channel_id=? "
+                    "AND account_id=? AND external_user_id=?",
+                    (
+                        binding["user_id"],
+                        binding["active_organization_id"],
+                        message.channel_id,
+                        message.account_id,
+                        message.sender_id,
                     ),
                 )
             connection.execute(
@@ -190,12 +215,41 @@ class ChannelAddressStore:
     def resolve(self, message: InboundMessage) -> TenantContext:
         with self.registry.database.read() as connection:
             row = connection.execute(
-                "SELECT identity_id, tenant_id FROM channel_identities "
+                "SELECT identity_id, tenant_id, user_id, active_organization_id "
+                "FROM channel_identities "
                 "WHERE channel_id=? AND account_id=? AND external_user_id=?",
                 (message.channel_id, message.account_id, message.sender_id),
             ).fetchone()
         if row is not None:
-            tenant = self.registry.get(str(row["tenant_id"]))
+            tenant_id = str(
+                row["active_organization_id"] or row["tenant_id"]
+            )
+            member_user_id = (
+                int(row["user_id"]) if row["user_id"] is not None else None
+            )
+            organizations = getattr(self.registry, "organization_store", None)
+            if member_user_id is not None and organizations is not None:
+                try:
+                    organizations.membership(member_user_id, tenant_id)
+                except ValueError:
+                    active = organizations.active_organization(member_user_id)
+                    if active:
+                        tenant_id = active
+                    else:
+                        raise ChannelBindingError(
+                            "当前账号没有可用组织，请联系平台管理员邀请加入组织"
+                        )
+            tenant = replace(
+                self.registry.get(tenant_id),
+                member_user_id=member_user_id,
+                personal_tenant_id=(
+                    self.registry.member_personal_context(
+                        tenant_id, member_user_id
+                    ).tenant_id
+                    if member_user_id is not None
+                    else None
+                ),
+            )
         else:
             legacy_bot_id = (
                 message.account_id
@@ -223,7 +277,7 @@ class ChannelAddressStore:
                 "external_user_id, created_at, last_seen_at"
                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(channel_id, account_id, external_user_id) DO UPDATE SET "
-                "last_seen_at=excluded.last_seen_at",
+                "tenant_id=excluded.tenant_id, last_seen_at=excluded.last_seen_at",
                 (
                     identity_id,
                     tenant.tenant_id,
@@ -236,6 +290,72 @@ class ChannelAddressStore:
                 ),
             )
         return tenant
+
+    def organization_choices(self, message: InboundMessage) -> List[Dict[str, Any]]:
+        organizations = getattr(self.registry, "organization_store", None)
+        if organizations is None:
+            raise ChannelBindingError("当前未启用组织切换")
+        user_id = organizations.channel_user(
+            message.channel_id, message.account_id, message.sender_id
+        )
+        if user_id is None:
+            raise ChannelBindingError("当前渠道身份尚未认领账号，请先使用 /claim")
+        return organizations.list_for_user(user_id)
+
+    def switch_organization(
+        self, message: InboundMessage, organization_ref: str
+    ) -> TenantContext:
+        organizations = getattr(self.registry, "organization_store", None)
+        if organizations is None:
+            raise ChannelBindingError("当前未启用组织切换")
+        choices = self.organization_choices(message)
+        normalized = organization_ref.strip()
+        matches = [
+            item
+            for item in choices
+            if str(item["organization_id"]) == normalized
+            or str(item["organization_id"]).startswith(normalized)
+        ]
+        if len(matches) != 1:
+            raise ChannelBindingError(
+                "组织编号不存在或前缀不唯一，请使用 /org list 查看"
+            )
+        organization_id = str(matches[0]["organization_id"])
+        organizations.set_channel_organization(
+            message.channel_id,
+            message.account_id,
+            message.sender_id,
+            organization_id,
+        )
+        member_user_id = organizations.channel_user(
+            message.channel_id, message.account_id, message.sender_id
+        )
+        return replace(
+            self.registry.get(organization_id),
+            member_user_id=member_user_id,
+            personal_tenant_id=(
+                self.registry.member_personal_context(
+                    organization_id, member_user_id
+                ).tenant_id
+                if member_user_id is not None
+                else None
+            ),
+        )
+
+    def issue_claim_token(
+        self, message: InboundMessage, tenant: TenantContext
+    ) -> str:
+        organizations = getattr(self.registry, "organization_store", None)
+        if organizations is None:
+            raise ChannelBindingError("当前未启用组织认领")
+        if organizations.channel_user(
+            message.channel_id, message.account_id, message.sender_id
+        ) is not None:
+            raise ChannelBindingError("当前渠道身份已经关联账号")
+        try:
+            return organizations.issue_legacy_claim(tenant.tenant_id)
+        except ValueError as exc:
+            raise ChannelBindingError(str(exc)) from exc
 
     def record_endpoint(
         self,
@@ -344,18 +464,36 @@ class ChannelAddressStore:
         tenant_id: str,
         channel_id: Optional[str] = None,
         include_non_direct: bool = False,
+        member_user_id: Optional[int] = None,
     ) -> Optional[DeliveryEndpoint]:
-        query = (
-            "SELECT * FROM delivery_endpoints "
-            "WHERE tenant_id=? AND status='active'"
-        )
-        values: List[Any] = [tenant_id]
+        organization_id = tenant_id
+        try:
+            context = self.registry.get(tenant_id)
+            if context.bot_id.startswith("member-personal:"):
+                organization_id = context.bot_id.split(":", 1)[1]
+                member_user_id = int(context.user_id)
+        except (TenantStoreError, ValueError):
+            pass
+        query = "SELECT endpoint.* FROM delivery_endpoints endpoint "
+        values: List[Any] = []
+        if member_user_id is not None:
+            query += (
+                "JOIN channel_identities identity "
+                "ON identity.identity_id=endpoint.identity_id "
+            )
+        query += "WHERE endpoint.tenant_id=? AND endpoint.status='active'"
+        values.append(organization_id)
+        if member_user_id is not None:
+            query += " AND identity.user_id=?"
+            values.append(member_user_id)
         if not include_non_direct:
-            query += " AND conversation_type='direct'"
+            query += " AND endpoint.conversation_type='direct'"
         if channel_id:
-            query += " AND channel_id=?"
+            query += " AND endpoint.channel_id=?"
             values.append(channel_id)
-        query += " ORDER BY last_seen_at DESC, endpoint_id DESC LIMIT 1"
+        query += (
+            " ORDER BY endpoint.last_seen_at DESC, endpoint.endpoint_id DESC LIMIT 1"
+        )
         with self.registry.database.read() as connection:
             row = connection.execute(query, values).fetchone()
         return self._endpoint_from_row(row) if row is not None else None

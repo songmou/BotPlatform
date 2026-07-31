@@ -983,11 +983,26 @@ class KnowledgeService:
         clauses = ["(c.scope='public' OR c.tenant_id=?)"]
         values: List[Any] = [tenant_id]
         if agent_id is not None:
-            clauses.append(
-                "EXISTS (SELECT 1 FROM agent_knowledge_categories a "
-                "WHERE a.agent_id=? AND a.category_id=c.category_id)"
-            )
-            values.append(agent_id)
+            with self.registry.database.read() as connection:
+                organization_binding = connection.execute(
+                    "SELECT 1 FROM organization_agent_knowledge_categories "
+                    "WHERE organization_id=? AND agent_id=? LIMIT 1",
+                    (tenant_id, agent_id),
+                ).fetchone()
+            if organization_binding is not None:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM "
+                    "organization_agent_knowledge_categories a "
+                    "WHERE a.organization_id=? AND a.agent_id=? "
+                    "AND a.category_id=c.category_id)"
+                )
+                values.extend([tenant_id, agent_id])
+            else:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM agent_knowledge_categories a "
+                    "WHERE a.agent_id=? AND a.category_id=c.category_id)"
+                )
+                values.append(agent_id)
         if requested is not None:
             normalized = list(dict.fromkeys(requested))
             if not normalized:

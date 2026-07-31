@@ -52,36 +52,43 @@
 .segmented {
     display: inline-flex;
     flex-wrap: wrap;
-    gap: 2px;
-    padding: 4px;
+    gap: 4px;
+    padding: 5px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 12px;
 }
 
 .seg-btn {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 7px 16px;
+    gap: 8px;
+    padding: 8px 18px;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     background: none;
     color: var(--text-secondary);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: background 0.18s var(--ease-out), color 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out);
 }
 
 .seg-btn:hover {
+    background: var(--bg-hover);
     color: var(--text);
 }
 
 .seg-btn.active {
-    background: var(--bg);
-    color: var(--accent);
-    box-shadow: var(--shadow);
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(67, 83, 255, 0.35);
+}
+
+.seg-btn.active:hover {
+    background: var(--accent-hover);
+    color: #fff;
 }
 
 .seg-count {
@@ -100,14 +107,46 @@
 }
 
 .seg-btn.active .seg-count {
-    background: var(--accent-light);
-    color: var(--accent);
+    background: rgba(255, 255, 255, 0.24);
+    color: #fff;
+}
+
+[data-theme="dark"] .seg-btn.active {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
 }
 
 /* Modality badges on model cards */
 .badge-modality {
     background: var(--bg-hover);
     color: var(--text-secondary);
+}
+
+/* Prominent primary-model marking: gradient pill badge + highlighted card. */
+.model-card .badge-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: var(--grad-accent);
+    color: #fff;
+    box-shadow: 0 2px 6px rgba(101, 115, 230, 0.4);
+}
+
+.model-card .badge-primary::before {
+    content: "\2605";
+    font-size: 10px;
+    line-height: 1;
+}
+
+.model-card.is-primary {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), var(--shadow);
+    background: linear-gradient(180deg, var(--accent-light) 0%, var(--bg) 55%);
+}
+
+.model-card.is-primary:hover {
+    box-shadow: 0 0 0 1px var(--accent), var(--shadow-lg);
 }
 
 .badge-modality-chat {
@@ -242,8 +281,8 @@
 }
 
 .model-editor-modal {
-    width: min(760px, calc(100vw - 32px));
-    max-width: 760px;
+    width: min(880px, calc(100vw - 32px));
+    max-width: 880px;
     max-height: 92vh;
 }
 
@@ -254,7 +293,37 @@
 }
 
 .model-editor-modal #model-form {
-    padding-top: 18px;
+    padding-top: 0;
+}
+
+/* Editor sub-tabs inside the modal */
+.model-editor-modal .editor-tabs {
+    position: sticky;
+    top: -20px;
+    z-index: 5;
+    margin: -20px -24px 20px;
+    padding: 6px 24px 0;
+    background: var(--bg);
+}
+
+.model-editor-modal .editor-tabs .tab-btn {
+    padding: 10px 16px;
+}
+
+.model-editor-modal [data-editor-panel][hidden] {
+    display: none;
+}
+
+.model-editor-modal .panel-hint {
+    margin: 0 0 14px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.model-editor-modal .panel-note {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-muted);
 }
 
 .model-editor-modal .checkbox-row .checkbox-label {
@@ -410,21 +479,6 @@
     padding: 10px 14px;
     background: var(--bg-hover);
     border-radius: var(--radius);
-}
-
-.pricing-fieldset {
-    margin: 14px 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-}
-
-.pricing-fieldset legend {
-    color: var(--text);
-    font-weight: 600;
-}
-
-.pricing-fieldset small {
-    color: var(--text-muted);
 }
 
 .analytics-detail-modal {

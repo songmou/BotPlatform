@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.core.config.loader import OcrConfig
+from src.core.services.ocr_config import OcrConfig
 from src.core.paths import CONFIG_DIR
 
 

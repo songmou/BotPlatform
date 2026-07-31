@@ -12,7 +12,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from src.core.config.loader import OcrConfig
+from src.core.services.ocr_config import OcrConfig
 from src.core.integrations.paddle_ocr import PaddleOcrError, PaddleOcrProcess
 
 

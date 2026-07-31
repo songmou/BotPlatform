@@ -59,6 +59,7 @@ class PluginManifest:
     jobs: Tuple[PluginJobDefinition, ...] = ()
     settings_aliases: Mapping[str, str] = field(default_factory=dict)
     discard_unknown_settings: bool = False
+    prepare: str = ""
 
     @property
     def missing_dependencies(self) -> List[str]:
@@ -138,7 +139,7 @@ def load_manifest(path: Path, source: str) -> PluginManifest:
         "schema_version", "id", "name", "version", "description", "entrypoint",
         "core_api", "icon", "color", "tools", "settings_schema", "instructions",
         "dependencies", "services", "background_jobs",
-        "settings_aliases", "discard_unknown_settings",
+        "settings_aliases", "discard_unknown_settings", "prepare",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -152,25 +153,10 @@ def load_manifest(path: Path, source: str) -> PluginManifest:
     if not PLUGIN_ID_PATTERN.fullmatch(plugin_id):
         raise PluginManifestError("{}: id 格式无效".format(path))
     entrypoint = _required_text(data, "entrypoint", path)
-    if ":" not in entrypoint:
-        raise PluginManifestError("{}: entrypoint 必须使用 module:attribute".format(path))
-    module_name, attribute = entrypoint.split(":", 1)
-    module_parts = module_name.split(".")
-    if (
-        not module_name
-        or not attribute
-        or any(not MODULE_SEGMENT_PATTERN.fullmatch(item) for item in module_parts)
-        or not MODULE_SEGMENT_PATTERN.fullmatch(attribute)
-    ):
-        raise PluginManifestError("{}: entrypoint 格式无效".format(path))
-    if source == "external":
-        relative = Path(*module_parts)
-        file_target = (path.parent / relative).with_suffix(".py").resolve()
-        package_target = (path.parent / relative / "__init__.py").resolve()
-        package_root = path.parent.resolve()
-        target = package_target if package_target.is_file() else file_target
-        if package_root not in target.parents or not target.is_file():
-            raise PluginManifestError("{}: entrypoint 文件不存在或越界".format(path))
+    _validate_module_reference(entrypoint, path, "entrypoint", source)
+    prepare = str(data.get("prepare") or "").strip()
+    if prepare:
+        _validate_module_reference(prepare, path, "prepare", source)
 
     raw_tools = _object_schema(data.get("tools", {}), path, "tools")
     tools: Dict[str, PluginToolDefinition] = {}
@@ -319,8 +305,38 @@ def load_manifest(path: Path, source: str) -> PluginManifest:
         jobs=tuple(jobs),
         settings_aliases=settings_aliases,
         discard_unknown_settings=discard_unknown_settings,
+        prepare=prepare,
     )
     return manifest
+
+
+def _validate_module_reference(
+    reference: str, path: Path, field_name: str, source: str
+) -> None:
+    """Validate a module:attribute reference and its file for external packages."""
+    if ":" not in reference:
+        raise PluginManifestError(
+            "{}: {} 必须使用 module:attribute".format(path, field_name)
+        )
+    module_name, attribute = reference.split(":", 1)
+    module_parts = module_name.split(".")
+    if (
+        not module_name
+        or not attribute
+        or any(not MODULE_SEGMENT_PATTERN.fullmatch(item) for item in module_parts)
+        or not MODULE_SEGMENT_PATTERN.fullmatch(attribute)
+    ):
+        raise PluginManifestError("{}: {} 格式无效".format(path, field_name))
+    if source == "external":
+        relative = Path(*module_parts)
+        file_target = (path.parent / relative).with_suffix(".py").resolve()
+        package_target = (path.parent / relative / "__init__.py").resolve()
+        package_root = path.parent.resolve()
+        target = package_target if package_target.is_file() else file_target
+        if package_root not in target.parents or not target.is_file():
+            raise PluginManifestError(
+                "{}: {} 文件不存在或越界".format(path, field_name)
+            )
 
 
 def validate_json_schema(value: Any, schema: Mapping[str, Any], field: str) -> None:

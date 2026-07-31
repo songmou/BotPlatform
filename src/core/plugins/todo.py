@@ -890,7 +890,11 @@ class TodoPlugin:
     def execute(self, tool_name: str, arguments: Dict[str, Any], tenant: Any) -> Any:
         if tool_name != "todo_manage":
             raise PluginError("未知待办工具：{}".format(tool_name))
-        tenant_id = str(getattr(tenant, "tenant_id", "") or "")
+        tenant_id = str(
+            getattr(tenant, "personal_tenant_id", None)
+            or getattr(tenant, "tenant_id", "")
+            or ""
+        )
         if not tenant_id:
             raise PluginError("待办工具需要租户身份")
         action = arguments.get("action")

@@ -254,7 +254,7 @@ class PluginsToolsApiTest(WebApiTestBase):
         categories = list(dict.fromkeys(t["category"] for t in tools))
         self.assertEqual(
             categories,
-            ["文档识别", "知识库", "文件系统", "系统信息", "命令执行", "脚本"],
+            ["知识库", "文件系统", "系统信息", "命令执行", "脚本"],
         )
         run_command = next(t for t in tools if t["name"] == "run_command")
         # No tool runtime injected -> unavailable but enabled by default.

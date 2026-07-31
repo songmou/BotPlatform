@@ -11,17 +11,12 @@ from unittest.mock import patch
 from PIL import Image
 from pypdf import PdfWriter
 
-from src.core.config.loader import OcrConfig, load_project_config
 from src.core.integrations.paddle_ocr import (
     PaddleOcrError,
     PaddleOcrProcess,
     paddle_ocr_availability,
 )
-from src.core.services.ocr import OcrError, OcrService
-from src.core.tooling import ToolRuntime
-
-
-SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"
+from src.core.services.ocr import OcrConfig, OcrError, OcrService
 
 
 class FakeWorker:
@@ -122,38 +117,6 @@ class OcrServiceTests(unittest.TestCase):
     def test_close_delegates_to_worker(self) -> None:
         self.service.close()
         self.assertTrue(self.worker.closed)
-
-
-class OcrToolTests(unittest.TestCase):
-    def test_tool_uses_runtime_path_isolation_and_returns_payload(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "workspace"
-            root.mkdir()
-            path = root / "scan.png"
-            path.write_bytes(image_bytes())
-            tool_config = load_project_config(SOURCE_CONFIG).tools
-            from dataclasses import replace
-
-            tool_config = replace(
-                tool_config,
-                default_working_directory=str(root),
-                allowed_roots=[str(root)],
-            )
-            worker = FakeWorker()
-            service = OcrService(tool_config.ocr, worker=worker)
-            runtime = ToolRuntime(
-                tool_config,
-                "Asia/Shanghai",
-                ocr_service=service,
-            )
-            self.assertTrue(runtime.is_available("ocr_extract_text"))
-            result = runtime.execute("ocr_extract_text", {"path": "scan.png"})
-            self.assertTrue(result.ok)
-            self.assertEqual(result.data["text"], "你好\nHello")
-            escaped = runtime.execute(
-                "ocr_extract_text", {"path": "../outside.png"}
-            )
-            self.assertFalse(escaped.ok)
 
 
 class PaddleOcrProcessTests(unittest.TestCase):

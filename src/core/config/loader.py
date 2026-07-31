@@ -90,7 +90,6 @@ BUILTIN_TOOL_NAMES = {
     "knowledge_search",
     "knowledge_list",
     "knowledge_delete",
-    "ocr_extract_text",
 }
 KNOWN_TOOL_NAMES = BUILTIN_TOOL_NAMES | plugin_tool_names()
 
@@ -102,22 +101,6 @@ KNOWN_COMMAND_PROFILES = {
     "ollama_readonly",
     "workspace_script",
 }
-
-
-@dataclass(frozen=True)
-class OcrConfig:
-    enabled: bool = False
-    auto_process_chat_images: bool = True
-    engine: str = "paddleocr"
-    device: str = "cpu"
-    model_tier: str = "small"
-    model_directory: str = ""
-    max_input_bytes: int = 20 * 1024 * 1024
-    max_pdf_pages: int = 10
-    max_image_pixels: int = 25_000_000
-    max_output_chars: int = 20_000
-    startup_timeout_seconds: int = 120
-    request_timeout_seconds: int = 60
 
 
 @dataclass(frozen=True)
@@ -137,7 +120,6 @@ class ToolConfig:
     default_command_timeout_seconds: int
     max_command_timeout_seconds: int
     enabled_command_profiles: List[str]
-    ocr: OcrConfig = field(default_factory=OcrConfig)
 
 
 @dataclass(frozen=True)
@@ -447,7 +429,7 @@ def _load_tools(path: Path) -> ToolConfig:
         "max_read_bytes", "max_write_bytes", "max_directory_entries",
         "max_search_results", "max_command_output_bytes",
         "default_command_timeout_seconds", "max_command_timeout_seconds",
-        "enabled_command_profiles", "ocr",
+        "enabled_command_profiles",
     }, path)
     enabled = data.get("enabled")
     if not isinstance(enabled, bool):
@@ -501,81 +483,6 @@ def _load_tools(path: Path) -> ToolConfig:
             "不能大于 max_command_timeout_seconds",
         )
 
-    raw_ocr = data.get("ocr", {})
-    if not isinstance(raw_ocr, dict):
-        raise _error(path, "ocr", "必须是 JSON 对象")
-    _reject_unknown(
-        raw_ocr,
-        {
-            "enabled",
-            "auto_process_chat_images",
-            "engine",
-            "device",
-            "model_tier",
-            "model_directory",
-            "max_input_bytes",
-            "max_pdf_pages",
-            "max_image_pixels",
-            "max_output_chars",
-            "startup_timeout_seconds",
-            "request_timeout_seconds",
-        },
-        path,
-        "ocr",
-    )
-    ocr_enabled = raw_ocr.get("enabled", False)
-    auto_process = raw_ocr.get("auto_process_chat_images", True)
-    if not isinstance(ocr_enabled, bool):
-        raise _error(path, "ocr.enabled", "必须是布尔值")
-    if not isinstance(auto_process, bool):
-        raise _error(path, "ocr.auto_process_chat_images", "必须是布尔值")
-    engine = raw_ocr.get("engine", "paddleocr")
-    if engine != "paddleocr":
-        raise _error(path, "ocr.engine", "目前仅支持 paddleocr")
-    device = raw_ocr.get("device", "cpu")
-    if device not in {"cpu", "gpu"}:
-        raise _error(path, "ocr.device", "仅支持 cpu 或 gpu")
-    model_tier = raw_ocr.get("model_tier", "small")
-    if model_tier not in {"tiny", "small", "medium"}:
-        raise _error(path, "ocr.model_tier", "仅支持 tiny、small 或 medium")
-    raw_model_directory = raw_ocr.get(
-        "model_directory", "$SYSTEM_DATA_DIR/ocr_models"
-    )
-    if not isinstance(raw_model_directory, str) or not raw_model_directory.strip():
-        raise _error(path, "ocr.model_directory", "必须是非空字符串")
-    marker = "$SYSTEM_DATA_DIR"
-    if raw_model_directory == marker or raw_model_directory.startswith(marker + "/"):
-        suffix = raw_model_directory[len(marker) :].lstrip("/")
-        model_directory = path.resolve().parent.parent / "data" / "system"
-        if suffix:
-            model_directory /= suffix
-    else:
-        model_directory = Path(raw_model_directory).expanduser()
-        if not model_directory.is_absolute():
-            raise _error(path, "ocr.model_directory", "必须是绝对路径或 $SYSTEM_DATA_DIR 子路径")
-    model_directory = model_directory.resolve()
-
-    def ocr_positive_int(name: str, default: int) -> int:
-        value = raw_ocr.get(name, default)
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise _error(path, "ocr." + name, "必须是正整数")
-        return value
-
-    ocr = OcrConfig(
-        enabled=ocr_enabled,
-        auto_process_chat_images=auto_process,
-        engine=engine,
-        device=device,
-        model_tier=model_tier,
-        model_directory=str(model_directory),
-        max_input_bytes=ocr_positive_int("max_input_bytes", 20 * 1024 * 1024),
-        max_pdf_pages=ocr_positive_int("max_pdf_pages", 10),
-        max_image_pixels=ocr_positive_int("max_image_pixels", 25_000_000),
-        max_output_chars=ocr_positive_int("max_output_chars", 20_000),
-        startup_timeout_seconds=ocr_positive_int("startup_timeout_seconds", 120),
-        request_timeout_seconds=ocr_positive_int("request_timeout_seconds", 60),
-    )
-
     return ToolConfig(
         enabled=enabled,
         default_working_directory=str(default_directory),
@@ -592,7 +499,6 @@ def _load_tools(path: Path) -> ToolConfig:
         default_command_timeout_seconds=default_timeout,
         max_command_timeout_seconds=max_timeout,
         enabled_command_profiles=profiles,
-        ocr=ocr,
     )
 
 

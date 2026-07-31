@@ -38,7 +38,8 @@ from src.core.tooling.models import PendingApproval, PreparedToolCall, ToolResul
 from src.core.storage.tenants import ConversationStore, SettingsStore, TenantContext
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.memory import MemoryService
-from src.core.services.ocr import OcrError, OcrService
+from src.core.services.ocr import OcrError
+from src.core.services.resources import ScopedResourceStore
 from src.core.storage.model_analytics import ModelAnalyticsStore
 
 
@@ -59,7 +60,7 @@ class AgentService:
         memory_service: Optional[MemoryService] = None,
         model_analytics_store: Optional[ModelAnalyticsStore] = None,
         skills: Optional[List[Dict[str, Any]]] = None,
-        ocr_service: Optional[OcrService] = None,
+        resource_store: Optional[ScopedResourceStore] = None,
     ) -> None:
         self.model = model
         self.model_router = (
@@ -75,7 +76,7 @@ class AgentService:
         self.memory_service = memory_service
         self.model_analytics_store = model_analytics_store
         self.skills = skills or []
-        self.ocr_service = ocr_service or getattr(tool_runtime, "ocr_service", None)
+        self.resource_store = resource_store
         self.max_history_messages = app_config.history_rounds * 2
         self.histories: Dict[str, List[CanonicalMessage]] = {}
         self._approvals = ApprovalStore()
@@ -93,6 +94,12 @@ class AgentService:
 
     @staticmethod
     def _subject_key(subject: Union[str, TenantContext]) -> str:
+        if isinstance(subject, TenantContext):
+            return subject.personal_tenant_id or subject.tenant_id
+        return subject
+
+    @staticmethod
+    def _organization_key(subject: Union[str, TenantContext]) -> str:
         return subject.tenant_id if isinstance(subject, TenantContext) else subject
 
     @staticmethod
@@ -203,11 +210,17 @@ class AgentService:
         subject_key: Optional[str] = None,
         supplemental_context: str = "",
         allow_private_context: bool = True,
+        knowledge_subject_key: Optional[str] = None,
+        skills: Optional[List[Dict[str, Any]]] = None,
     ) -> List[CanonicalMessage]:
         messages = [
             CanonicalMessage(
                 "system",
-                build_system_prompt(preset, self.skills, self.tool_runtime),
+                build_system_prompt(
+                    preset,
+                    self.skills if skills is None else skills,
+                    self.tool_runtime,
+                ),
             ),
             CanonicalMessage("system", self._current_time_context()),
         ]
@@ -267,16 +280,23 @@ class AgentService:
                 for item in memories:
                     lines.append("- [{}] {}".format(str(item["memory_id"])[:8], item["content"]))
                 messages.append(CanonicalMessage("system", "\n".join(lines)[:2500]))
-        if allow_private_context and subject_key and self.knowledge_service is not None:
+        if (
+            allow_private_context
+            and (knowledge_subject_key or subject_key)
+            and self.knowledge_service is not None
+        ):
             try:
                 try:
                     knowledge = self.knowledge_service.search(
-                        subject_key, question, limit=6, agent_id=preset.id
+                        knowledge_subject_key or subject_key,
+                        question,
+                        limit=6,
+                        agent_id=preset.id,
                     )
                 except TypeError:
                     # Compatibility with lightweight test doubles and plugins.
                     knowledge = self.knowledge_service.search(
-                        subject_key, question, limit=6
+                        knowledge_subject_key or subject_key, question, limit=6
                     )
             except Exception:
                 knowledge = []
@@ -310,23 +330,23 @@ class AgentService:
         image_bytes: Optional[bytes],
         preset: AgentPreset,
     ) -> tuple[str, str]:
-        if not image_bytes or self.ocr_service is None:
+        if not image_bytes or self.tool_runtime is None:
             return "", ""
-        config = self.ocr_service.config
-        if not config.enabled or not config.auto_process_chat_images:
+        manager = getattr(self.tool_runtime, "plugin_manager", None)
+        if manager is None:
             return "", ""
-        if "ocr_extract_text" not in preset.tools:
+        plugin = manager.get("ocr")
+        if plugin is None or not getattr(plugin, "auto_chat_images", False):
             return "", ""
-        if (
-            self.tool_runtime is not None
-            and not self.tool_runtime.is_tool_enabled("ocr_extract_text")
-        ):
+        if "ocr_extract_text" not in preset.plugin_tools.get("ocr", []):
             return "", ""
-        available, reason = self.ocr_service.availability()
+        if not self.tool_runtime.is_tool_enabled("ocr_extract_text"):
+            return "", ""
+        available, reason = plugin.availability()
         if not available:
             return "", reason
         try:
-            result = self.ocr_service.recognize_image_bytes(image_bytes)
+            result = plugin.recognize_chat_image(image_bytes)
         except OcrError as exc:
             logger.warning("自动 OCR 失败：%s", exc)
             return "", str(exc)
@@ -568,13 +588,65 @@ class AgentService:
         allow_private_context: bool = True,
     ) -> AgentOutcome:
         key = self._subject_key(user_id)
+        effective_agents = self.agents
+        effective_skills = self.skills
+        if isinstance(user_id, TenantContext) and self.resource_store is not None:
+            try:
+                effective_agents = (
+                    self.resource_store.effective_agent_presets(user_id.tenant_id)
+                    or self.agents
+                )
+                effective_skills = self.resource_store.effective_skills(
+                    user_id.tenant_id
+                )
+                allowed_plugins = {
+                    str(item["resource_id"])
+                    for item in self.resource_store.list_effective(
+                        user_id.tenant_id, "plugins"
+                    )
+                }
+                allowed_mcp = {
+                    str(item["resource_id"])
+                    for item in self.resource_store.list_effective(
+                        user_id.tenant_id, "mcp"
+                    )
+                }
+                effective_agents = {
+                    resource_id: replace(
+                        preset,
+                        plugin_tools={
+                            plugin_id: names
+                            for plugin_id, names in preset.plugin_tools.items()
+                            if plugin_id in allowed_plugins
+                        },
+                        mcp_servers=[
+                            server_id
+                            for server_id in preset.mcp_servers
+                            if server_id in allowed_mcp
+                        ],
+                    )
+                    for resource_id, preset in effective_agents.items()
+                }
+            except Exception:
+                logger.warning("读取组织智能体目录失败，回退到平台配置", exc_info=True)
         session_key = conversation_id or "direct"
         self._knowledge_context.value = []
         preset_id = agent_id or self.active_agent.id
+        if preset_id not in effective_agents:
+            preset_id = (
+                self.app_config.default_agent
+                if self.app_config.default_agent in effective_agents
+                else next(iter(effective_agents))
+            )
         if self.model_analytics_store is not None:
             tenant_id = user_id.tenant_id if isinstance(user_id, TenantContext) else None
             run_id = self.model_analytics_store.start_run(
                 tenant_id=tenant_id,
+                user_id=(
+                    user_id.member_user_id
+                    if isinstance(user_id, TenantContext)
+                    else None
+                ),
                 source=source,
                 agent_id=preset_id,
                 conversation_id=session_key,
@@ -582,6 +654,11 @@ class AgentService:
             self._analytics_context.value = ModelCallContext(
                 run_id=run_id,
                 tenant_id=tenant_id,
+                user_id=(
+                    user_id.member_user_id
+                    if isinstance(user_id, TenantContext)
+                    else None
+                ),
                 source=source,
                 operation="answer",
                 agent_id=preset_id,
@@ -594,7 +671,7 @@ class AgentService:
             if pending:
                 return self._approval_outcome(pending)
             history = self._history_for(user_id, session_key)
-            preset = self.agents[agent_id] if agent_id else self.active_agent
+            preset = effective_agents[preset_id]
             ocr_context, ocr_error = self._automatic_ocr_context(
                 image_bytes, preset
             )
@@ -637,8 +714,10 @@ class AgentService:
                 model,
                 include_tool_context=allow_tools,
                 subject_key=key,
+                knowledge_subject_key=self._organization_key(user_id),
                 supplemental_context=ocr_context,
                 allow_private_context=allow_private_context,
+                skills=effective_skills,
             )
             thinking_parts: List[str] = []
             if not allow_tools or not self._tools_enabled(preset, model):

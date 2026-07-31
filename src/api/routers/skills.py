@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.api.deps import get_config
+from src.api.deps import get_config, require_permission
 from src.api.schemas import SkillCreate, SkillOut, SkillUpdate
 from src.core.config.loader import ConfigError
 from src.core.paths import CONFIG_DIR
@@ -51,12 +51,18 @@ def _to_out(item: dict) -> SkillOut:
 
 
 @router.get("", response_model=list[SkillOut])
-def list_skills():
+def list_skills(
+    _principal=Depends(require_permission("panel.read")),
+):
     return [_to_out(s) for s in _load()]
 
 
 @router.post("", response_model=SkillOut, status_code=201)
-def create_skill(body: SkillCreate, request: Request):
+def create_skill(
+    body: SkillCreate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     if not _TASK_ID_PATTERN.match(body.id):
         raise HTTPException(status_code=400, detail="ID 只能包含小写字母、数字和下划线，且以字母开头")
     skills = _load()
@@ -75,7 +81,12 @@ def create_skill(body: SkillCreate, request: Request):
 
 
 @router.put("/{skill_id}", response_model=SkillOut)
-def update_skill(skill_id: str, body: SkillUpdate, request: Request):
+def update_skill(
+    skill_id: str,
+    body: SkillUpdate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     skills = _load()
     for s in skills:
         if s["id"] == skill_id:
@@ -93,7 +104,11 @@ def update_skill(skill_id: str, body: SkillUpdate, request: Request):
 
 
 @router.delete("/{skill_id}")
-def delete_skill(skill_id: str, request: Request):
+def delete_skill(
+    skill_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     skills = _load()
     filtered = [s for s in skills if s["id"] != skill_id]
     if len(filtered) == len(skills):

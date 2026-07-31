@@ -195,6 +195,43 @@
     line-height: 1.5;
 }
 
+.plugin-setup-panel {
+    margin-bottom: 20px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+}
+
+.plugin-setup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+}
+
+.plugin-setup-progress {
+    margin-top: 12px;
+}
+
+.plugin-setup-status {
+    font-size: 13px;
+    margin-bottom: 8px;
+}
+
+.plugin-setup-log {
+    max-height: 220px;
+    overflow: auto;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-tertiary, #1e1e1e);
+    color: var(--text-secondary, #ddd);
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
 .plugin-section-heading {
     display: flex;
     align-items: center;

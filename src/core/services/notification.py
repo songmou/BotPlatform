@@ -593,7 +593,7 @@ class NotificationOutboxStore:
         referenced = {str(Path(str(row["image_path"])).resolve()) for row in rows}
         cutoff = self.now_provider().timestamp() - 600
         removed = 0
-        for tenant in self.registry.list_contexts():
+        for tenant in self.registry.list_contexts(include_internal=True):
             root = self.registry.tenant_root(tenant.tenant_id) / "notification_outbox"
             if not root.is_dir():
                 continue
