@@ -161,6 +161,7 @@ class ScriptServiceTests(unittest.TestCase):
         self.assertIn("固定脚本结果", self.notifications.texts[0][1])
         self.assertEqual(self.notifications.images[0][0], self.tenant.tenant_id)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group SIGTERM cancellation semantics")
     def test_duplicate_is_skipped_without_queueing(self) -> None:
         service = self.service()
         first = service.submit(self.tenant, "fake", {"mode": "slow"}, trigger="schedule")
@@ -170,6 +171,7 @@ class ScriptServiceTests(unittest.TestCase):
         service.shutdown()
         self.assertEqual(service.get_run(self.tenant, first["run_id"])["status"], "cancelled")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX signal exit codes (-SIGTERM) on timeout")
     def test_timeout_and_parameter_validation(self) -> None:
         service = self.service(timeout=1)
         with self.assertRaisesRegex(ValueError, "仅允许"):

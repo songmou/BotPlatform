@@ -1,39 +1,121 @@
 /* login page styles (split from app.css). Loaded after app.css. */
 
-/* ===== Login page ===== */
+/* ===== 登录页：玻璃拟态 ===== */
 .login-page {
     display: flex;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    background: var(--bg);
-}
-.login-card {
-    width: 340px;
-    padding: 36px 32px;
-    border-radius: 12px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
-}
-.login-title {
-    margin: 0 0 4px;
-    font-size: 22px;
-    text-align: center;
-}
-.login-subtitle {
-    margin: 0 0 24px;
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 13px;
-}
-.login-btn {
-    width: 100%;
-    margin-top: 8px;
-}
-.login-error {
-    color: #e5484d;
-    font-size: 13px;
-    margin: 0 0 8px;
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(135deg, #232a44 0%, #2f2c53 55%, #3a3560 100%);
 }
 
+/* 背景柔光光斑（低亮度，避免刺眼） */
+.login-page::before,
+.login-page::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(110px);
+    opacity: 0.28;
+    pointer-events: none;
+}
+.login-page::before {
+    width: 460px;
+    height: 460px;
+    top: -120px;
+    left: -100px;
+    background: #4f6bd8;
+}
+.login-page::after {
+    width: 420px;
+    height: 420px;
+    bottom: -140px;
+    right: -80px;
+    background: #7d6bb0;
+}
+
+.login-card {
+    position: relative;
+    z-index: 1;
+    width: 360px;
+    padding: 40px 34px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    box-shadow: 0 20px 50px -12px rgba(15, 23, 42, 0.45);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    backdrop-filter: blur(18px) saturate(160%);
+    color: #fff;
+}
+
+.login-title {
+    margin: 0 0 4px;
+    font-size: 26px;
+    font-weight: 700;
+    text-align: center;
+    color: #fff;
+    letter-spacing: -0.02em;
+}
+.login-subtitle {
+    margin: 0 0 26px;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 13px;
+}
+
+.login-card .form-group label {
+    color: rgba(255, 255, 255, 0.85);
+}
+.login-card .form-group input {
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #fff;
+    border-radius: 10px;
+    padding: 11px 14px;
+}
+.login-card .form-group input::placeholder {
+    color: rgba(255, 255, 255, 0.6);
+}
+.login-card .form-group input:focus {
+    border-color: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.22);
+}
+
+.login-btn {
+    width: 100%;
+    margin-top: 10px;
+    padding: 12px;
+    border: none;
+    border-radius: 12px;
+    background: #fff;
+    color: #4353ff;
+    font-weight: 700;
+    font-size: 15px;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+    box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.5);
+}
+.login-btn:hover {
+    background: #fff;
+    color: #4353ff;
+    transform: translateY(-1px);
+    filter: brightness(1);
+    box-shadow: 0 14px 30px -10px rgba(0, 0, 0, 0.55);
+}
+.login-btn:active {
+    transform: translateY(0);
+}
+
+.login-error {
+    color: #ffe4e6;
+    background: rgba(190, 18, 60, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+    margin: 0 0 10px;
+    text-align: center;
+}

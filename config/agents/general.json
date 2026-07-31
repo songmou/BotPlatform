@@ -103,5 +103,13 @@
     "ops_script_automation"
   ],
   "greeting": "你好！我是通用 AI 助手，可以帮你回答问题、整理内容、操作文件和浏览网页。",
-  "greeting_hints": ["帮我写一段 Python 快速排序", "解释一下什么是大语言模型", "查看当前目录下的文件"]
+  "greeting_hints": [
+    "帮我写一段 Python 快速排序",
+    "解释一下什么是大语言模型",
+    "查看当前目录下的文件"
+  ],
+  "mcp_servers": [
+    "mcp_list"
+  ],
+  "temperature": 1.0
 }

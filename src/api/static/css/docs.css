@@ -4,7 +4,52 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
-    max-width: 860px;
+    max-width: 1180px;
+    width: 100%;
+}
+.doc-feats {
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+}
+.doc-feat {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 24px;
+    padding: 16px 4px;
+    border-bottom: 1px solid var(--border);
+    align-items: start;
+}
+.doc-feat-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    padding-left: 10px;
+    border-left: 3px solid var(--accent);
+    line-height: 1.5;
+}
+.doc-feat-body {
+    font-size: 14px;
+    line-height: 1.75;
+    color: var(--text-secondary);
+}
+.doc-feat-body p {
+    margin: 0 0 6px;
+}
+.doc-feat-body ul {
+    margin: 0;
+    padding-left: 18px;
+}
+.doc-feat-body li {
+    margin: 3px 0;
+}
+.doc-feat-body strong {
+    color: var(--text);
+}
+@media (max-width: 640px) {
+    .doc-feat {
+        grid-template-columns: 1fr;
+        gap: 6px;
+    }
 }
 .doc-card {
     padding: 20px 22px;

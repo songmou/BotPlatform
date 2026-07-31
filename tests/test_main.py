@@ -459,6 +459,7 @@ class MainBotTests(unittest.TestCase):
         self.assertIn("回答1", log_text)
         self.assertNotIn(user_id, log_text)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_credentials_are_saved_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "credentials.json"

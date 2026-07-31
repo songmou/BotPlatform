@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
+from src.core.config.mcp_headers import merge_headers
 from src.core.modeling import ModelCapabilities
 from src.core.plugins.registry import (
     default_catalog,
@@ -1754,7 +1755,8 @@ def _load_mcp_servers(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
     data = _load_json(path)
-    return validate_mcp_server_entries(data.get("servers", []), path)
+    servers = validate_mcp_server_entries(data.get("servers", []), path)
+    return merge_headers(servers)
 
 
 def load_project_config(config_dir: Path) -> ProjectConfig:

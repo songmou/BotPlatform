@@ -130,6 +130,7 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
         self.registry = TenantRegistry(self.data)
         self.tenant = self.registry.resolve("bot", "user")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_database_pragmas_permissions_and_no_runtime_json(self):
         self.assertEqual(os.stat(self.registry.database_path).st_mode & 0o777, 0o600)
         with self.registry.database.read() as connection:
@@ -496,6 +497,7 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
             service.get_soul(self.tenant.tenant_id)["content"],
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX atomic rename works while readers hold the file open")
     def test_soul_atomic_write_never_exposes_partial_content(self):
         path = self.registry.tenant_root(self.tenant.tenant_id) / "SOUL.md"
         versions = {
