@@ -33,6 +33,7 @@ from src.api.routers import (
     tenants,
     model_analytics,
     v2,
+    tenant_env,
 )
 
 API_DIR = Path(__file__).resolve().parent
@@ -48,6 +49,7 @@ def create_app(config, model_router, registry, conversation_store,
                admin_auth=None, admin_user_store=None, admin_role_store=None,
                script_service=None, script_registry=None,
                script_schedule_service=None,
+               settings_store=None, env_resolver=None,
                drive_service=None, drive_audit_store=None,
                channel_statuses=None,
                organization_store=None, resource_store=None,
@@ -198,6 +200,8 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.script_service = script_service
     app.state.script_registry = script_registry
     app.state.script_schedule_service = script_schedule_service
+    app.state.settings_store = settings_store
+    app.state.env_resolver = env_resolver
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
     app.state.channel_statuses = channel_statuses
@@ -305,6 +309,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(mcp.router)
     app.include_router(tenants.router)
     app.include_router(admins.router)
+    app.include_router(tenant_env.router)
     app.include_router(v2.router)
 
     return app

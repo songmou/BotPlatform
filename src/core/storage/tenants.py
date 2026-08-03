@@ -488,6 +488,39 @@ class SettingsStore:
                 (tenant_id, mode),
             )
 
+    def env(self, tenant_id: str) -> Dict[str, str]:
+        """Return the organization-scoped environment variables for a tenant.
+
+        Values are returned as plain text (the database file is already
+        protected with 0600 permissions). Sensitive credentials should use
+        the KeychainService instead of this store.
+        """
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT env_json FROM tenant_env WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+        if not row or not row["env_json"]:
+            return {}
+        try:
+            data = json.loads(row["env_json"])
+        except (ValueError, TypeError):
+            return {}
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+    def set_env(self, tenant_id: str, values: "Mapping[str, str]") -> None:
+        """Persist the organization-scoped environment variables for a tenant.
+
+        Stored in the dedicated ``tenant_env`` table so they never clobber
+        other tenant settings.
+        """
+        payload = json.dumps({str(k): str(v) for k, v in values.items()})
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO tenant_env(tenant_id, env_json) VALUES (?, ?) "
+                "ON CONFLICT(tenant_id) DO UPDATE SET env_json=excluded.env_json",
+                (tenant_id, payload),
+            )
+
 
 class ScheduleStore:
     def __init__(self, registry: TenantRegistry) -> None:

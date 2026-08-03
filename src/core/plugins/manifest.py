@@ -14,6 +14,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from .base import PluginJobDefinition, PluginToolDefinition
+from src.core.services.env_resolver import normalize_allowlist
 
 
 PLUGIN_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -60,6 +61,7 @@ class PluginManifest:
     settings_aliases: Mapping[str, str] = field(default_factory=dict)
     discard_unknown_settings: bool = False
     prepare: str = ""
+    env_allowlist: Tuple[str, ...] = ()
 
     @property
     def missing_dependencies(self) -> List[str]:
@@ -139,7 +141,7 @@ def load_manifest(path: Path, source: str) -> PluginManifest:
         "schema_version", "id", "name", "version", "description", "entrypoint",
         "core_api", "icon", "color", "tools", "settings_schema", "instructions",
         "dependencies", "services", "background_jobs",
-        "settings_aliases", "discard_unknown_settings", "prepare",
+        "settings_aliases", "discard_unknown_settings", "prepare", "env_allowlist",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -282,6 +284,10 @@ def load_manifest(path: Path, source: str) -> PluginManifest:
         raise PluginManifestError(
             "{}: discard_unknown_settings 必须是布尔值".format(path)
         )
+    try:
+        env_allowlist = tuple(normalize_allowlist(data.get("env_allowlist", [])))
+    except ValueError as exc:
+        raise PluginManifestError("{}: env_allowlist 无效：{}".format(path, exc)) from exc
     core_api = _required_text(data, "core_api", path)
     if core_api != "1":
         raise PluginManifestError("{}: 不兼容的核心插件 API：{}".format(path, core_api))
@@ -306,6 +312,7 @@ def load_manifest(path: Path, source: str) -> PluginManifest:
         settings_aliases=settings_aliases,
         discard_unknown_settings=discard_unknown_settings,
         prepare=prepare,
+        env_allowlist=env_allowlist,
     )
     return manifest
 

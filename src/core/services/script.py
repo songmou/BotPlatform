@@ -33,6 +33,7 @@ from src.core.services.notification import (
     TenantRecipientStore,
 )
 from src.core.services.script_registry import ExternalScriptRegistry, file_sha256
+from src.core.services.env_resolver import EnvResolver
 from src.core.storage.tenants import IntegrationStore, TenantContext, TenantRegistry
 
 
@@ -99,9 +100,11 @@ class ScriptService:
         image_loader: Optional[ImageSourceLoader] = None,
         keychain_service: Optional[KeychainService] = None,
         external_registry: Optional[ExternalScriptRegistry] = None,
+        env_resolver: Optional[EnvResolver] = None,
     ) -> None:
         self.builtin_definitions = dict(definitions)
         self.external_registry = external_registry
+        self.env_resolver = env_resolver
         self.definitions = self._merged_definitions()
         self.credentials = credentials
         self.recipient_store = recipient_store
@@ -185,6 +188,7 @@ class ScriptService:
                     "sha256_short": definition.sha256[:12] if definition.sha256 else "",
                     "enabled": definition.enabled,
                     "external": definition.external,
+                    "env_allowlist": list(definition.env_allowlist),
                 }
             )
         return result
@@ -494,8 +498,15 @@ class ScriptService:
         )
         environment["ILINKBOT_TENANT_ID"] = run.tenant_id
         environment["ILINKBOT_DATABASE_PATH"] = str(self.tenant_registry.database_path)
-        if definition.external and self.external_registry is not None:
-            environment.update(self.external_registry.environment_for(definition))
+        if definition.env_allowlist:
+            if self.env_resolver is not None:
+                # Organization values override global values; reserved names are
+                # filtered inside the resolver so the sandbox cannot be hijacked.
+                environment.update(
+                    self.env_resolver.resolve(run.tenant_id, definition.env_allowlist)
+                )
+            elif definition.external and self.external_registry is not None:
+                environment.update(self.external_registry.environment_for(definition))
         integration_id = self._integration_id(run.script_id)
         if integration_id:
             metadata = self.integration_store.get(run.tenant_id, integration_id)

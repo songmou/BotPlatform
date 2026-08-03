@@ -24,7 +24,7 @@ function initTools() {
             var pane = document.getElementById("tools-pane-" + t);
             if (pane) pane.style.display = t === hash ? "" : "none";
         });
-        document.querySelectorAll(".nav-sub-item").forEach(function (el) {
+        document.querySelectorAll(".nav-sub-item[data-tab]").forEach(function (el) {
             el.classList.toggle("active", el.getAttribute("data-tab") === hash);
         });
         // Audit data is loaded lazily and refreshed on every tab entry.

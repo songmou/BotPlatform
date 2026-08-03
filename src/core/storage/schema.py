@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 29
+LATEST_SCHEMA_VERSION = 30
 
 
 SCHEMA_V1 = r"""
@@ -1445,6 +1445,13 @@ CREATE TABLE IF NOT EXISTS legacy_organization_credentials (
 DROP TABLE IF EXISTS user_organization_preferences;
 """
 
+SCHEMA_V30 = r"""
+CREATE TABLE IF NOT EXISTS tenant_env (
+    tenant_id TEXT PRIMARY KEY,
+    env_json TEXT NOT NULL DEFAULT '{}'
+);
+"""
+
 
 # Versions applied as plain SQL scripts. Specialized versions with inspection
 # or permission backfills are dispatched through dedicated Database methods.
@@ -1476,4 +1483,5 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     27: SCHEMA_V27,
     28: SCHEMA_V28,
     29: SCHEMA_V29,
+    30: SCHEMA_V30,
 }

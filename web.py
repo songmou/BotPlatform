@@ -252,8 +252,9 @@ def _run_panel_only(args) -> int:
     from src.core.services.scheduler import SchedulerService
     from src.core.services.script import ScriptService
     from src.core.services.script_registry import ExternalScriptRegistry
+    from src.core.services.env_resolver import EnvResolver
     from src.core.services.script_schedule import ScriptScheduleService
-    from src.core.storage.tenants import TenantStoreError
+    from src.core.storage.tenants import TenantStoreError, SettingsStore
     from src.core.storage.tool_audit import ToolAuditStore
     from src.core.storage.drive_audit import DriveAuditStore
     from src.core.tooling import ToolRuntime
@@ -304,6 +305,8 @@ def _run_panel_only(args) -> int:
         SYSTEM_DATA_DIR / "script_registry.json",
         SYSTEM_DATA_DIR / "scripts.env",
     )
+    settings_store = SettingsStore(registry)
+    env_resolver = EnvResolver(settings_store, external_script_registry.global_values)
     script_service = ScriptService(
         config.scripts,
         credentials,
@@ -311,6 +314,7 @@ def _run_panel_only(args) -> int:
         PROJECT_ROOT,
         registry,
         external_registry=external_script_registry,
+        env_resolver=env_resolver,
     )
     script_schedule_service = ScriptScheduleService(
         registry,
@@ -328,6 +332,7 @@ def _run_panel_only(args) -> int:
         notification_service=notification_service,
         timezone=config.app.timezone,
         data_root=DATA_DIR / "plugins",
+        env_resolver=env_resolver,
     )
     plugin_manager = build_plugin_manager(
         config.plugins if config.tools.enabled else {},
@@ -419,6 +424,8 @@ def _run_panel_only(args) -> int:
         script_service=script_service,
         script_registry=external_script_registry,
         script_schedule_service=script_schedule_service,
+        settings_store=settings_store,
+        env_resolver=env_resolver,
         secure_cookies=args.behind_https,
     )
 

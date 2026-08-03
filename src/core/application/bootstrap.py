@@ -57,6 +57,7 @@ from src.core.services.notification import (
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
 from src.core.services.script_registry import ExternalScriptRegistry
+from src.core.services.env_resolver import EnvResolver
 from src.core.services.script_schedule import ScriptScheduleService
 from src.core.storage.tenants import (
     SettingsStore,
@@ -187,6 +188,9 @@ def build_bot_runtime(
             SYSTEM_DATA_DIR / "script_registry.json",
             SYSTEM_DATA_DIR / "scripts.env",
         )
+        # Organization values override the platform-managed global env; the
+        # global layer is supplied by the external registry's 0600-checked file.
+        env_resolver = EnvResolver(settings_store, external_script_registry.global_values)
         script_service = ScriptService(
             project_config.scripts,
             None,
@@ -197,6 +201,7 @@ def build_bot_runtime(
             notification_service=notification_service,
             keychain_service=integration_service.keychain,
             external_registry=external_script_registry,
+            env_resolver=env_resolver,
         )
         script_schedule_service = ScriptScheduleService(
             tenant_registry,
@@ -209,6 +214,7 @@ def build_bot_runtime(
             notification_service=notification_service,
             timezone=project_config.app.timezone,
             data_root=DATA_DIR / "plugins",
+            env_resolver=env_resolver,
         )
         plugin_manager = build_plugin_manager(
             project_config.plugins if project_config.tools.enabled else {},

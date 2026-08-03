@@ -289,6 +289,7 @@ class PluginOut(BaseModel):
     tools: List[PluginToolOut] = []
     settings: Dict[str, Any] = {}
     settings_schema: Dict[str, Any] = {}
+    env_allowlist: List[str] = []
 
 
 class PluginUpdate(BaseModel):

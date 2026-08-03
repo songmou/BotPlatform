@@ -66,6 +66,20 @@ def get_script_schedule_service(request: Request):
     return getattr(request.app.state, "script_schedule_service", None)
 
 
+def get_settings_store(request: Request):
+    store = getattr(request.app.state, "settings_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="租户设置服务不可用")
+    return store
+
+
+def get_env_resolver(request: Request):
+    resolver = getattr(request.app.state, "env_resolver", None)
+    if resolver is None:
+        raise HTTPException(status_code=503, detail="环境变量解析服务不可用")
+    return resolver
+
+
 def get_drive_service(request: Request):
     return getattr(request.app.state, "drive_service", None)
 

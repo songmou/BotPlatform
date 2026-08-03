@@ -24,6 +24,7 @@ from src.core.plugins.registry import (
     validate_plugin_settings,
 )
 from src.core.plugins.manifest import PLUGIN_ID_PATTERN
+from src.core.services.env_resolver import normalize_allowlist
 
 
 class ConfigError(RuntimeError):
@@ -1158,6 +1159,7 @@ def _discover_scripts(jobs_root: Path) -> Dict[str, ScriptDefinition]:
         _reject_unknown(item, {
             "id", "name", "description", "entrypoint", "timeout_seconds",
             "requires_approval", "data_directory", "parameters", "artifact_types",
+            "env_allowlist",
         }, path)
         script_id = _required_nested_string(item, "id", "id", path)
         if script_id in scripts:
@@ -1244,6 +1246,10 @@ def _discover_scripts(jobs_root: Path) -> Dict[str, ScriptDefinition]:
             value != "image" for value in artifact_types
         ):
             raise _error(path, "artifact_types", "首版仅支持 image")
+        try:
+            env_allowlist = normalize_allowlist(item.get("env_allowlist", []))
+        except ValueError as exc:
+            raise _error(path, "env_allowlist", str(exc)) from exc
         scripts[script_id] = ScriptDefinition(
             id=script_id,
             name=name,
@@ -1254,6 +1260,7 @@ def _discover_scripts(jobs_root: Path) -> Dict[str, ScriptDefinition]:
             data_directory=data_directory,
             parameters=parameters,
             artifact_types=list(artifact_types),
+            env_allowlist=env_allowlist,
         )
     return scripts
 

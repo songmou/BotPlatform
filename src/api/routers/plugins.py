@@ -148,6 +148,7 @@ def _build_plugin_out(
             load_error="插件包未安装",
             tool_count=0,
             settings=dict(configured.get("settings", {}) or {}),
+            env_allowlist=[],
         )
     enabled = bool(configured and configured.get("enabled", False))
     settings = dict(configured.get("settings", {})) if configured else {}
@@ -205,6 +206,7 @@ def _build_plugin_out(
         tools=tools,
         settings=settings,
         settings_schema=dict(manifest.settings_schema),
+        env_allowlist=list(manifest.env_allowlist),
     )
 
 

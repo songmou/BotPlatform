@@ -3284,3 +3284,20 @@ textarea:disabled {
     .governance-page-header { align-items: stretch; flex-direction: column; }
     .governance-page-header button { align-self: flex-start; }
 }
+
+/* Environment variable binding panels (scripts / plugins / schedules / tenants) */
+.env-bindings { margin-top: 6px; }
+.env-empty { color: #6b7280; font-size: 13px; padding: 4px 0; }
+.env-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 13px; }
+.env-table th, .env-table td {
+    text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb;
+}
+.env-table th { color: #6b7280; font-weight: 600; }
+.env-table code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.env-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #374151; }
+.env-table tr.env-missing td { color: #b45309; }
+.env-table tr.env-ok td.env-value { color: #047857; }
+.tenant-env-list { margin-bottom: 8px; }
+.tenant-env-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tenant-env-form input { flex: 1 1 160px; min-width: 120px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }

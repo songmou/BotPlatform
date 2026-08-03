@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
 
 
 class PluginError(RuntimeError):
@@ -37,6 +38,25 @@ class PluginContext:
     timezone: str = "UTC"
     data_root: Optional[Path] = None
     plugin_id: str = ""
+    env_resolver: Optional[Any] = None
+    env_allowlist: Tuple[str, ...] = ()
+
+    def env(self, tenant_id: str, name: str, default: str = "") -> str:
+        """Resolve a declared environment variable for a tenant.
+
+        The plugin must list ``name`` in its manifest ``env_allowlist``; this
+        prevents a plugin from reaching arbitrary process environment values.
+        Organization values override the platform global value; if neither is
+        configured the process environment is consulted as a compatibility
+        fallback (used by older plugins that read ``*.env`` files directly).
+        """
+        if name not in self.env_allowlist:
+            raise PluginError("插件未声明该环境变量：{}".format(name))
+        if self.env_resolver is not None:
+            resolved = self.env_resolver.resolve(tenant_id, [name])
+            if name in resolved:
+                return resolved[name]
+        return os.getenv(name, default)
 
     def tenant_data_dir(
         self,

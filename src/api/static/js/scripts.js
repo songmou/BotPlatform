@@ -236,6 +236,12 @@ function initScripts() {
         document.getElementById("script-working-directory").value = value.working_directory || "";
         document.getElementById("script-concurrency").value = value.concurrency_scope || "global";
         document.getElementById("script-env").value = (value.env_allowlist || []).join("\n");
+        if (window.EnvPanel) {
+            window.EnvPanel.loadGlobalEnvBindings(
+                "script", item ? item.id : null,
+                document.getElementById("script-env-bindings")
+            );
+        }
         document.getElementById("script-parameters").value = JSON.stringify(value.parameters || {}, null, 2);
         document.getElementById("script-enabled").checked = value.enabled !== false;
         openModal(modal);
