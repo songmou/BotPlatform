@@ -243,6 +243,89 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(by_id["shared_helper_copy"]["payload"]["description"], "v1")
         self.assertEqual(by_id["shared_helper_copy"]["base_resource_id"], "shared_helper")
 
+    def test_organization_editor_options_expose_templates_and_schedule_dependencies(self):
+        org_id, owner = self._create_owner("editor-options")
+        published = self._publish_catalog(
+            "agents",
+            "editor_template",
+            {
+                "name": "编辑模板",
+                "description": "可编辑模板",
+                "system_prompt": "模板提示词",
+                "tools": [],
+                "plugin_tools": {},
+                "skills": [],
+                "mcp_servers": [],
+            },
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        agent_options = owner.get(
+            "/api/v2/orgs/{}/agent-editor-options".format(org_id)
+        )
+        self.assertEqual(agent_options.status_code, 200, agent_options.text)
+        templates = {
+            item["id"]: item for item in agent_options.json()["templates"]
+        }
+        self.assertIn("editor_template", templates)
+        self.assertEqual(
+            templates["editor_template"]["payload"]["system_prompt"],
+            "模板提示词",
+        )
+        self.assertNotIn("entrypoint", agent_options.text)
+
+        schedule_options = owner.get(
+            "/api/v2/orgs/{}/schedule-editor-options".format(org_id)
+        )
+        self.assertEqual(schedule_options.status_code, 200, schedule_options.text)
+        self.assertIn("timezone", schedule_options.json())
+        self.assertTrue(schedule_options.json()["agents"])
+        self.assertIsInstance(schedule_options.json()["scripts"], list)
+
+    def test_organization_agent_editor_payload_and_plugin_tool_validation(self):
+        org_id, owner = self._create_owner("editor-save")
+        published = self._publish_catalog(
+            "agents",
+            "editor_template_save",
+            {
+                "name": "保存模板",
+                "system_prompt": "原始提示词",
+                "tools": [],
+            },
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        created = owner.put(
+            "/api/v2/orgs/{}/agents/edited_agent".format(org_id),
+            json={
+                "base_resource_id": "editor_template_save",
+                "payload": {
+                    "name": "组织编辑助手",
+                    "system_prompt": "组织提示词",
+                    "tools": [],
+                    "plugin_tools": {},
+                    "skills": [],
+                    "mcp_servers": [],
+                },
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["base_resource_id"], "editor_template_save")
+        self.assertEqual(created.json()["payload"]["system_prompt"], "组织提示词")
+
+        invalid_schedule = owner.put(
+            "/api/v2/orgs/{}/schedules/bad-plugin-tool".format(org_id),
+            json={
+                "enabled": False,
+                "crons": ["0 9 * * *"],
+                "action": {
+                    "type": "plugin",
+                    "plugin_id": "todo",
+                    "tool_name": "web_search_duckduckgo",
+                    "parameters": {},
+                },
+            },
+        )
+        self.assertEqual(invalid_schedule.status_code, 400, invalid_schedule.text)
+
     def test_tenant_user_cannot_publish_public_resource(self):
         _org_id, owner = self._create_owner("publish")
         response = owner.put(

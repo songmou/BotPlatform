@@ -1393,14 +1393,6 @@ def upsert_typed_organization_agent(
     payload["id"] = agent_id
     category_ids = list(dict.fromkeys(body.get("knowledge_category_ids") or []))
     try:
-        result = get_resource_store(request).upsert_organization(
-            organization_id,
-            "agents",
-            agent_id,
-            payload,
-            context.user_id,
-            str(body.get("base_resource_id") or "") or None,
-        )
         if "knowledge_category_ids" in body:
             service = getattr(request.app.state, "knowledge_service", None)
             if service is None:
@@ -1411,6 +1403,15 @@ def upsert_typed_organization_agent(
             }
             if any(not isinstance(item, str) or item not in visible for item in category_ids):
                 raise ResourceError("绑定列表包含当前组织不可见的知识库")
+        result = get_resource_store(request).upsert_organization(
+            organization_id,
+            "agents",
+            agent_id,
+            payload,
+            context.user_id,
+            str(body.get("base_resource_id") or "") or None,
+        )
+        if "knowledge_category_ids" in body:
             with get_organization_store(request).database.transaction(immediate=True) as connection:
                 connection.execute(
                     "DELETE FROM organization_agent_knowledge_categories "
@@ -1556,6 +1557,12 @@ def delete_typed_organization_agent(
         get_resource_store(request).delete_organization(
             organization_id, "agents", agent_id
         )
+        with get_organization_store(request).database.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM organization_agent_knowledge_categories "
+                "WHERE organization_id=? AND agent_id=?",
+                (organization_id, agent_id),
+            )
     except ResourceError as exc:
         raise _resource_error(exc) from exc
     return {"deleted": True}

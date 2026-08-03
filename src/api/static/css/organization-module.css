@@ -102,6 +102,27 @@
     border-radius: var(--radius-lg);
 }
 
+.organization-agent-tabs {
+    margin: 0 -4px 18px;
+    overflow-x: auto;
+}
+
+.organization-agent-tabs .tab-btn {
+    white-space: nowrap;
+}
+
+.organization-agent-panel[hidden] {
+    display: none;
+}
+
+#organization-agent-plugin-tools .tool-plugin-group {
+    margin-bottom: 16px;
+}
+
+#organization-agent-source {
+    margin-top: 14px;
+}
+
 @media (max-width: 760px) {
     .organization-page { padding: 18px; }
     .organization-page-header { flex-direction: column; }
