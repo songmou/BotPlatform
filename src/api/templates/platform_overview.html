@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}首页 - BotPlatform{% endblock %}
+{% block content %}
+<div class="page-container control-center-page">
+    <section class="control-page-heading">
+        <div><span class="control-kicker">平台运营</span><h2 id="overview-title">平台控制台</h2><p class="page-desc" id="overview-description">正在加载平台运行概览…</p></div>
+        <div class="control-heading-actions"><a class="btn-primary" href="/platform/agent-templates">新建智能体模板</a><a class="btn-secondary" href="/platform/organizations">管理组织</a></div>
+    </section>
+
+    <div class="stats-grid overview-stats" id="platform-overview-stats">
+        <article class="stat-card stat-card-indigo">
+            <div class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 21v-9l8-5 8 5v9M9 21v-5h6v5M8 9V4h8v5"/></svg></div>
+            <div class="stat-content"><div class="stat-label" data-label="first">组织</div><div class="stat-value" data-stat="first">—</div><div class="stat-hint">已纳入平台治理</div></div>
+        </article>
+        <article class="stat-card stat-card-violet">
+            <div class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0M18 8h4M20 6v4"/></svg></div>
+            <div class="stat-content"><div class="stat-label" data-label="second">公共智能体模板</div><div class="stat-value" data-stat="second">—</div><div class="stat-hint">可供组织复制使用</div></div>
+        </article>
+        <article class="stat-card stat-card-cyan">
+            <div class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg></div>
+            <div class="stat-content"><div class="stat-label" data-label="third">模型</div><div class="stat-value" data-stat="third">—</div><div class="stat-hint">统一接入与版本管理</div></div>
+        </article>
+        <article class="stat-card stat-card-amber">
+            <div class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3h8v5h5v8h-5v5H8v-5H3V8h5z"/><path d="M8 8h8v8H8z"/></svg></div>
+            <div class="stat-content"><div class="stat-label" data-label="fourth">插件</div><div class="stat-value" data-stat="fourth">—</div><div class="stat-hint">扩展平台能力边界</div></div>
+        </article>
+    </div>
+
+    <div class="control-center-grid">
+        <section class="control-panel control-panel-wide">
+            <div class="control-panel-heading"><div><span class="control-kicker">运行指引</span><h3>平台能力管理</h3></div><span class="status-badge status-badge-success"><span></span>配置直接生效</span></div>
+            <div class="control-steps"><div><b>01</b><strong>配置能力</strong><small>通过模块表单新增或编辑模型、智能体、工具能力。</small></div><div><b>02</b><strong>校验并保存</strong><small>保存时自动校验引用和权限，可热加载项立即生效。</small></div><div><b>03</b><strong>组织使用</strong><small>组织可复制模板并按自身权限完成配置。</small></div></div>
+        </section>
+        <section class="control-panel">
+            <div class="control-panel-heading"><div><span class="control-kicker">快捷操作</span><h3>常用管理</h3></div></div>
+            <div class="control-links"><a href="/platform/models">模型服务 <span>›</span></a><a href="/platform/tools">系统工具 <span>›</span></a><a href="/platform/analytics">聚合分析 <span>›</span></a><a href="/platform/audit">平台审计 <span>›</span></a></div>
+        </section>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/platform-overview.js?v=20260801d"></script>{% endblock %}

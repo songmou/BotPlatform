@@ -90,16 +90,24 @@ class OrganizationAuditMiddleware(BaseHTTPMiddleware):
         match = self._ORGANIZATION_PATH.match(request.url.path)
         organization_id = match.group(1) if match else None
         resource = request.url.path
+        audit_source = "web"
+        if (
+            organization_id
+            and principal is not None
+            and principal.allows("admins.manage")
+        ):
+            audit_source = "platform_delegation"
         try:
             with organization_store.database.transaction() as connection:
                 connection.execute(
                     "INSERT INTO security_audit_log("
                     "occurred_at, request_id, source, actor_user_id, "
                     "organization_id, action, resource, status_code, detail"
-                    ") VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?)",
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         datetime.now(timezone.utc).isoformat(),
                         request_id,
+                        audit_source,
                         (
                             principal.user.user_id
                             if principal is not None
@@ -121,6 +129,15 @@ class OrganizationAuditMiddleware(BaseHTTPMiddleware):
 
 
 class SessionAuthMiddleware(BaseHTTPMiddleware):
+    _RETIRED_CONFIG_PREFIXES = (
+        "/api/models",
+        "/api/agents",
+        "/api/skills",
+        "/api/mcp",
+        "/api/channels",
+        "/api/schedules",
+    )
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if _is_open(path):
@@ -137,5 +154,36 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
                 login_url = "/login?next={}".format(path)
             return RedirectResponse(login_url, status_code=302)
 
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and path.startswith("/api/")
+            and not path.startswith("/api/v2/")
+            and path != "/api/auth/logout"
+            and not principal.allows("admins.manage")
+        ):
+            return JSONResponse(
+                {"detail": "旧版管理接口仅允许平台管理员调用"},
+                status_code=403,
+            )
+
         request.state.principal = principal
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not bool(
+                getattr(request.app.state, "allow_legacy_config_writes", False)
+            )
+            and any(
+                path == prefix or path.startswith(prefix + "/")
+                for prefix in self._RETIRED_CONFIG_PREFIXES
+            )
+        ):
+            return JSONResponse(
+                {
+                    "detail": (
+                        "旧配置写入接口已停用，请使用 "
+                        "/api/v2/platform/catalog 的草稿与发布接口"
+                    )
+                },
+                status_code=410,
+            )
         return await call_next(request)

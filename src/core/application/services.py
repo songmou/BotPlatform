@@ -29,6 +29,9 @@ from src.core.services.knowledge import KnowledgeService
 from src.core.services.drive import DriveService
 from src.core.services.notification import TenantRecipientStore
 from src.core.services.resources import ScopedResourceStore
+from src.core.services.organization_controls import OrganizationControlStore
+from src.core.services.credentials import CredentialService
+from src.core.integrations.keychain import KeychainService
 from src.core.storage.organizations import OrganizationStore
 from src.core.storage.tenants import (
     ConversationStore,
@@ -53,9 +56,12 @@ class CoreServices:
     recipient_store: TenantRecipientStore
     schedule_store: ScheduleStore
     model_analytics_store: ModelAnalyticsStore
+    project_config: Optional[ProjectConfig] = None
     model_warnings: List[str] = field(default_factory=list)
     organization_store: Optional[OrganizationStore] = None
     resource_store: Optional[ScopedResourceStore] = None
+    organization_control_store: Optional[OrganizationControlStore] = None
+    credential_service: Optional[CredentialService] = None
 
     def close(self) -> None:
         for client in self.clients.values():
@@ -85,6 +91,19 @@ def build_core_services(
     tenant_registry = TenantRegistry(data_dir)
     organization_store = OrganizationStore(tenant_registry)
     resource_store = ScopedResourceStore(organization_store, config)
+    config = resource_store.build_project_config(config)
+    organization_control_store = OrganizationControlStore(
+        organization_store, resource_store, config
+    )
+    credential_service = CredentialService(
+        organization_store,
+        KeychainService(
+            storage_path=data_dir / "system" / "organization_credentials.json"
+        ),
+        KeychainService(
+            storage_path=data_dir / "system" / "integration_credentials.json"
+        ),
+    )
     model_analytics_store = ModelAnalyticsStore(tenant_registry, config)
     conversation_store = ConversationStore(
         tenant_registry, config.app.history_rounds * 2
@@ -176,6 +195,7 @@ def build_core_services(
 
     return CoreServices(
         clients=clients,
+        project_config=config,
         model_router=model_router,
         tenant_registry=tenant_registry,
         conversation_store=conversation_store,
@@ -188,5 +208,7 @@ def build_core_services(
         model_analytics_store=model_analytics_store,
         organization_store=organization_store,
         resource_store=resource_store,
+        organization_control_store=organization_control_store,
+        credential_service=credential_service,
         model_warnings=warnings,
     )

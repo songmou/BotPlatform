@@ -158,5 +158,5 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/js/schedules.js"></script>
-<script>initScheduleTabs(); initSchedules(); initScriptAutomation();</script>
+<script>runScopedModule("schedules", function () { initScheduleTabs(); initSchedules(); initScriptAutomation(); });</script>
 {% endblock %}

@@ -400,15 +400,27 @@ class ConversationStore:
         image: bool = False,
         session_key: str = "direct",
         user_id: Optional[int] = None,
+        actor_type: Optional[str] = None,
+        actor_account: str = "",
     ) -> None:
         if role not in {"user", "assistant", "system"} or not isinstance(content, str):
             raise TenantStoreError("永久对话记录格式无效")
         with self.lock_for(tenant_id, session_key):
+            resolved_actor = actor_type or (
+                "member" if user_id is not None else (
+                    "agent" if role == "assistant" else "system"
+                )
+            )
+            if resolved_actor not in {
+                "member", "channel_user", "agent", "system_task", "system"
+            }:
+                raise TenantStoreError("消息操作者类型无效")
             with self.registry.database.transaction() as connection:
                 connection.execute(
                     "INSERT INTO conversation_events"
                     "(tenant_id, role, content, image, event_type, created_at, "
-                    "session_key, user_id) VALUES (?, ?, ?, ?, 'message', ?, ?, ?)",
+                    "session_key, user_id, actor_type, actor_account) "
+                    "VALUES (?, ?, ?, ?, 'message', ?, ?, ?, ?, ?)",
                     (
                         tenant_id,
                         role,
@@ -417,6 +429,8 @@ class ConversationStore:
                         _utc_now(),
                         session_key,
                         user_id,
+                        resolved_actor,
+                        str(actor_account or ""),
                     ),
                 )
 

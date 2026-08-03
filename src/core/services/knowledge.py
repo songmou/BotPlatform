@@ -975,14 +975,20 @@ class KnowledgeService:
 
     def _visible_category_ids(
         self,
-        tenant_id: str,
+        tenant_id: Optional[str],
         agent_id: Optional[str] = None,
         requested: Optional[Sequence[str]] = None,
     ) -> List[str]:
-        self.registry.get(tenant_id)
-        clauses = ["(c.scope='public' OR c.tenant_id=?)"]
-        values: List[Any] = [tenant_id]
+        if tenant_id is None:
+            clauses = ["c.scope='public'"]
+            values: List[Any] = []
+        else:
+            self.registry.get(tenant_id)
+            clauses = ["(c.scope='public' OR c.tenant_id=?)"]
+            values = [tenant_id]
         if agent_id is not None:
+            if tenant_id is None:
+                raise ValueError("公共知识检索不能指定智能体")
             with self.registry.database.read() as connection:
                 organization_binding = connection.execute(
                     "SELECT 1 FROM organization_agent_knowledge_categories "
@@ -1135,7 +1141,7 @@ class KnowledgeService:
 
     def search(
         self,
-        tenant_id: str,
+        tenant_id: Optional[str],
         query: str,
         limit: int = 6,
         agent_id: Optional[str] = None,
@@ -1369,7 +1375,7 @@ class KnowledgeService:
 
     def reindex(
         self,
-        tenant_id: str,
+        tenant_id: Optional[str],
         category_ids: Optional[Sequence[str]] = None,
     ) -> Dict[str, int]:
         if self.embedding is None:

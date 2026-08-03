@@ -189,7 +189,32 @@ class MessageBot:
                     getattr(self._message_context, "session_key", "direct")
                     or "direct"
                 ),
+                actor_type="channel_user" if role == "user" else "agent",
+                actor_account=(
+                    str(getattr(self._message_context, "actor_account", ""))
+                    if role == "user"
+                    else str(getattr(self._message_context, "agent_id", ""))
+                ),
             )
+            organization_conversation_id = getattr(
+                self._message_context, "organization_conversation_id", None
+            )
+            if organization_conversation_id:
+                self.conversation_store.append_transcript(
+                    tenant.tenant_id,
+                    role,
+                    content,
+                    image=image,
+                    session_key="organization:{}".format(
+                        organization_conversation_id
+                    ),
+                    actor_type="channel_user" if role == "user" else "agent",
+                    actor_account=(
+                        str(getattr(self._message_context, "actor_account", ""))
+                        if role == "user"
+                        else str(getattr(self._message_context, "agent_id", ""))
+                    ),
+                )
 
     def _channel_config(self, channel_id: str) -> Optional[ChannelConfig]:
         return self.channel_configs.get(channel_id)
@@ -359,6 +384,9 @@ class MessageBot:
         user_id = message.sender_id
         endpoint = message.endpoint
         self._message_context.session_key = self._session_key(message)
+        self._message_context.organization_conversation_id = None
+        self._message_context.actor_account = message.sender_id
+        self._message_context.agent_id = self._channel_agent_id(message.channel_id) or ""
         normalized_text = message.text.strip()
         lowered_text = normalized_text.lower()
         tenant: Optional[TenantContext] = None
@@ -390,6 +418,12 @@ class MessageBot:
                 self._reply(endpoint, reply, None, record=False)
                 self._log(self._direction("输出", endpoint), user_id, reply)
                 return
+        if self.address_store is not None and tenant is not None:
+            self._message_context.organization_conversation_id = (
+                self.address_store.ensure_organization_conversation(
+                    message, tenant
+                )
+            )
         if tenant is not None and self.address_store is not None:
             endpoint = self.address_store.record_endpoint(tenant, message)
         if binding_completed:

@@ -53,6 +53,7 @@
             </div>
             <div class="mcp-detail-actions">
                 <button id="mcp-detail-edit" class="btn-primary">编辑配置</button>
+                <button id="mcp-detail-delete" class="btn-danger">删除服务</button>
             </div>
         </div>
 
@@ -170,6 +171,7 @@
                 <label class="checkbox-label"><input type="checkbox" id="skill-enabled" checked> 启用</label>
             </div>
             <div class="modal-footer">
+                <button type="button" id="skill-delete-btn" class="btn-danger" style="display:none">删除</button>
                 <button type="button" id="skill-modal-cancel" class="btn-secondary">取消</button>
                 <button type="submit" id="skill-submit-btn" class="btn-primary">立即创建</button>
             </div>
@@ -244,6 +246,7 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/tools.js?v=20260728a"></script>
+<script>window.BP_INITIAL_TOOLS_TAB = {{ tools_tab|default('builtin')|tojson }};</script>
+<script src="/static/js/tools.js?v=20260801e"></script>
 <script>initTools();</script>
 {% endblock %}

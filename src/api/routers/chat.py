@@ -371,6 +371,7 @@ def _orchestrate(
     session_key: str = "default",
     user_id: Optional[int] = None,
     organization_store=None,
+    allow_delegation: bool = False,
 ) -> Generator[str, None, None]:
     agents_by_id = {a.id: a for a in agents}
     try:
@@ -514,10 +515,11 @@ def _orchestrate(
         updated.append(CanonicalMessage("user", user_message))
         updated.append(CanonicalMessage("assistant", full_summary))
         store.save_context(
-            tenant_id, updated, session_key=session_key, user_id=user_id
+            tenant_id, updated, session_key=session_key
         )
         store.append_transcript(
-            tenant_id, "user", user_message, session_key=session_key, user_id=user_id
+            tenant_id, "user", user_message, session_key=session_key, user_id=user_id,
+            actor_type="member", actor_account=str(user_id or "")
         )
         store.append_transcript(
             tenant_id,
@@ -525,9 +527,16 @@ def _orchestrate(
             full_summary,
             session_key=session_key,
             user_id=user_id,
+            actor_type="agent",
+            actor_account="multi_agent_summary",
         )
         if organization_store is not None and user_id is not None:
-            organization_store.touch_conversation(user_id, conv_id, user_message)
+            organization_store.touch_conversation(
+                user_id,
+                conv_id,
+                user_message,
+                allow_delegation=allow_delegation,
+            )
     except ModelError as exc:
         if analytics_store is not None:
             analytics_store.finish_run(
@@ -599,15 +608,19 @@ def chat(
     organizations = get_organization_store(request)
     try:
         conversation = organizations.get_conversation(
-            principal.user.user_id, conv_id or ""
+            principal.user.user_id,
+            conv_id or "",
+            allow_delegation=principal.allows("admins.manage"),
         )
     except OrganizationError:
         raise HTTPException(status_code=400, detail="缺少有效的会话 ID")
     organization_id = str(conversation["organization_id"])
+    if conversation.get("status") == "archived":
+        raise HTTPException(status_code=409, detail="会话已归档，请先恢复后再继续")
     tenant = organizations.registry.get(organization_id)
     tenant_id = tenant.tenant_id
     user_id = principal.user.user_id
-    session_key = "web:{}:{}".format(user_id, conv_id)
+    session_key = "organization:{}".format(conv_id)
     agents_by_id = _effective_agents(request, organization_id)
     effective_skills = _effective_skills(request, organization_id)
     analytics_store = get_model_analytics_store(request)
@@ -633,9 +646,7 @@ def chat(
         conversation_id=conv_id,
     )
 
-    history = store.load_context(
-        tenant_id, session_key=session_key, user_id=user_id
-    )
+    history = store.load_context(tenant_id, session_key=session_key)
 
     agent_ids = body.agent_ids or []
     if not body.regenerate and len(agent_ids) > 1:
@@ -667,6 +678,7 @@ def chat(
                 session_key,
                 user_id,
                 organizations,
+                principal.allows("admins.manage"),
             )
         )
 
@@ -857,7 +869,6 @@ def chat(
                 tenant_id,
                 updated,
                 session_key=session_key,
-                user_id=user_id,
             )
             if not body.regenerate:
                 store.append_transcript(
@@ -866,6 +877,8 @@ def chat(
                     body.message,
                     session_key=session_key,
                     user_id=user_id,
+                    actor_type="member",
+                    actor_account=str(user_id),
                 )
             store.append_transcript(
                 tenant_id,
@@ -873,11 +886,14 @@ def chat(
                 full_text,
                 session_key=session_key,
                 user_id=user_id,
+                actor_type="agent",
+                actor_account=agent.id,
             )
             organizations.touch_conversation(
                 user_id,
                 conv_id,
                 body.message if not body.regenerate else None,
+                allow_delegation=principal.allows("admins.manage"),
             )
             if analytics_store is not None:
                 analytics_store.finish_run(run_id or "", "success")
@@ -910,7 +926,9 @@ def chat_history(
     organizations = get_organization_store(request)
     try:
         conversation = organizations.get_conversation(
-            principal.user.user_id, conversation_id or ""
+            principal.user.user_id,
+            conversation_id or "",
+            allow_delegation=principal.allows("admins.manage"),
         )
     except OrganizationError:
         return ChatHistoryResponse(messages=[])
@@ -918,10 +936,7 @@ def chat_history(
     organization_id = str(conversation["organization_id"])
     messages = store.load_context(
         organization_id,
-        session_key="web:{}:{}".format(
-            principal.user.user_id, conversation_id
-        ),
-        user_id=principal.user.user_id,
+        session_key="organization:{}".format(conversation_id),
     )
     return ChatHistoryResponse(
         messages=[ChatHistoryItem(role=m.role, content=m.content) for m in messages]

@@ -44,6 +44,8 @@ from src.core.storage.schema import (  # noqa: F401
     SCHEMA_V25,
     SCHEMA_V26,
     SCHEMA_V27,
+    SCHEMA_V28,
+    SCHEMA_V29,
 )
 
 
@@ -118,6 +120,20 @@ class Database:
                 current = int(row[0])
                 if current > LATEST_SCHEMA_VERSION:
                     raise DatabaseError("数据库 schema 版本高于当前程序支持版本")
+                if current and current < LATEST_SCHEMA_VERSION:
+                    backup_path = self.path.with_name(
+                        "{}.pre-v{}{}".format(
+                            self.path.stem, LATEST_SCHEMA_VERSION, self.path.suffix
+                        )
+                    )
+                    if not backup_path.exists():
+                        backup = sqlite3.connect(str(backup_path))
+                        try:
+                            connection.backup(backup)
+                        finally:
+                            backup.close()
+                        if os.name != "nt":
+                            os.chmod(str(backup_path), 0o600)
                 for version in range(current + 1, LATEST_SCHEMA_VERSION + 1):
                     if version == 12:
                         self._migrate_v12(connection)
@@ -129,6 +145,8 @@ class Database:
                         self._migrate_v23(connection)
                     elif version == 24:
                         self._migrate_v24(connection)
+                    elif version == 28:
+                        self._migrate_v28(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -267,6 +285,93 @@ class Database:
         cls._apply_schema_script(
             connection, 24, script + SCHEMA_SCRIPTS[24] + permissions
         )
+
+    @classmethod
+    def _migrate_v28(cls, connection: sqlite3.Connection) -> None:
+        """Add unified organization controls while tolerating partial fixtures."""
+        script = ""
+        preferences = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='user_organization_preferences'"
+        ).fetchone()
+        if preferences:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(user_organization_preferences)"
+                ).fetchall()
+            }
+            if "active_scope" not in columns:
+                script += (
+                    "ALTER TABLE user_organization_preferences ADD COLUMN "
+                    "active_scope TEXT NOT NULL DEFAULT 'organization' "
+                    "CHECK (active_scope IN ('platform', 'organization'));\n"
+                )
+        script += SCHEMA_SCRIPTS[28]
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "conversation_events" in tables:
+            event_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(conversation_events)"
+                ).fetchall()
+            }
+            if "actor_type" not in event_columns:
+                script += (
+                    "ALTER TABLE conversation_events ADD COLUMN actor_type TEXT "
+                    "NOT NULL DEFAULT 'system';\n"
+                )
+            if "actor_account" not in event_columns:
+                script += (
+                    "ALTER TABLE conversation_events ADD COLUMN actor_account "
+                    "TEXT NOT NULL DEFAULT '';\n"
+                )
+            script += (
+                "UPDATE conversation_events SET actor_type=CASE "
+                "WHEN user_id IS NOT NULL THEN 'member' "
+                "WHEN role='assistant' THEN 'agent' "
+                "WHEN role='user' THEN 'channel_user' ELSE 'system' END "
+                "WHERE actor_type='system';\n"
+            )
+        if "web_conversations" in tables:
+            script += r"""
+INSERT OR IGNORE INTO organization_conversations(
+    conversation_id, organization_id, creator_user_id, source, title,
+    legacy_tenant_id, created_at, updated_at
+)
+SELECT
+    conversation_id, organization_id, user_id, 'web', title,
+    legacy_tenant_id, created_at, updated_at
+FROM web_conversations;
+"""
+            for table in (
+                "conversation_context_messages",
+                "conversation_events",
+            ):
+                if table not in tables:
+                    continue
+                script += r"""
+UPDATE {table}
+SET session_key = 'organization:' || (
+    SELECT w.conversation_id FROM web_conversations w
+    WHERE w.organization_id={table}.tenant_id
+      AND {table}.session_key =
+          'web:' || w.user_id || ':' || w.conversation_id
+    LIMIT 1
+)
+WHERE EXISTS (
+    SELECT 1 FROM web_conversations w
+    WHERE w.organization_id={table}.tenant_id
+      AND {table}.session_key =
+          'web:' || w.user_id || ':' || w.conversation_id
+);
+""".format(table=table)
+        cls._apply_schema_script(connection, 28, script)
 
     @staticmethod
     def _migrate_v12(connection: sqlite3.Connection) -> None:

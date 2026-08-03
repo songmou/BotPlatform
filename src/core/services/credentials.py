@@ -16,10 +16,8 @@ from src.core.storage.organizations import OrganizationStore
 
 
 CREDENTIAL_ID = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.:-]{0,127}$")
+CREDENTIAL_RESOURCE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$")
 CREDENTIAL_RESOURCE_TYPES = {
-    "models",
-    "mcp",
-    "plugins",
     "channels",
     "integrations",
 }
@@ -74,10 +72,38 @@ class CredentialService:
             "credential",
         )
 
+    def secret_for_resource(
+        self, organization_id: str, resource_type: str, resource_id: str
+    ) -> str:
+        """Return a secret to trusted runtime code without exposing it via APIs."""
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT secret_service, secret_account FROM credential_metadata "
+                "WHERE organization_id=? AND credential_scope='organization' "
+                "AND resource_type=? AND resource_id=?",
+                (organization_id, resource_type, resource_id),
+            ).fetchone()
+        if row is None:
+            raise CredentialError("尚未配置组织凭据")
+        try:
+            return self.keychain.get_secret(
+                KeychainReference(
+                    str(row["secret_service"]), str(row["secret_account"])
+                )
+            )
+        except KeychainError as exc:
+            raise CredentialError("尚未配置组织凭据") from exc
+
     def list_for_user(
-        self, organization_id: str, user_id: int
+        self,
+        organization_id: str,
+        user_id: int,
+        allow_platform_delegation: bool = False,
     ) -> List[Dict[str, Any]]:
-        self.organizations.membership(user_id, organization_id)
+        if allow_platform_delegation:
+            self.organizations.get(organization_id)
+        else:
+            self.organizations.membership(user_id, organization_id)
         with self.database.read() as connection:
             rows = connection.execute(
                 "SELECT * FROM credential_metadata WHERE organization_id=? "
@@ -104,10 +130,15 @@ class CredentialService:
         resource_id: str,
         label: str,
         secret: str,
+        allow_platform_delegation: bool = False,
     ) -> Dict[str, Any]:
-        membership = self.organizations.membership(
-            actor_user_id, organization_id
-        )
+        if allow_platform_delegation:
+            self.organizations.get(organization_id)
+            membership = {"role": "owner"}
+        else:
+            membership = self.organizations.membership(
+                actor_user_id, organization_id
+            )
         if not CREDENTIAL_ID.fullmatch(credential_id):
             raise CredentialError("凭据编号格式无效")
         if scope not in {"organization", "personal"}:
@@ -119,7 +150,7 @@ class CredentialService:
             raise CredentialError("只有 Owner 或 Admin 可以管理组织凭据")
         if resource_type not in CREDENTIAL_RESOURCE_TYPES:
             raise CredentialError("凭据资源类型无效")
-        if not CREDENTIAL_ID.fullmatch(resource_id):
+        if not CREDENTIAL_RESOURCE_ID.fullmatch(resource_id):
             raise CredentialError("关联资源编号格式无效")
         if not isinstance(secret, str) or not secret:
             raise CredentialError("凭据内容不能为空")
@@ -195,10 +226,15 @@ class CredentialService:
         organization_id: str,
         credential_id: str,
         actor_user_id: int,
+        allow_platform_delegation: bool = False,
     ) -> None:
-        membership = self.organizations.membership(
-            actor_user_id, organization_id
-        )
+        if allow_platform_delegation:
+            self.organizations.get(organization_id)
+            membership = {"role": "owner"}
+        else:
+            membership = self.organizations.membership(
+                actor_user_id, organization_id
+            )
         with self.database.read() as connection:
             row = connection.execute(
                 "SELECT * FROM credential_metadata "

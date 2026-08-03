@@ -16,7 +16,12 @@ from src.core.application.bot import (
     save_credentials,
 )
 from src.core.application.services import CoreServices, build_core_services
-from src.core.config.loader import ConfigError, ProjectConfig, load_project_config
+from src.core.config.loader import (
+    ChannelConfig,
+    ConfigError,
+    ProjectConfig,
+    load_project_config,
+)
 from src.core.infrastructure.logging import (
     log_model_call,
     log_model_fallback,
@@ -271,6 +276,7 @@ def build_bot_runtime(
             memory_service=memory_service,
             notification_service=notification_service,
             script_schedule_service=script_schedule_service,
+            organization_control_store=services.organization_control_store,
         )
     except Exception:
         memory_service.close()
@@ -301,113 +307,139 @@ def build_bot_runtime(
 
 
 def run_channel_loop(runtime: BotRuntime, project_config: ProjectConfig) -> int:
-    """Build enabled channel adapters and pump normalized messages."""
+    """Build channel adapters and rebuild them when organization config changes."""
     tenant_registry = runtime.services.tenant_registry
-    adapters = []
     channel_manager: Optional[ChannelManager] = None
     credential_store = ChannelCredentialStore()
-    try:
-        for channel_config in project_config.channels.values():
-            if not channel_config.enabled:
-                runtime.channel_statuses.set(
-                    channel_config.id,
-                    channel_config.type,
-                    "disabled",
-                )
-                continue
-            try:
-                credentials = credential_store.load(
-                    channel_config.id,
-                    channel_config.type,
-                )
-                if credentials is None and channel_config.type == "wechat_ilink":
-                    credential_path = channel_credentials_path(channel_config.id)
-                    print("正在登录消息渠道 {}。".format(channel_config.id))
-                    with ILinkClient() as ilink:
-                        ilink_credentials = ilink.login(
-                            display_qr_code,
-                            status_changed=print_login_status,
+    applied_revisions: Dict[str, Dict[str, Any]] = {}
+
+    def configured_channels():
+        controls = runtime.services.organization_control_store
+        credentials_service = runtime.services.credential_service
+        if controls is None or credentials_service is None:
+            return list(project_config.channels.values()), {}, False
+        rows = []
+        for organization in runtime.services.organization_store.list_organizations():
+            rows.extend(controls.list_channels(str(organization["organization_id"])))
+        if not rows:
+            return list(project_config.channels.values()), {}, False
+        configs = []
+        secrets = {}
+        for row in rows:
+            config = ChannelConfig(
+                id=row["channel_instance_id"],
+                type=row["type"],
+                enabled=row["enabled"],
+                agent_id=row["agent_id"],
+                settings=dict(row["settings"]),
+            )
+            configs.append(config)
+            if row["credential_configured"]:
+                try:
+                    import json
+
+                    secrets[config.id] = json.loads(
+                        credentials_service.secret_for_resource(
+                            row["organization_id"], "channels", config.id
                         )
-                    save_credentials(ilink_credentials, credential_path)
-                    credentials = credential_store.load(
+                    )
+                except Exception:
+                    secrets[config.id] = None
+        return configs, secrets, True
+
+    try:
+        while True:
+            adapters = []
+            channel_configs, organization_secrets, organization_mode = configured_channels()
+            config_map = {item.id: item for item in channel_configs}
+            for channel_config in channel_configs:
+                if not channel_config.enabled:
+                    runtime.channel_statuses.set(
+                        channel_config.id, channel_config.type, "disabled"
+                    )
+                    continue
+                try:
+                    credentials = (
+                        organization_secrets.get(channel_config.id)
+                        if organization_mode
+                        else credential_store.load(
+                            channel_config.id, channel_config.type
+                        )
+                    )
+                    if (
+                        credentials is None
+                        and not organization_mode
+                        and channel_config.type == "wechat_ilink"
+                    ):
+                        credential_path = channel_credentials_path(channel_config.id)
+                        print("正在登录消息渠道 {}。".format(channel_config.id))
+                        with ILinkClient() as ilink:
+                            ilink_credentials = ilink.login(
+                                display_qr_code, status_changed=print_login_status
+                            )
+                        save_credentials(ilink_credentials, credential_path)
+                        credentials = credential_store.load(
+                            channel_config.id, channel_config.type, required=True
+                        )
+                    if credentials is None:
+                        raise ChannelCredentialError(
+                            "渠道 {} 尚未配置凭据".format(channel_config.id)
+                        )
+                    adapter = build_channel_adapter(channel_config, credentials)
+                except Exception as exc:
+                    runtime.channel_statuses.set(
                         channel_config.id,
                         channel_config.type,
-                        required=True,
+                        "authentication_required"
+                        if isinstance(exc, ChannelCredentialError)
+                        else "failed",
+                        str(exc),
                     )
-                    print(
-                        "渠道 {} 的凭证已保存到 {}。".format(
-                            channel_config.id,
-                            credential_path,
-                        )
-                    )
-                if credentials is None:
-                    raise ChannelCredentialError(
-                        "渠道 {} 尚未配置凭据".format(channel_config.id)
-                    )
-                adapter = build_channel_adapter(channel_config, credentials)
-            except ChannelCredentialError as exc:
+                    print(str(exc), file=sys.stderr)
+                    continue
+                adapters.append(adapter)
                 runtime.channel_statuses.set(
-                    channel_config.id,
-                    channel_config.type,
-                    "authentication_required",
-                    str(exc),
+                    channel_config.id, channel_config.type, "starting"
                 )
-                print(str(exc), file=sys.stderr)
-                continue
-            except Exception as exc:
-                runtime.channel_statuses.set(
-                    channel_config.id,
-                    channel_config.type,
-                    "failed",
-                    str(exc),
-                )
-                print(
-                    "创建消息渠道 {} 失败：{}".format(
-                        channel_config.id,
-                        exc,
-                    ),
-                    file=sys.stderr,
-                )
-                continue
-            adapters.append(adapter)
-            runtime.channel_statuses.set(
-                channel_config.id,
-                channel_config.type,
-                "starting",
-            )
 
-        runtime.message_router.reset(adapters)
-        message_bot = MessageBot(
-            runtime.agent_service,
-            runtime.message_router,
-            tenant_registry=tenant_registry,
-            recipient_store=runtime.services.recipient_store,
-            conversation_store=runtime.services.conversation_store,
-            schedule_store=runtime.services.schedule_store,
-            schedule_ids=[
-                task.id for task in project_config.schedules if task.enabled
-            ],
-            script_service=runtime.script_service,
-            knowledge_service=runtime.services.knowledge_service,
-            memory_service=runtime.memory_service,
-            integration_service=runtime.integration_service,
-            notification_dispatcher=runtime.notification_dispatcher,
-            address_store=runtime.address_store,
-            channel_configs=project_config.channels,
-        )
-        channel_manager = ChannelManager(
-            adapters,
-            MessageInboxStore(tenant_registry),
-            message_bot.handle_inbound,
-            status_registry=runtime.channel_statuses,
-        )
-        active = "、".join(adapter.channel_id for adapter in adapters) or "无"
-        print(
-            "消息服务已启动：渠道={}，正在等待消息。按 Ctrl+C 退出。".format(
-                active
+            runtime.message_router.reset(adapters)
+            message_bot = MessageBot(
+                runtime.agent_service,
+                runtime.message_router,
+                tenant_registry=tenant_registry,
+                recipient_store=runtime.services.recipient_store,
+                conversation_store=runtime.services.conversation_store,
+                schedule_store=runtime.services.schedule_store,
+                schedule_ids=[
+                    task.id for task in project_config.schedules if task.enabled
+                ],
+                script_service=runtime.script_service,
+                knowledge_service=runtime.services.knowledge_service,
+                memory_service=runtime.memory_service,
+                integration_service=runtime.integration_service,
+                notification_dispatcher=runtime.notification_dispatcher,
+                address_store=runtime.address_store,
+                channel_configs=config_map,
             )
-        )
-        channel_manager.run()
+            channel_manager = ChannelManager(
+                adapters,
+                MessageInboxStore(tenant_registry),
+                message_bot.handle_inbound,
+                status_registry=runtime.channel_statuses,
+            )
+            channel_manager.start()
+            active = "、".join(adapter.channel_id for adapter in adapters) or "无"
+            print("消息服务已启动：渠道={}，正在等待消息。".format(active))
+            controls = runtime.services.organization_control_store
+            applied_revisions = controls.runtime_revisions() if controls else {}
+            while True:
+                threading.Event().wait(1.0)
+                revisions = controls.runtime_revisions() if controls else {}
+                if revisions != applied_revisions:
+                    print("检测到组织渠道配置变化，正在应用。")
+                    channel_manager.shutdown()
+                    channel_manager = None
+                    break
     except KeyboardInterrupt:
         print("\n机器人已停止。")
         return 0
@@ -417,7 +449,7 @@ def run_channel_loop(runtime: BotRuntime, project_config: ProjectConfig) -> int:
     finally:
         if channel_manager is not None:
             channel_manager.shutdown()
-        elif adapters:
+        else:
             runtime.message_router.close()
     return 0
 
@@ -449,6 +481,7 @@ def run_bot(args, project_config=None) -> int:
         print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
         return 1
     try:
+        project_config = services.project_config
         runtime = build_bot_runtime(project_config, services)
     except (ModelError, ValueError) as exc:
         services.close()

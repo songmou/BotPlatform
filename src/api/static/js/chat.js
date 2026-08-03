@@ -15,10 +15,40 @@ function initChat() {
     var conversations = [];
     var currentConvId = null;
 
-    loadAgentSelector();
-    initConversations();
+    (window.BP_CONTEXT_READY || Promise.resolve()).then(function () {
+        if (!activeOrganizationId()) return;
+        loadAgentSelector();
+        initConversations();
+    });
+
+    function organizationMode() {
+        return document.body.getAttribute("data-organization-page") === "1";
+    }
+
+    function conversationCollectionUrl() {
+        return organizationMode() ? organizationApi("/conversations") : "/api/chat/conversations";
+    }
+
+    function conversationItemUrl(id) {
+        return organizationMode()
+            ? organizationApi("/conversations/" + encodeURIComponent(id))
+            : "/api/chat/conversations/" + encodeURIComponent(id);
+    }
 
     function loadAgentSelector() {
+        if (organizationMode()) {
+            fetch(organizationApi("/agents"))
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    allAgents = (data.items || []).map(function (item) {
+                        return Object.assign({ id: item.resource_id }, item.payload || {});
+                    }).filter(function (agent) { return agent.enabled !== false; });
+                    selectedAgentIds = allAgents.some(function (agent) { return agent.id === data.default_agent_id; })
+                        ? [data.default_agent_id] : (allAgents[0] ? [allAgents[0].id] : []);
+                    renderAgentDropdown(); updateAgentLabel(); updateWelcomeScreen();
+                });
+            return;
+        }
         fetch("/api/agents")
             .then(function (r) { return r.json(); })
             .then(function (agents) {
@@ -143,7 +173,7 @@ function initChat() {
     }
 
     function initConversations() {
-        fetch("/api/chat/conversations")
+        fetch(conversationCollectionUrl())
             .then(function (r) { return r.json(); })
             .then(function (convs) {
                 conversations = convs;
@@ -163,7 +193,7 @@ function initChat() {
     }
 
     function createConversation(select, skipClear) {
-        return fetch("/api/chat/conversations", { method: "POST" })
+        return fetch(conversationCollectionUrl(), { method: "POST" })
             .then(function (r) { return r.json(); })
             .then(function (conv) {
                 conversations.unshift(conv);
@@ -188,7 +218,7 @@ function initChat() {
             item.className = "conv-item" + (c.id === currentConvId ? " active" : "");
             var title = document.createElement("span");
             title.className = "conv-title";
-            title.textContent = c.title || "新对话";
+            title.textContent = (c.title || "新对话") + (c.status === "archived" ? "（已归档）" : "");
             var del = document.createElement("button");
             del.className = "conv-delete";
             del.title = "删除对话";
@@ -198,10 +228,48 @@ function initChat() {
                 deleteConversation(c.id);
             });
             item.appendChild(title);
-            item.appendChild(del);
+            var canDelete = !organizationMode() || canWriteOrganization() ||
+                c.creator_user_id === BP_CONTEXT.user.user_id;
+            if (organizationMode() && canDelete) {
+                title.title = "双击重命名";
+                title.addEventListener("dblclick", function (event) {
+                    event.stopPropagation();
+                    showFormDialog({ title: "重命名会话", fields: [{ name: "title", label: "会话名称", value: c.title || "新对话", required: true }] }).then(function (value) {
+                        if (value && value.title) updateConversation(c.id, { title: value.title });
+                    });
+                });
+                var archive = document.createElement("button");
+                archive.className = "conv-delete";
+                archive.title = c.status === "archived" ? "恢复会话" : "归档会话";
+                archive.textContent = c.status === "archived" ? "↩" : "□";
+                archive.addEventListener("click", function (event) {
+                    event.stopPropagation();
+                    updateConversation(c.id, {
+                        status: c.status === "archived" ? "active" : "archived"
+                    });
+                });
+                item.appendChild(archive);
+            }
+            if (canDelete) item.appendChild(del);
             item.addEventListener("click", function () { selectConversation(c.id); });
             convListEl.appendChild(item);
         });
+    }
+
+    function updateConversation(id, payload) {
+        return fetch(conversationItemUrl(id), {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).then(function (response) {
+            return response.json().then(function (body) {
+                if (!response.ok) throw new Error(body.detail || "修改会话失败");
+                conversations = conversations.map(function (item) {
+                    return item.id === id ? body : item;
+                });
+                renderConvList();
+            });
+        }).catch(function (error) { showToast(error.message, "error"); });
     }
 
     function selectConversation(id) {
@@ -216,7 +284,7 @@ function initChat() {
     function deleteConversation(id) {
         showConfirm("确定要删除这条对话吗？删除后不可恢复。").then(function (ok) {
             if (!ok) return;
-            fetch("/api/chat/conversations/" + id, { method: "DELETE" })
+            fetch(conversationItemUrl(id), { method: "DELETE" })
                 .then(function (r) {
                     if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
                     conversations = conversations.filter(function (c) { return c.id !== id; });
@@ -260,7 +328,7 @@ function initChat() {
     });
 
     function refreshConvList() {
-        fetch("/api/chat/conversations")
+        fetch(conversationCollectionUrl())
             .then(function (r) { return r.json(); })
             .then(function (convs) {
                 conversations = convs;
@@ -471,22 +539,19 @@ function initChat() {
             btn.setAttribute("data-feedback", rating);
             btn.innerHTML = rating === "good" ? "<span>👍 好评</span>" : "<span>👎 差评</span>";
             btn.addEventListener("click", function () {
-                var reasons = [];
-                var comment = "";
-                if (rating === "bad") {
-                    var reason = window.prompt(
-                        "差评原因：答非所问、事实错误、格式表达、工具执行失败、响应过慢、其他",
-                        "答非所问"
-                    );
-                    if (reason === null) return;
-                    reasons = [reason.trim() || "其他"];
-                    comment = window.prompt("补充说明（可选，最多 500 字）", "") || "";
-                }
-                fetch("/api/model-runs/" + encodeURIComponent(runId) + "/feedback", {
+                var details = rating === "bad" ? showFormDialog({ title: "提交差评", fields: [
+                    { name: "reason", label: "差评原因", type: "select", value: "答非所问", options: ["答非所问", "事实错误", "格式表达", "工具执行失败", "响应过慢", "其他"].map(function (value) { return { value: value, label: value }; }) },
+                    { name: "comment", label: "补充说明（可选）", type: "textarea", rows: 4 }
+                ] }) : Promise.resolve({});
+                details.then(function (value) {
+                    if (value === null) return null;
+                    return fetch("/api/model-runs/" + encodeURIComponent(runId) + "/feedback", {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ rating: rating, reasons: reasons, comment: comment }),
+                    body: JSON.stringify({ rating: rating, reasons: rating === "bad" ? [value.reason || "其他"] : [], comment: value.comment || "" }),
+                    });
                 }).then(function (r) {
+                    if (!r) return;
                     if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
                     row.querySelectorAll("[data-feedback]").forEach(function (item) {
                         item.classList.toggle("selected", item.getAttribute("data-feedback") === rating);
@@ -567,7 +632,10 @@ function initChat() {
             summaryRow = refs.row;
         }
 
-        fetch("/api/chat", {
+        var chatUrl = organizationMode()
+            ? organizationApi("/conversations/" + encodeURIComponent(currentConvId) + "/chat")
+            : "/api/chat";
+        fetch(chatUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(requestBody),
@@ -761,7 +829,10 @@ function initChat() {
 
     function loadCurrentHistory() {
         if (!currentConvId) return;
-        fetch("/api/chat/history?conversation_id=" + encodeURIComponent(currentConvId))
+        var historyUrl = organizationMode()
+            ? organizationApi("/conversations/" + encodeURIComponent(currentConvId) + "/history")
+            : "/api/chat/history?conversation_id=" + encodeURIComponent(currentConvId);
+        fetch(historyUrl)
             .then(function (r) {
                 if (!r.ok) throw new Error("HTTP " + r.status);
                 return r.json();

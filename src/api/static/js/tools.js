@@ -16,7 +16,7 @@ function initTools() {
 
     var validTabs = ["skills", "mcp", "builtin", "audit"];
     function switchTab() {
-        var hash = location.hash.replace("#", "");
+        var hash = location.hash.replace("#", "") || window.BP_INITIAL_TOOLS_TAB;
         if (validTabs.indexOf(hash) === -1) hash = "builtin";
         var detailPane = document.getElementById("tools-pane-mcp-detail");
         if (detailPane) detailPane.style.display = "none";
@@ -333,6 +333,7 @@ function initTools() {
         document.getElementById("skill-enabled").checked = true;
         document.getElementById("skill-desc-count").textContent = "0";
         document.getElementById("skill-submit-btn").textContent = "立即创建";
+        document.getElementById("skill-delete-btn").style.display = "none";
         skillModal.style.display = "";
     });
 
@@ -412,8 +413,23 @@ function initTools() {
             document.getElementById("skill-enabled").checked = s.enabled;
             document.getElementById("skill-desc-count").textContent = (s.description || "").length;
             document.getElementById("skill-submit-btn").textContent = "保存";
+            document.getElementById("skill-delete-btn").style.display = "";
             skillModal.style.display = "";
         });
+    });
+    document.getElementById("skill-delete-btn").addEventListener("click", function () {
+        if (!skillEditingId) return;
+        var id = skillEditingId;
+        showConfirm("确定删除技能“" + id + "”吗？").then(function (ok) {
+            if (!ok) return null;
+            return fetch("/api/skills/" + encodeURIComponent(id), { method: "DELETE" });
+        }).then(function (response) {
+            if (!response) return;
+            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            skillModal.style.display = "none";
+            showToast("技能已删除", "success");
+            loadSkills();
+        }).catch(function (error) { showToast("删除失败：" + error.message, "error"); });
     });
 
     /* ---- MCP 服务 ---- */
@@ -730,6 +746,19 @@ function initTools() {
     });
     document.getElementById("mcp-detail-edit").addEventListener("click", function () {
         if (currentMcpServer) openMcpEdit(currentMcpServer);
+    });
+    document.getElementById("mcp-detail-delete").addEventListener("click", function () {
+        if (!currentMcpServer) return;
+        var id = currentMcpServer.id;
+        showConfirm("确定删除 MCP 服务“" + id + "”吗？").then(function (ok) {
+            if (!ok) return null;
+            return fetch("/api/mcp/" + encodeURIComponent(id), { method: "DELETE" });
+        }).then(function (response) {
+            if (!response) return;
+            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            showToast("MCP 服务已删除", "success");
+            showMcpList();
+        }).catch(function (error) { showToast("删除失败：" + error.message, "error"); });
     });
     document.getElementById("mcp-detail-copy").addEventListener("click", function () {
         var text = document.getElementById("mcp-detail-config").textContent;

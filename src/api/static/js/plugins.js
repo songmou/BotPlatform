@@ -419,18 +419,16 @@ function initPlugins() {
     });
     document.getElementById("plugin-clear-data-btn").addEventListener("click", function () {
         if (!editing) return;
-        var confirmation = window.prompt(
-            "此操作不可恢复。请输入插件 ID “" + editing.id + "”确认清除数据：",
-            ""
-        );
-        if (confirmation === null) return;
-        request("/api/plugins/" + encodeURIComponent(editing.id) + "/data", {
+        showFormDialog({title: "确认清除插件数据", fields: [{name: "confirmation", label: "请输入插件 ID “" + editing.id + "”", required: true}]}).then(function (value) {
+        if (!value) return null;
+        return request("/api/plugins/" + encodeURIComponent(editing.id) + "/data", {
             method: "DELETE",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({confirmation: confirmation})
+            body: JSON.stringify({confirmation: value.confirmation})
         }).then(function () {
             showToast("插件数据已清除", "success");
             modal.style.display = "none";
+        });
         }).catch(function (error) {
             showToast("清除失败：" + error.message, "error");
         });

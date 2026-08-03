@@ -153,6 +153,7 @@ def _run_combined(args) -> int:
             print("警告：{}".format(warning), file=sys.stderr)
 
         try:
+            config = services.project_config
             registry = services.tenant_registry
             (
                 admin_auth,
@@ -191,6 +192,9 @@ def _run_combined(args) -> int:
                 model_analytics_store=services.model_analytics_store,
                 organization_store=services.organization_store,
                 resource_store=services.resource_store,
+                organization_control_store=services.organization_control_store,
+                credential_service=services.credential_service,
+                notification_service=runtime.notification_service,
                 admin_auth=admin_auth,
                 admin_user_store=admin_user_store,
                 admin_role_store=admin_role_store,
@@ -277,6 +281,7 @@ def _run_panel_only(args) -> int:
     for warning in services.model_warnings:
         print("警告：{}".format(warning), file=sys.stderr)
 
+    config = services.project_config
     model_router = services.model_router
     registry = services.tenant_registry
     conversation_store = services.conversation_store
@@ -383,6 +388,7 @@ def _run_panel_only(args) -> int:
         schedule_store=schedule_store,
         plugin_manager=plugin_manager,
         notification_service=notification_service,
+        organization_control_store=services.organization_control_store,
     )
     plugin_manager.start()
     scheduler.start()
@@ -404,6 +410,9 @@ def _run_panel_only(args) -> int:
         model_analytics_store=model_analytics_store,
         organization_store=services.organization_store,
         resource_store=services.resource_store,
+        organization_control_store=services.organization_control_store,
+        credential_service=services.credential_service,
+        notification_service=notification_service,
         admin_auth=admin_auth,
         admin_user_store=admin_user_store,
         admin_role_store=admin_role_store,

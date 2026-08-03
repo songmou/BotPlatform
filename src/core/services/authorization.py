@@ -23,6 +23,7 @@ class ExecutionContext:
     conversation_id: str = ""
     source: str = "web"
     request_id: str = ""
+    platform_delegation: bool = False
 
 
 class AuthorizationService:
@@ -48,6 +49,20 @@ class AuthorizationService:
     ) -> ExecutionContext:
         if principal is None:
             raise AuthorizationError("未登录")
+        if principal.allows("admins.manage"):
+            try:
+                self.organizations.get(organization_id)
+            except OrganizationError as exc:
+                raise AuthorizationError(str(exc)) from exc
+            return ExecutionContext(
+                user_id=principal.user.user_id,
+                organization_id=organization_id,
+                role="owner",
+                conversation_id=conversation_id,
+                source="platform_delegation",
+                request_id=request_id,
+                platform_delegation=True,
+            )
         try:
             membership = self.organizations.membership(
                 principal.user.user_id, organization_id
@@ -67,4 +82,3 @@ class AuthorizationService:
             source=source,
             request_id=request_id,
         )
-

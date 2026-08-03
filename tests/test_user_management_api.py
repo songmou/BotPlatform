@@ -76,9 +76,10 @@ class UserManagementApiTest(unittest.TestCase):
         response = self.client.get("/api/tenants")
         self.assertEqual(response.status_code, 200)
         items = response.json()
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["tenant_id"], context.tenant_id)
-        self.assertEqual(items[0]["message_count"], 2)
+        item = next(
+            value for value in items if value["tenant_id"] == context.tenant_id
+        )
+        self.assertEqual(item["message_count"], 2)
 
         response = self.client.get("/api/tenants/" + context.tenant_id)
         self.assertEqual(response.status_code, 200)
@@ -88,7 +89,10 @@ class UserManagementApiTest(unittest.TestCase):
         response = self.client.delete("/api/tenants/" + context.tenant_id)
         self.assertEqual(response.status_code, 200)
         response = self.client.get("/api/tenants")
-        self.assertEqual(response.json(), [])
+        self.assertNotIn(
+            context.tenant_id,
+            {item["tenant_id"] for item in response.json()},
+        )
 
     def test_tenant_detail_not_found(self):
         response = self.client.get(

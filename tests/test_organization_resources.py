@@ -17,6 +17,16 @@ from tests._web_api_base import WebApiTestBase
 
 
 class OrganizationResourceApiTest(WebApiTestBase):
+    def _publish_catalog(self, resource_type: str, resource_id: str, payload: dict):
+        saved = self.client.put(
+            "/api/v2/platform/catalog/{}/{}".format(
+                resource_type, resource_id
+            ),
+            json={"payload": payload},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        return saved
+
     def _create_owner(self, suffix: str):
         created = self.client.post(
             "/api/v2/platform/organizations",
@@ -109,7 +119,9 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(members.json()["items"], [])
 
         owner = self._create_owner("platform-members")[1]
-        owner_org_id = owner.get("/api/v2/me").json()["active_organization_id"]
+        owner_org_id = owner.get("/api/v2/me").json()["organizations"][0][
+            "organization_id"
+        ]
         owner_members = self.client.get(
             "/api/v2/platform/organizations/{}/members".format(owner_org_id)
         )
@@ -166,34 +178,38 @@ class OrganizationResourceApiTest(WebApiTestBase):
         org_a, owner_a = self._create_owner("a")
         org_b, _owner_b = self._create_owner("b")
         created = owner_a.put(
-            "/api/v2/orgs/{}/resources/agents/private_agent".format(org_a),
+            "/api/v2/orgs/{}/agents/private_agent".format(org_a),
             json={"payload": {"name": "组织 A 助手"}},
         )
         self.assertEqual(created.status_code, 200, created.text)
         listed = owner_a.get(
-            "/api/v2/orgs/{}/resources/agents".format(org_a)
+            "/api/v2/orgs/{}/agents".format(org_a)
         )
         self.assertEqual(listed.status_code, 200, listed.text)
         ids = {item["resource_id"] for item in listed.json()["items"]}
         self.assertIn("private_agent", ids)
         denied = owner_a.get(
-            "/api/v2/orgs/{}/resources/agents".format(org_b)
+            "/api/v2/orgs/{}/agents".format(org_b)
         )
         self.assertEqual(denied.status_code, 403)
+        self.assertEqual(
+            owner_a.get(
+                "/api/v2/orgs/{}/resources/agents".format(org_a)
+            ).status_code,
+            404,
+        )
 
-    def test_public_override_inherits_unmodified_fields_and_can_reset(self):
+    def test_public_agent_is_read_only_and_copy_is_a_snapshot(self):
         org_id, owner = self._create_owner("override")
-        public = self.client.put(
-            "/api/v2/platform/catalog/agents/shared_helper",
-            json={
-                "payload": {
-                    "name": "公共助手",
-                    "description": "v1",
-                    "tools": ["read_text_file"],
-                }
+        public = self._publish_catalog(
+            "agents",
+            "shared_helper",
+            {
+                "name": "公共助手",
+                "description": "v1",
+                "tools": [],
             },
         )
-        self.assertEqual(public.status_code, 200, public.text)
         override = owner.put(
             "/api/v2/orgs/{}/resources/agents/shared_helper/override".format(
                 org_id
@@ -203,35 +219,29 @@ class OrganizationResourceApiTest(WebApiTestBase):
                 "list_modes": {"tools": "disable"},
             },
         )
-        self.assertEqual(override.status_code, 200, override.text)
-        self.assertEqual(override.json()["payload"]["name"], "组织助手")
-        self.assertEqual(override.json()["payload"]["description"], "v1")
-        self.assertEqual(override.json()["payload"]["tools"], [])
+        self.assertEqual(override.status_code, 404, override.text)
+        copied = owner.post(
+            "/api/v2/orgs/{}/agents/shared_helper/copy".format(org_id),
+            json={"id": "shared_helper_copy", "name": "组织助手"},
+        )
+        self.assertEqual(copied.status_code, 201, copied.text)
 
-        updated = self.client.put(
-            "/api/v2/platform/catalog/agents/shared_helper",
-            json={
-                "payload": {
-                    "name": "公共助手 2",
-                    "description": "v2",
-                    "tools": ["read_text_file"],
-                }
+        updated = self._publish_catalog(
+            "agents",
+            "shared_helper",
+            {
+                "name": "公共助手 2",
+                "description": "v2",
+                "tools": [],
             },
         )
-        self.assertEqual(updated.status_code, 200, updated.text)
-        effective = owner.get(
-            "/api/v2/orgs/{}/resources/agents/shared_helper".format(org_id)
-        ).json()
-        self.assertEqual(effective["payload"]["name"], "组织助手")
-        self.assertEqual(effective["payload"]["description"], "v2")
-
-        reset = owner.delete(
-            "/api/v2/orgs/{}/resources/agents/shared_helper/override".format(
-                org_id
-            )
-        )
-        self.assertEqual(reset.status_code, 200, reset.text)
-        self.assertEqual(reset.json()["payload"]["name"], "公共助手 2")
+        agents = owner.get(
+            "/api/v2/orgs/{}/agents".format(org_id)
+        ).json()["items"]
+        by_id = {item["resource_id"]: item for item in agents}
+        self.assertNotIn("shared_helper", by_id)
+        self.assertEqual(by_id["shared_helper_copy"]["payload"]["description"], "v1")
+        self.assertEqual(by_id["shared_helper_copy"]["base_resource_id"], "shared_helper")
 
     def test_tenant_user_cannot_publish_public_resource(self):
         _org_id, owner = self._create_owner("publish")
@@ -241,7 +251,351 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(response.status_code, 403)
 
-    def test_web_conversations_are_private_to_member(self):
+    def test_tenant_platform_catalog_is_read_only_and_redacted(self):
+        org_id, owner = self._create_owner("safe-catalog")
+        published = self._publish_catalog(
+            "scripts",
+            "maintenance",
+            {
+                "id": "maintenance",
+                "name": "维护脚本",
+                "description": "清理临时文件",
+                "entrypoint": "/private/platform/maintenance.py",
+                "command": ["python", "maintenance.py"],
+                "environment": {"MODE": "production"},
+                "enabled": True,
+            },
+        )
+        self.assertEqual(published.json()["activation_state"], "restart_required")
+        catalog = owner.get("/api/v2/catalog/scripts")
+        self.assertEqual(catalog.status_code, 200, catalog.text)
+        self.assertNotIn("/private/platform", catalog.text)
+        self.assertNotIn("environment", catalog.text)
+        self.assertNotIn("production", catalog.text)
+        self.assertFalse(
+            any(
+                value["resource_id"] == "maintenance"
+                for value in catalog.json()["items"]
+            )
+        )
+        full = owner.get("/api/v2/platform/catalog/scripts")
+        self.assertEqual(full.status_code, 403)
+        me = owner.get("/api/v2/me").json()
+        self.assertNotIn("selected_organization_id", me)
+        organization = next(
+            item for item in me["organizations"]
+            if item["organization_id"] == org_id
+        )
+        self.assertTrue(organization["permissions"]["collaborate"])
+        self.assertTrue(organization["permissions"]["manage_sensitive"])
+
+    def test_platform_governance_pages_are_admin_only(self):
+        _org_id, owner = self._create_owner("governance-page")
+        for path in (
+            "/platform/organizations",
+            "/platform/access",
+            "/platform/analytics",
+            "/platform/audit",
+        ):
+            self.assertEqual(owner.get(path).status_code, 403, path)
+            self.assertEqual(self.client.get(path).status_code, 200, path)
+
+    def test_menus_are_server_rendered_by_role_and_org_urls_are_authorized(self):
+        org_id, owner = self._create_owner("menu")
+        other_org_id, _other_owner = self._create_owner("menu-other")
+
+        organization_page = owner.get(
+            "/organization/overview?organization_id={}".format(org_id)
+        )
+        self.assertEqual(organization_page.status_code, 200, organization_page.text)
+        self.assertIn("组织工作台", organization_page.text)
+        self.assertIn('id="organization-page-switch"', organization_page.text)
+        self.assertNotIn('<div class="nav-section-label">平台管理</div>', organization_page.text)
+        self.assertNotIn('href="/platform"', organization_page.text)
+
+        forbidden = owner.get(
+            "/organization/overview?organization_id={}".format(other_org_id)
+        )
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+
+        platform_page = self.client.get("/platform")
+        self.assertEqual(platform_page.status_code, 200, platform_page.text)
+        self.assertIn('<div class="nav-section-label">平台管理</div>', platform_page.text)
+        self.assertIn("组织工作台", platform_page.text)
+        self.assertNotIn('id="organization-page-switch"', platform_page.text)
+
+    def test_platform_admin_can_manage_platform_without_organization_membership(self):
+        """Platform configuration must not depend on a selected organization."""
+        initial = self.client.get("/api/v2/me")
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertNotIn("selected_organization_id", initial.json())
+        self.assertNotIn("active_organization_id", initial.json())
+
+        configured = self._publish_catalog(
+            "agents",
+            "platform_only",
+            {"name": "平台助手", "tools": []},
+        )
+        self.assertEqual(configured.json()["activation_state"], "active")
+        self.assertEqual(self.client.get("/platform/agent-templates").status_code, 200)
+        self.assertEqual(self.client.get("/platform/analytics").status_code, 200)
+
+    def test_organization_picker_is_url_scoped_and_not_persisted(self):
+        first = self.client.post(
+            "/api/v2/platform/organizations", json={"name": "组织一"}
+        ).json()["organization"]["organization_id"]
+        second = self.client.post(
+            "/api/v2/platform/organizations", json={"name": "组织二"}
+        ).json()["organization"]["organization_id"]
+        selected = self.client.put(
+            "/api/v2/me/active-organization", json={"organization_id": second}
+        )
+        self.assertEqual(selected.status_code, 404, selected.text)
+        me = self.client.get("/api/v2/me").json()
+        self.assertNotIn("selected_organization_id", me)
+        page = self.client.get(
+            "/organization/agents?organization_id={}".format(second)
+        )
+        self.assertEqual(page.status_code, 200, page.text)
+        self.assertIn('id="organization-page-switch"', page.text)
+        self.assertNotEqual(first, second)
+
+    def test_url_context_pages_and_platform_delegation_are_audited(self):
+        org_id, owner = self._create_owner("context")
+        switched = self.client.put(
+            "/api/v2/me/context",
+            json={"scope": "organization", "organization_id": org_id},
+        )
+        self.assertEqual(switched.status_code, 404, switched.text)
+        me = self.client.get("/api/v2/me").json()
+        delegated = next(
+            item for item in me["organizations"]
+            if item["organization_id"] == org_id
+        )
+        self.assertEqual(delegated["role"], "platform_delegation")
+        page = self.client.get(
+            "/organization/agents?organization_id={}".format(org_id)
+        )
+        self.assertIn('data-module="agents"', page.text)
+        changed = self.client.put(
+            "/api/v2/orgs/{}/agents/delegated".format(org_id),
+            json={"payload": {"id": "delegated", "name": "代管助手", "tools": []}},
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+        audit = self.client.get(
+            "/api/v2/orgs/{}/audit".format(org_id)
+        ).json()["items"]
+        self.assertTrue(any(item["source"] == "platform_delegation" for item in audit))
+        self.assertEqual(
+            owner.get(
+                "/organization/agents?organization_id={}".format(org_id)
+            ).status_code,
+            200,
+        )
+        self.assertEqual(owner.get("/platform").status_code, 403)
+        app_redirect = owner.get("/", follow_redirects=False)
+        self.assertEqual(app_redirect.status_code, 302)
+        self.assertEqual(app_redirect.headers["location"], "/organization/overview")
+
+    def test_typed_channels_are_isolated_and_credentials_never_echo(self):
+        org_a, owner_a = self._create_owner("channel-a")
+        org_b, owner_b = self._create_owner("channel-b")
+        body = {
+            "type": "wecom_aibot",
+            "agent_id": "general",
+            "enabled": False,
+            "settings": {"group_policy": "private_only"},
+        }
+        channel_a = owner_a.put(
+            "/api/v2/orgs/{}/channels/main".format(org_a), json=body
+        )
+        channel_b = owner_b.put(
+            "/api/v2/orgs/{}/channels/main".format(org_b), json=body
+        )
+        self.assertEqual(channel_a.status_code, 200, channel_a.text)
+        self.assertEqual(channel_b.status_code, 200, channel_b.text)
+        self.assertNotEqual(
+            channel_a.json()["channel_instance_id"],
+            channel_b.json()["channel_instance_id"],
+        )
+        saved = owner_a.put(
+            "/api/v2/orgs/{}/channels/main/credentials".format(org_a),
+            json={"credentials": {"bot_id": "bot", "secret": "never-echo"}},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertNotIn("never-echo", saved.text)
+        listed = owner_a.get(
+            "/api/v2/orgs/{}/channels".format(org_a)
+        )
+        self.assertTrue(listed.json()["items"][0]["credential_configured"])
+        self.assertNotIn("never-echo", listed.text)
+
+    def test_external_channel_user_is_fixed_to_channel_organization(self):
+        from src.core.messaging import ChannelAddressStore, InboundMessage
+
+        org_a, owner_a = self._create_owner("route-a")
+        org_b, owner_b = self._create_owner("route-b")
+        body = {
+            "type": "wecom_aibot",
+            "agent_id": "general",
+            "enabled": True,
+            "settings": {"group_policy": "private_only"},
+        }
+        first = owner_a.put(
+            "/api/v2/orgs/{}/channels/main".format(org_a), json=body
+        ).json()
+        second = owner_b.put(
+            "/api/v2/orgs/{}/channels/main".format(org_b), json=body
+        ).json()
+        store = ChannelAddressStore(self.registry)
+
+        def message(channel_id, event_id):
+            return InboundMessage(
+                event_id=event_id,
+                channel_id=channel_id,
+                platform="wecom_aibot",
+                account_id="bot",
+                sender_id="external-same-user",
+                conversation_type="direct",
+                conversation_id="external-same-user",
+                text="你好",
+            )
+
+        inbound_a = message(first["channel_instance_id"], "event-a")
+        tenant_a = store.resolve(inbound_a)
+        self.assertEqual(tenant_a.tenant_id, org_a)
+        self.assertIsNotNone(tenant_a.personal_tenant_id)
+        conversation_a = store.ensure_organization_conversation(
+            inbound_a, tenant_a
+        )
+        store.record_endpoint(tenant_a, inbound_a)
+        inbound_b = message(second["channel_instance_id"], "event-b")
+        tenant_b = store.resolve(inbound_b)
+        self.assertEqual(tenant_b.tenant_id, org_b)
+        self.assertNotEqual(tenant_a.personal_tenant_id, tenant_b.personal_tenant_id)
+        self.assertIsNotNone(conversation_a)
+        self.assertEqual(
+            len(self.app.state.organization_store.list_members(org_a)), 1
+        )
+        shared = owner_a.get(
+            "/api/v2/orgs/{}/conversations".format(org_a)
+        ).json()
+        self.assertEqual(shared[0]["source"], "channel")
+
+    def test_member_collaborates_but_sensitive_governance_stays_restricted(self):
+        org_id, owner = self._create_owner("controls")
+        member = self._invite_member(owner, org_id, "controls")
+        created = owner.put(
+            "/api/v2/orgs/{}/schedules/morning".format(org_id),
+            json={
+                "enabled": True,
+                "crons": ["0 9 * * *"],
+                "action": {"type": "text", "content": "早上好"},
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(
+            member.get("/api/v2/orgs/{}/schedules".format(org_id)).status_code,
+            200,
+        )
+        updated = member.patch(
+            "/api/v2/orgs/{}/schedules/morning/status".format(org_id),
+            json={"enabled": False},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        denied = member.post(
+            "/api/v2/orgs/{}/invitations".format(org_id),
+            json={"role": "member"},
+        )
+        self.assertEqual(denied.status_code, 403)
+
+    def test_organization_schedule_skips_without_org_recipient(self):
+        from unittest.mock import MagicMock
+
+        from src.core.services.scheduler import SchedulerService
+        from src.core.storage.tenants import ScheduleStore
+
+        org_id, owner = self._create_owner("schedule-run")
+        created = owner.put(
+            "/api/v2/orgs/{}/schedules/morning".format(org_id),
+            json={
+                "enabled": True,
+                "crons": ["0 9 * * *"],
+                "action": {"type": "text", "content": "早上好"},
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        notification = MagicMock()
+        notification.address_store.latest_endpoint.return_value = None
+        scheduler = SchedulerService(
+            tasks=[],
+            tenant_registry=self.registry,
+            schedule_store=ScheduleStore(self.registry),
+            notification_service=notification,
+            organization_control_store=self.app.state.organization_control_store,
+        )
+        self.assertFalse(scheduler.run_organization_schedule(org_id, "morning"))
+        notification.enqueue_text_to_tenant.assert_not_called()
+        runs = owner.get(
+            "/api/v2/orgs/{}/schedule-runs".format(org_id)
+        ).json()["items"]
+        self.assertEqual(runs[0]["status"], "skipped")
+        self.assertIn("没有有效", runs[0]["detail"])
+
+    def test_last_enabled_agent_is_preserved_and_default_moves(self):
+        org_id, owner = self._create_owner("agents-invariant")
+        last = owner.patch(
+            "/api/v2/orgs/{}/agents/general/status".format(org_id),
+            json={"enabled": False},
+        )
+        self.assertEqual(last.status_code, 400, last.text)
+        created = owner.put(
+            "/api/v2/orgs/{}/agents/secondary".format(org_id),
+            json={"payload": {"id": "secondary", "name": "备用助手", "tools": []}},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        paused = owner.patch(
+            "/api/v2/orgs/{}/agents/general/status".format(org_id),
+            json={"enabled": False},
+        )
+        self.assertEqual(paused.status_code, 200, paused.text)
+        agents = owner.get("/api/v2/orgs/{}/agents".format(org_id)).json()
+        self.assertEqual(agents["default_agent_id"], "secondary")
+        disabled_public = next(
+            item for item in agents["items"] if item["resource_id"] == "general"
+        )
+        self.assertFalse(disabled_public["payload"]["enabled"])
+        cannot_pause = owner.patch(
+            "/api/v2/orgs/{}/agents/secondary/status".format(org_id),
+            json={"enabled": False},
+        )
+        self.assertEqual(cannot_pause.status_code, 400, cannot_pause.text)
+
+    def test_shared_organization_content_is_collaboratively_managed(self):
+        from src.core.services.knowledge import KnowledgeService
+
+        self.app.state.knowledge_service = KnowledgeService(
+            self.registry, None, None
+        )
+        org_id, owner = self._create_owner("content")
+        creator = self._invite_member(owner, org_id, "content-creator")
+        other = self._invite_member(owner, org_id, "content-other")
+        added = creator.post(
+            "/api/v2/orgs/{}/knowledge/text".format(org_id),
+            json={"name": "共享规则", "content": "组织知识"},
+        )
+        self.assertEqual(added.status_code, 200, added.text)
+        source_id = added.json()["source_id"]
+        deleted = other.delete(
+            "/api/v2/orgs/{}/knowledge/sources/{}".format(org_id, source_id)
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        missing = creator.delete(
+            "/api/v2/orgs/{}/knowledge/sources/{}".format(org_id, source_id)
+        )
+        self.assertEqual(missing.status_code, 404, missing.text)
+
+    def test_web_conversations_are_shared_but_lifecycle_is_restricted(self):
         org_id, owner = self._create_owner("chat")
         member = self._invite_member(owner, org_id, "chat")
         conversation = owner.post(
@@ -249,12 +603,10 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(conversation.status_code, 201, conversation.text)
         conversation_id = conversation.json()["id"]
-        self.assertEqual(
-            member.get(
-                "/api/v2/orgs/{}/conversations".format(org_id)
-            ).json(),
-            [],
-        )
+        visible = member.get(
+            "/api/v2/orgs/{}/conversations".format(org_id)
+        ).json()
+        self.assertEqual([item["id"] for item in visible], [conversation_id])
         denied = member.delete(
             "/api/v2/orgs/{}/conversations/{}".format(
                 org_id, conversation_id
@@ -266,7 +618,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
                 org_id, conversation_id
             )
         )
-        self.assertEqual(history.status_code, 404)
+        self.assertEqual(history.status_code, 200)
 
     def test_legacy_web_conversation_migration_is_idempotent(self):
         path = self.data_root / "legacy-web.json"
@@ -311,8 +663,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
         conversation = store.get_conversation(root.user_id, conversation_id)
         messages = self.conversation_store.load_context(
             conversation["organization_id"],
-            session_key="web:{}:{}".format(root.user_id, conversation_id),
-            user_id=root.user_id,
+            session_key="organization:{}".format(conversation_id),
         )
         self.assertEqual([item.content for item in messages], ["旧问题"])
 
@@ -340,8 +691,8 @@ class OrganizationResourceApiTest(WebApiTestBase):
 
     def test_resource_payload_rejects_secrets_and_local_mcp(self):
         org_id, owner = self._create_owner("secure-resource")
-        secret = owner.put(
-            "/api/v2/orgs/{}/resources/models/private".format(org_id),
+        secret = self.client.put(
+            "/api/v2/platform/catalog/models/private",
             json={
                 "payload": {
                     "name": "私有模型",
@@ -351,18 +702,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
             },
         )
         self.assertEqual(secret.status_code, 400)
-        local_mcp = owner.put(
-            "/api/v2/orgs/{}/resources/mcp/local".format(org_id),
-            json={
-                "payload": {
-                    "name": "本机 MCP",
-                    "transport": "stdio",
-                    "command": "python",
-                }
-            },
-        )
-        self.assertEqual(local_mcp.status_code, 400)
-        remote_mcp = owner.put(
+        removed = owner.put(
             "/api/v2/orgs/{}/resources/mcp/remote".format(org_id),
             json={
                 "payload": {
@@ -372,19 +712,35 @@ class OrganizationResourceApiTest(WebApiTestBase):
                 }
             },
         )
-        self.assertEqual(remote_mcp.status_code, 200, remote_mcp.text)
+        self.assertEqual(removed.status_code, 404, removed.text)
+        self.assertEqual(
+            owner.put(
+                "/api/v2/platform/catalog/mcp/remote",
+                json={"payload": {"name": "越权 MCP"}},
+            ).status_code,
+            403,
+        )
 
     def test_credentials_are_write_only_and_member_scoped(self):
         org_id, owner = self._create_owner("credential")
         member = self._invite_member(owner, org_id, "credential")
-        saved = owner.put(
-            "/api/v2/orgs/{}/credentials/model_service".format(org_id),
+        channel = owner.put(
+            "/api/v2/orgs/{}/channels/main".format(org_id),
             json={
-                "scope": "organization",
-                "resource_type": "models",
-                "resource_id": "private_model",
-                "label": "模型服务密钥",
-                "secret": "top-secret-value",
+                "type": "wecom_aibot",
+                "agent_id": "general",
+                "enabled": False,
+                "settings": {"group_policy": "private_only"},
+            },
+        )
+        self.assertEqual(channel.status_code, 200, channel.text)
+        saved = owner.put(
+            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+            json={
+                "credentials": {
+                    "bot_id": "credential-bot",
+                    "secret": "top-secret-value",
+                }
             },
         )
         self.assertEqual(saved.status_code, 200, saved.text)
@@ -400,7 +756,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
             "/api/v2/orgs/{}/credentials/my_channel".format(org_id),
             json={
                 "scope": "personal",
-                "resource_type": "channels",
+                "resource_type": "integrations",
                 "resource_id": "my_channel",
                 "secret": "member-only-secret",
             },
@@ -428,26 +784,28 @@ class OrganizationResourceApiTest(WebApiTestBase):
             ),
             json={
                 "scope": "organization",
-                "resource_type": "models",
-                "resource_id": "private_model",
-                "secret": "other-organization-secret",
+                "resource_type": "plugins",
+                "resource_id": "shared_service",
+                "secret": '{"api_token":"other-organization-secret"}',
             },
         )
-        self.assertEqual(same_local_id.status_code, 200, same_local_id.text)
-        self.assertEqual(
-            same_local_id.json()["organization_id"], other_org_id
-        )
+        self.assertEqual(same_local_id.status_code, 400, same_local_id.text)
 
     def test_organization_delete_backs_up_metadata_before_removing_secrets(self):
         org_id, owner = self._create_owner("delete-backup")
-        saved = owner.put(
-            "/api/v2/orgs/{}/credentials/model_service".format(org_id),
+        channel = owner.put(
+            "/api/v2/orgs/{}/channels/main".format(org_id),
             json={
-                "scope": "organization",
-                "resource_type": "models",
-                "resource_id": "private_model",
-                "secret": "delete-after-backup-secret",
+                "type": "wecom_aibot",
+                "agent_id": "general",
+                "enabled": False,
+                "settings": {"group_policy": "private_only"},
             },
+        )
+        self.assertEqual(channel.status_code, 200, channel.text)
+        saved = owner.put(
+            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+            json={"credentials": {"bot_id": "bot", "secret": "delete-after-backup-secret"}},
         )
         self.assertEqual(saved.status_code, 200, saved.text)
         legacy_keychain = (
@@ -476,9 +834,9 @@ class OrganizationResourceApiTest(WebApiTestBase):
         with closing(sqlite3.connect(str(database_path))) as connection:
             row = connection.execute(
                 "SELECT organization_id, resource_id "
-                "FROM credential_metadata WHERE credential_id='model_service'"
+                "FROM credential_metadata WHERE resource_type='channels'"
             ).fetchone()
-        self.assertEqual(row, (org_id, "private_model"))
+        self.assertEqual(row, (org_id, channel.json()["channel_instance_id"]))
         self.assertNotIn(
             b"delete-after-backup-secret", database_path.read_bytes()
         )
@@ -507,7 +865,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
     def test_mutating_v2_requests_are_audited_without_request_body(self):
         org_id, owner = self._create_owner("audit")
         changed = owner.put(
-            "/api/v2/orgs/{}/resources/agents/audited".format(org_id),
+            "/api/v2/orgs/{}/agents/audited".format(org_id),
             headers={"x-request-id": "request-audit-1"},
             json={"payload": {"name": "审计助手"}},
         )

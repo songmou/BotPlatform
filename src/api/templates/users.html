@@ -2,18 +2,24 @@
 {% block title %}用户与权限 - BotPlatform{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/users.css">{% endblock %}
 {% block content %}
-<div class="page-container">
+<div class="page-container" id="users-page" data-initial-view="{{ initial_user_view|default('organizations') }}">
     <div class="page-header">
         <div class="page-header-row">
             <div>
-                <h2 id="users-title">机器人用户</h2>
-                <p class="page-desc" id="users-desc">管理通过机器人接入的终端用户（租户）</p>
+                <h2 id="users-title">组织管理</h2>
+                <p class="page-desc" id="users-desc">管理组织、存量未认领空间及其成员与接入身份</p>
             </div>
             <button id="create-admin-btn" class="btn-primary" style="display:none">+ 新建账号</button>
         </div>
     </div>
 
-    <div id="users-tab-tenants" class="users-tab">
+    <div class="tab-bar platform-access-tabs" role="tablist" aria-label="平台治理视图">
+        <button class="tab-btn" type="button" data-users-view="organizations">组织管理</button>
+        <button class="tab-btn" type="button" data-users-view="admins">管理员账号</button>
+        <button class="tab-btn" type="button" data-users-view="roles">角色权限</button>
+    </div>
+
+    <div id="users-tab-tenants" class="users-tab" style="display:none">
         <div id="tenant-empty" class="status-card" style="display:none">暂无机器人用户</div>
         <table class="data-table" id="tenant-table" style="display:none">
             <thead>

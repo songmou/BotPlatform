@@ -88,6 +88,13 @@ def get_resource_store(request: Request):
     return service
 
 
+def get_organization_control_store(request: Request):
+    service = getattr(request.app.state, "organization_control_store", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="组织运行配置服务不可用")
+    return service
+
+
 def get_credential_service(request: Request):
     service = getattr(request.app.state, "credential_service", None)
     if service is None:

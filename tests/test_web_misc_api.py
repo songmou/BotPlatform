@@ -30,7 +30,7 @@ class AuthMeApiTest(WebApiTestBase):
 
 
 class RemainingPagesTest(WebApiTestBase):
-    PAGES = ["/schedules", "/plugins", "/docs", "/knowledge"]
+    PAGES = ["/schedules", "/plugins", "/docs", "/platform/knowledge", "/platform/drive"]
 
     def test_pages_render_for_admin(self):
         for page in self.PAGES:
@@ -47,24 +47,35 @@ class RemainingPagesTest(WebApiTestBase):
             self.assertEqual(response.status_code, 302, page)
             self.assertTrue(response.headers["location"].startswith("/login"))
 
-    def test_schedule_page_separates_task_types_into_tabs(self):
+    def test_schedule_page_uses_url_scoped_organization_module(self):
         response = self.client.get("/schedules")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertIn('data-schedule-tab="tasks"', response.text)
-        self.assertIn('data-schedule-tab="automation"', response.text)
-        self.assertIn('data-schedule-pane="tasks"', response.text)
-        self.assertIn('data-schedule-pane="automation"', response.text)
-        self.assertIn("initScheduleTabs()", response.text)
+        self.assertIn('data-module="schedules"', response.text)
+        self.assertIn('id="organization-page-switch"', response.text)
+        self.assertNotIn('id="organization-switch"', response.text)
 
-    def test_tenant_selects_use_shared_control_style(self):
-        pages = {
-            "/schedules": 'id="script-schedule-tenant" class="tenant-select"',
-            "/scripts": 'id="script-run-tenant" class="tenant-select"',
-            "/knowledge": 'id="knowledge-tenant" class="tenant-select"',
-            "/drive": 'id="drive-tenant" class="drive-select tenant-select"',
-            "/static/js/scripts.js": 'id="run-tenant" class="tenant-select"',
-        }
-        for page, marker in pages.items():
+    def test_organization_pages_share_page_local_picker(self):
+        for page in (
+            "/organization/schedules",
+            "/organization/knowledge",
+            "/organization/drive",
+        ):
             response = self.client.get(page)
             self.assertEqual(response.status_code, 200, page)
-            self.assertIn(marker, response.text, page)
+            self.assertIn('id="organization-page-switch"', response.text, page)
+        knowledge = self.client.get("/organization/knowledge")
+        self.assertIn('id="knowledge-page" data-resource-mode="organization"', knowledge.text)
+        self.assertIn("组织知识", knowledge.text)
+        drive = self.client.get("/organization/drive")
+        self.assertIn('id="drive-page" data-resource-mode="organization"', drive.text)
+        self.assertIn("组织文件", drive.text)
+        platform = self.client.get("/scripts")
+        self.assertNotIn('id="organization-page-switch"', platform.text)
+
+    def test_legacy_content_urls_are_role_aware(self):
+        knowledge = self.client.get("/knowledge", follow_redirects=False)
+        self.assertEqual(knowledge.status_code, 308)
+        self.assertEqual(knowledge.headers["location"], "/platform/knowledge")
+        drive = self.client.get("/drive", follow_redirects=False)
+        self.assertEqual(drive.status_code, 308)
+        self.assertEqual(drive.headers["location"], "/platform/drive")

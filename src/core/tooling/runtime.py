@@ -182,6 +182,20 @@ class ToolRuntime:
     def reload_tool_states(self, states: Dict[str, Dict[str, Any]]) -> None:
         self._tool_states = states
 
+    def reload_config(self, config: ToolConfig) -> None:
+        """Atomically replace the platform tool policy for new bindings."""
+        roots = [Path(item).resolve() for item in config.allowed_roots]
+        default_directory = Path(config.default_working_directory).resolve()
+        runner = CommandRunner(
+            config,
+            self.resolve_path,
+            sandbox_available=self._sandbox_available,
+        )
+        self.base_config = config
+        self._default_roots = roots
+        self._default_directory = default_directory
+        self._default_command_runner = runner
+
     def bind_tenant(self, tenant: TenantContext) -> None:
         """Fail-closed binding of all filesystem and script tools to one tenant."""
         if self.tenant_registry is None:

@@ -151,10 +151,10 @@ class OrganizationStore:
                 created_at = str(item.get("created_at") or timestamp)
                 updated_at = str(item.get("updated_at") or created_at)
                 inserted = connection.execute(
-                    "INSERT OR IGNORE INTO web_conversations("
-                    "conversation_id, organization_id, user_id, title, "
+                    "INSERT OR IGNORE INTO organization_conversations("
+                    "conversation_id, organization_id, creator_user_id, source, title, "
                     "created_at, updated_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    ") VALUES (?, ?, ?, 'web', ?, ?, ?)",
                     (
                         conversation_id,
                         organization_id,
@@ -175,9 +175,7 @@ class OrganizationStore:
                 if source is None:
                     continue
                 source_id = str(source["tenant_id"])
-                session_key = "web:{}:{}".format(
-                    owner_user_id, conversation_id
-                )
+                session_key = "organization:{}".format(conversation_id)
                 connection.execute(
                     "INSERT INTO conversation_context_messages("
                     "tenant_id, role, content, created_at, session_key, user_id"
@@ -562,14 +560,6 @@ class OrganizationStore:
                 (timestamp, user.user_id, str(invitation["invitation_id"])),
             )
             connection.execute(
-                "INSERT INTO user_organization_preferences("
-                "user_id, active_organization_id, updated_at"
-                ") VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
-                "active_organization_id=excluded.active_organization_id, "
-                "updated_at=excluded.updated_at",
-                (user.user_id, organization_id, timestamp),
-            )
-            connection.execute(
                 "UPDATE channel_identities SET user_id=?, "
                 "active_organization_id=? WHERE tenant_id=?",
                 (user.user_id, organization_id, organization_id),
@@ -604,9 +594,9 @@ class OrganizationStore:
     ) -> str:
         """Return an active organization, creating a private debug one if needed."""
         self.ensure_user(user_id, username)
-        active = self.active_organization(user_id)
-        if active:
-            return active
+        choices = self.list_for_user(user_id)
+        if choices:
+            return str(choices[0]["organization_id"])
         organization_id = str(uuid.uuid4())
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
@@ -643,25 +633,24 @@ class OrganizationStore:
                     timestamp,
                 ),
             )
-            connection.execute(
-                "INSERT INTO user_organization_preferences("
-                "user_id, active_organization_id, updated_at"
-                ") VALUES (?, ?, ?)",
-                (user_id, organization_id, timestamp),
-            )
         self.registry._initialize_tenant(self.registry.get(organization_id))
         return organization_id
 
     def list_conversations(
-        self, user_id: int, organization_id: str
+        self, user_id: int, organization_id: str, allow_delegation: bool = False
     ) -> List[Dict[str, Any]]:
-        self.membership(user_id, organization_id)
+        if not allow_delegation:
+            self.membership(user_id, organization_id)
+        else:
+            self.get(organization_id)
         with self.database.read() as connection:
             rows = connection.execute(
                 "SELECT conversation_id AS id, title, organization_id, "
-                "created_at, updated_at FROM web_conversations "
-                "WHERE user_id=? AND organization_id=? ORDER BY updated_at DESC",
-                (user_id, organization_id),
+                "creator_user_id, source, channel_instance_id, "
+                "external_participant_ref, external_participant_name, status, "
+                "created_at, updated_at FROM organization_conversations "
+                "WHERE organization_id=? ORDER BY updated_at DESC",
+                (organization_id,),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -670,16 +659,20 @@ class OrganizationStore:
         user_id: int,
         organization_id: str,
         title: str = "新对话",
+        allow_delegation: bool = False,
     ) -> Dict[str, Any]:
-        self.membership(user_id, organization_id)
+        if allow_delegation:
+            self.get(organization_id)
+        else:
+            self.membership(user_id, organization_id)
         conversation_id = str(uuid.uuid4())
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "INSERT INTO web_conversations("
-                "conversation_id, organization_id, user_id, title, "
+                "INSERT INTO organization_conversations("
+                "conversation_id, organization_id, creator_user_id, source, title, "
                 "created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, 'web', ?, ?, ?)",
                 (
                     conversation_id,
                     organization_id,
@@ -689,53 +682,113 @@ class OrganizationStore:
                     timestamp,
                 ),
             )
-        return self.get_conversation(user_id, conversation_id)
+        return self.get_conversation(
+            user_id, conversation_id, allow_delegation=allow_delegation
+        )
 
     def get_conversation(
-        self, user_id: int, conversation_id: str
+        self, user_id: int, conversation_id: str, allow_delegation: bool = False
     ) -> Dict[str, Any]:
         with self.database.read() as connection:
             row = connection.execute(
-                "SELECT conversation_id AS id, title, organization_id, user_id, "
-                "created_at, updated_at FROM web_conversations "
-                "WHERE conversation_id=? AND user_id=?",
-                (conversation_id, user_id),
+                "SELECT conversation_id AS id, title, organization_id, "
+                "creator_user_id, source, channel_instance_id, "
+                "external_participant_ref, external_participant_name, status, "
+                "created_at, updated_at FROM organization_conversations "
+                "WHERE conversation_id=?",
+                (conversation_id,),
             ).fetchone()
         if row is None:
             raise OrganizationError("对话不存在")
-        self.membership(user_id, str(row["organization_id"]))
+        if not allow_delegation:
+            self.membership(user_id, str(row["organization_id"]))
+        else:
+            self.get(str(row["organization_id"]))
         return dict(row)
 
     def touch_conversation(
-        self, user_id: int, conversation_id: str, user_text: Optional[str]
+        self,
+        user_id: int,
+        conversation_id: str,
+        user_text: Optional[str],
+        allow_delegation: bool = False,
     ) -> None:
-        conversation = self.get_conversation(user_id, conversation_id)
+        conversation = self.get_conversation(
+            user_id, conversation_id, allow_delegation=allow_delegation
+        )
         title = str(conversation["title"] or "")
         if user_text and (not title or title == "新对话"):
             title = user_text.strip()[:20] or "新对话"
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE web_conversations SET title=?, updated_at=? "
-                "WHERE conversation_id=? AND user_id=?",
-                (title, _now(), conversation_id, user_id),
+                "UPDATE organization_conversations SET title=?, updated_at=? "
+                "WHERE conversation_id=?",
+                (title, _now(), conversation_id),
             )
 
-    def delete_conversation(self, user_id: int, conversation_id: str) -> Dict[str, Any]:
-        conversation = self.get_conversation(user_id, conversation_id)
+    def update_conversation(
+        self,
+        user_id: int,
+        conversation_id: str,
+        *,
+        title: Optional[str] = None,
+        status: Optional[str] = None,
+        allow_manage: bool = False,
+        allow_delegation: bool = False,
+    ) -> Dict[str, Any]:
+        conversation = self.get_conversation(
+            user_id, conversation_id, allow_delegation=allow_delegation
+        )
+        if not allow_manage and conversation.get("creator_user_id") != user_id:
+            raise OrganizationError("只有会话创建者或组织管理员可以修改会话")
+        if status is not None and status not in {"active", "archived"}:
+            raise OrganizationError("会话状态无效")
+        normalized_title = None
+        if title is not None:
+            normalized_title = title.strip()[:100]
+            if not normalized_title:
+                raise OrganizationError("会话名称不能为空")
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "DELETE FROM web_conversations WHERE conversation_id=? AND user_id=?",
-                (conversation_id, user_id),
+                "UPDATE organization_conversations SET "
+                "title=COALESCE(?, title), status=COALESCE(?, status), updated_at=? "
+                "WHERE conversation_id=?",
+                (normalized_title, status, _now(), conversation_id),
             )
-            session_key = "web:{}:{}".format(user_id, conversation_id)
+        return self.get_conversation(
+            user_id, conversation_id, allow_delegation=allow_delegation
+        )
+
+    def delete_conversation(
+        self,
+        user_id: int,
+        conversation_id: str,
+        allow_manage: bool = False,
+        allow_delegation: bool = False,
+    ) -> Dict[str, Any]:
+        conversation = self.get_conversation(
+            user_id, conversation_id, allow_delegation=allow_delegation
+        )
+        creator_user_id = conversation.get("creator_user_id")
+        if not allow_manage and creator_user_id != user_id:
+            raise OrganizationError("只有会话创建者或组织管理员可以删除会话")
+        with self.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM organization_conversations WHERE conversation_id=?",
+                (conversation_id,),
+            )
+            session_key = "organization:{}".format(conversation_id)
             connection.execute(
                 "DELETE FROM conversation_context_messages "
-                "WHERE tenant_id=? AND session_key=? AND user_id=?",
+                "WHERE tenant_id=? AND session_key=?",
                 (
                     str(conversation["organization_id"]),
                     session_key,
-                    user_id,
                 ),
+            )
+            connection.execute(
+                "DELETE FROM conversation_events WHERE tenant_id=? AND session_key=?",
+                (str(conversation["organization_id"]), session_key),
             )
         return conversation
 
@@ -755,33 +808,9 @@ class OrganizationStore:
         return dict(row)
 
     def active_organization(self, user_id: int) -> Optional[str]:
-        with self.database.read() as connection:
-            row = connection.execute(
-                "SELECT active_organization_id FROM user_organization_preferences "
-                "WHERE user_id=?",
-                (user_id,),
-            ).fetchone()
-        if row and row["active_organization_id"]:
-            organization_id = str(row["active_organization_id"])
-            try:
-                self.membership(user_id, organization_id)
-                return organization_id
-            except OrganizationError:
-                pass
+        """Return a deterministic fallback; Web selection is URL-scoped."""
         organizations = self.list_for_user(user_id)
         return str(organizations[0]["organization_id"]) if organizations else None
-
-    def set_active_organization(self, user_id: int, organization_id: str) -> None:
-        self.membership(user_id, organization_id)
-        with self.database.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO user_organization_preferences("
-                "user_id, active_organization_id, updated_at"
-                ") VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
-                "active_organization_id=excluded.active_organization_id, "
-                "updated_at=excluded.updated_at",
-                (user_id, organization_id, _now()),
-            )
 
     def list_members(self, organization_id: str) -> List[Dict[str, Any]]:
         self.get(organization_id)
@@ -873,12 +902,6 @@ class OrganizationStore:
                 (organization_id, member_user_id),
             )
             connection.execute(
-                "UPDATE user_organization_preferences "
-                "SET active_organization_id=?, updated_at=? WHERE user_id=? "
-                "AND active_organization_id=?",
-                (fallback, _now(), member_user_id, organization_id),
-            )
-            connection.execute(
                 "UPDATE channel_identities SET active_organization_id=?, "
                 "tenant_id=COALESCE(?, tenant_id) "
                 "WHERE user_id=? AND active_organization_id=?",
@@ -925,4 +948,3 @@ class OrganizationStore:
                     external_user_id,
                 ),
             )
-        self.set_active_organization(user_id, organization_id)

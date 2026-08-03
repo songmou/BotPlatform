@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 27
+LATEST_SCHEMA_VERSION = 29
 
 
 SCHEMA_V1 = r"""
@@ -1236,6 +1236,216 @@ CREATE INDEX ix_security_audit_actor_time
 """
 
 
+SCHEMA_V28 = r"""
+CREATE TABLE IF NOT EXISTS organization_conversations (
+    conversation_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    creator_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    source TEXT NOT NULL DEFAULT 'web'
+        CHECK (source IN ('web', 'channel', 'system')),
+    channel_instance_id TEXT,
+    external_participant_ref TEXT NOT NULL DEFAULT '',
+    external_participant_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '新对话',
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'archived')),
+    legacy_tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_org_conversations_time
+    ON organization_conversations(organization_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS ix_org_conversations_channel
+    ON organization_conversations(
+        organization_id, channel_instance_id, external_participant_ref
+    );
+
+CREATE TABLE IF NOT EXISTS organization_channels (
+    channel_instance_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    channel_type TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    migration_error TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (organization_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS ix_org_channels_enabled
+    ON organization_channels(enabled, organization_id);
+
+CREATE TABLE IF NOT EXISTS organization_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    schedule_key TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    crons_json TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT 'last_active_user'
+        CHECK (target IN ('last_active_user')),
+    action_json TEXT NOT NULL,
+    condition_json TEXT,
+    dependency_revision TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (organization_id, schedule_key)
+);
+CREATE INDEX IF NOT EXISTS ix_org_schedules_enabled
+    ON organization_schedules(enabled, organization_id);
+
+CREATE TABLE IF NOT EXISTS organization_agent_settings (
+    organization_id TEXT PRIMARY KEY
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    default_agent_id TEXT NOT NULL DEFAULT '',
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS organization_schedule_runs (
+    run_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL
+        REFERENCES organization_schedules(schedule_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (
+        status IN ('running', 'succeeded', 'failed', 'skipped')
+    ),
+    detail TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_org_schedule_runs_time
+    ON organization_schedule_runs(organization_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS organization_runtime_revisions (
+    organization_id TEXT PRIMARY KEY
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    channels_revision INTEGER NOT NULL DEFAULT 0,
+    schedules_revision INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS organization_data_migrations (
+    migration_key TEXT PRIMARY KEY,
+    detail TEXT NOT NULL DEFAULT '',
+    applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS organization_content_ownership (
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    resource_type TEXT NOT NULL CHECK (
+        resource_type IN ('drive_entry', 'knowledge_source')
+    ),
+    resource_key TEXT NOT NULL,
+    creator_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, resource_type, resource_key)
+);
+CREATE INDEX IF NOT EXISTS ix_org_content_creator
+    ON organization_content_ownership(
+        organization_id, creator_user_id, resource_type
+    );
+"""
+
+
+SCHEMA_V29 = r"""
+CREATE TABLE IF NOT EXISTS platform_resources (
+    resource_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    draft_revision INTEGER,
+    published_revision INTEGER,
+    active_revision INTEGER,
+    activation_state TEXT NOT NULL DEFAULT 'inactive' CHECK (
+        activation_state IN (
+            'inactive', 'active', 'restart_required', 'failed'
+        )
+    ),
+    activation_error TEXT NOT NULL DEFAULT '',
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (resource_type, resource_id)
+);
+CREATE INDEX IF NOT EXISTS ix_platform_resources_type
+    ON platform_resources(resource_type, resource_id);
+
+CREATE TABLE IF NOT EXISTS platform_resource_versions (
+    resource_pk INTEGER NOT NULL
+        REFERENCES platform_resources(resource_pk) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'draft' CHECK (
+        lifecycle IN ('draft', 'published', 'deprecated')
+    ),
+    payload_json TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'database' CHECK (
+        source IN ('bootstrap', 'database', 'migration')
+    ),
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    published_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    PRIMARY KEY (resource_pk, revision)
+);
+CREATE INDEX IF NOT EXISTS ix_platform_resource_versions_lifecycle
+    ON platform_resource_versions(resource_pk, lifecycle, revision DESC);
+
+CREATE TABLE IF NOT EXISTS organization_agents (
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    payload_json TEXT NOT NULL,
+    template_resource_id TEXT,
+    template_revision INTEGER,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS ix_organization_agents_enabled
+    ON organization_agents(organization_id, enabled, agent_id);
+
+CREATE TABLE IF NOT EXISTS platform_catalog_migrations (
+    migration_key TEXT PRIMARY KEY,
+    detail TEXT NOT NULL DEFAULT '',
+    applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS legacy_organization_credentials (
+    organization_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    user_id INTEGER,
+    credential_scope TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    secret_service TEXT NOT NULL,
+    secret_account TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, credential_id)
+);
+
+DROP TABLE IF EXISTS user_organization_preferences;
+"""
+
+
 # Versions applied as plain SQL scripts. Specialized versions with inspection
 # or permission backfills are dispatched through dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
@@ -1264,4 +1474,6 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     25: SCHEMA_V25,
     26: SCHEMA_V26,
     27: SCHEMA_V27,
+    28: SCHEMA_V28,
+    29: SCHEMA_V29,
 }

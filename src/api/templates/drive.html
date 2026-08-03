@@ -4,19 +4,24 @@
 <link rel="stylesheet" href="/static/css/drive.css">
 {% endblock %}
 {% block content %}
-<div class="page-container">
+<div class="page-container" id="drive-page" data-resource-mode="{{ resource_mode|default('platform-public') }}">
     <div class="page-header">
         <div class="page-header-row">
             <div>
                 <h2>文件管理</h2>
-                <p class="page-desc">管理公共文件区与租户独立文件区：支持多级文件夹、上传下载、重命名、移动与删除，所有操作留有审计日志</p>
+                <p class="page-desc">{% if resource_mode == 'organization' %}管理当前组织共享文件，并只读浏览平台公共文件{% else %}管理平台公共文件区：支持多级文件夹、上传下载、重命名、移动与删除，所有操作留有审计日志{% endif %}</p>
             </div>
+            <div id="drive-usage" class="text-muted" aria-live="polite"></div>
         </div>
     </div>
 
     <div class="tab-bar drive-tabs">
+        {% if resource_mode == 'organization' %}
+        <button class="tab-btn active" type="button" data-drive-tab="tenant">组织文件</button>
+        <button class="tab-btn" type="button" data-drive-tab="public">公共文件（只读）</button>
+        {% else %}
         <button class="tab-btn active" type="button" data-drive-tab="public">公共文件区</button>
-        <button class="tab-btn" type="button" data-drive-tab="tenant">租户文件区</button>
+        {% endif %}
         <button class="tab-btn" type="button" data-drive-tab="audit">操作日志</button>
     </div>
 
@@ -250,5 +255,5 @@
 <script src="/static/vendor/marked/marked.umd.js"></script>
 <script src="/static/vendor/dompurify/purify.min.js"></script>
 <script src="/static/js/drive.js"></script>
-<script>initDrive();</script>
+<script>runScopedModule("drive", initDrive);</script>
 {% endblock %}

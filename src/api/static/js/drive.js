@@ -1,9 +1,12 @@
 /* Network drive page: tabbed scopes, lazy folder tree, uploads and audit log. */
 
 function initDrive() {
+    var page = document.getElementById("drive-page");
+    var resourceMode = page ? page.getAttribute("data-resource-mode") : "platform-public";
+    var organizationMode = resourceMode === "organization";
     var state = {
-        scope: "public",
-        tenantId: "",
+        scope: organizationMode ? "tenant" : "public",
+        tenantId: organizationMode ? selectedOrganizationId() : "",
         path: "",
         auditOffset: 0,
         auditLimit: 20,
@@ -21,6 +24,36 @@ function initDrive() {
     var selection = {};
     var currentEntries = [];
 
+    function driveUrl(path) {
+        return organizationMode
+            ? organizationApi("/drive" + path)
+            : "/api/v2/platform/drive" + path;
+    }
+    function knowledgeUrl(path) {
+        return organizationMode
+            ? organizationApi("/knowledge" + path)
+            : "/api/v2/platform/knowledge" + path;
+    }
+    function readOnlyScope() {
+        return organizationMode && state.scope === "public";
+    }
+    function canManageDrive() {
+        return !readOnlyScope() && (
+            organizationMode ? canWriteOrganization() : hasPermission("drive.manage")
+        );
+    }
+    function canManageKnowledge() {
+        return !readOnlyScope() && (
+            organizationMode ? canWriteOrganization() : hasPermission("knowledge.manage")
+        );
+    }
+    function updateWritableState() {
+        document.querySelectorAll("[data-manage='1']").forEach(function (element) {
+            element.style.display = canManageDrive() ? "" : "none";
+        });
+        updateBatchBar();
+    }
+
     function query(params) {
         var pairs = [];
         Object.keys(params).forEach(function (key) {
@@ -32,7 +65,12 @@ function initDrive() {
     }
 
     function scopeParams() {
-        return { scope: state.scope, tenant_id: state.scope === "tenant" ? state.tenantId : "" };
+        return {
+            scope: organizationMode
+                ? (state.scope === "public" ? "public" : "organization")
+                : "public",
+            tenant_id: state.scope === "tenant" ? state.tenantId : ""
+        };
     }
 
     function handleError(response) {
@@ -56,6 +94,21 @@ function initDrive() {
     function formatTime(seconds) {
         if (!seconds) return "—";
         return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function loadUsage() {
+        return fetch(driveUrl("/usage") + query(scopeParams()))
+            .then(function (response) {
+                return response.ok ? response.json() : handleError(response);
+            })
+            .then(function (usage) {
+                document.getElementById("drive-usage").textContent =
+                    Number(usage.file_count || 0) + " 个文件 · " +
+                    formatBytes(Number(usage.total_bytes || 0));
+            })
+            .catch(function () {
+                document.getElementById("drive-usage").textContent = "";
+            });
     }
 
     function parentPath(path) {
@@ -104,7 +157,7 @@ function initDrive() {
     function fetchFolders(path) {
         var params = scopeParams();
         params.path = path;
-        return fetch("/api/drive/entries" + query(params))
+        return fetch(driveUrl("/entries") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (listing) {
                 return listing.entries.filter(function (entry) { return entry.type === "folder"; });
@@ -262,18 +315,9 @@ function initDrive() {
     /* ---- tenants ---- */
 
     function loadTenants() {
-        return fetch("/api/drive/tenants")
-            .then(function (r) { return r.ok ? r.json() : handleError(r); })
-            .then(function (items) {
-                tenantSelect.innerHTML = "";
-                items.forEach(function (item) {
-                    var option = document.createElement("option");
-                    option.value = item.tenant_id;
-                    option.textContent = item.user_id + "（" + item.bot_id + "）";
-                    tenantSelect.appendChild(option);
-                });
-                if (items.length) state.tenantId = items[0].tenant_id;
-            });
+        tenantSelect.innerHTML = '<option value="' + escapeHtml(state.tenantId) + '">当前组织</option>';
+        tenantSelect.style.display = "none";
+        return Promise.resolve();
     }
 
     /* ---- file browsing ---- */
@@ -281,7 +325,7 @@ function initDrive() {
     function renderBreadcrumbs(breadcrumbs) {
         breadcrumbsEl.innerHTML = "";
         var rootLink = document.createElement("a");
-        rootLink.textContent = state.scope === "public" ? "公共文件区" : "租户文件区";
+        rootLink.textContent = state.scope === "public" ? "公共文件区" : "组织文件";
         rootLink.addEventListener("click", function () { navigate(""); });
         breadcrumbsEl.appendChild(rootLink);
         breadcrumbs.forEach(function (crumb) {
@@ -307,7 +351,7 @@ function initDrive() {
             downloadBtn.addEventListener("click", function () { downloadEntry(entry); });
             cell.appendChild(downloadBtn);
         }
-        if (hasPermission("drive.manage")) {
+        if (canManageDrive()) {
             if (entry.type === "file" && isTextFile(entry.name)) {
                 var editBtn = document.createElement("button");
                 editBtn.className = "btn-secondary";
@@ -399,11 +443,11 @@ function initDrive() {
     function loadEntries() {
         var params = scopeParams();
         params.path = state.path;
-        return fetch("/api/drive/entries" + query(params))
+        return fetch(driveUrl("/entries") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (listing) {
-                if (!hasPermission("knowledge.read")) return listing;
-                return fetch("/api/knowledge/drive-links" + query(params))
+                if ((!organizationMode && !hasPermission("knowledge.read")) || readOnlyScope()) return listing;
+                return fetch(knowledgeUrl("/drive-links") + query({ path: state.path }))
                     .then(function (r) { return r.ok ? r.json() : { links: [] }; })
                     .then(function (data) {
                         var links = {};
@@ -417,7 +461,10 @@ function initDrive() {
                         return listing;
                     });
             })
-            .then(renderEntries)
+            .then(function (listing) {
+                renderEntries(listing);
+                return loadUsage();
+            })
             .catch(function (err) { showToast(err.message, "error"); });
     }
 
@@ -443,9 +490,9 @@ function initDrive() {
         document.getElementById("drive-batch-knowledge").disabled =
             !files.some(function (entry) {
                 return /\.(txt|md|markdown|pdf|docx|xlsx|pptx)$/i.test(entry.name);
-            }) || !hasPermission("knowledge.manage");
-        document.getElementById("drive-batch-move").disabled = !picked.length;
-        document.getElementById("drive-batch-delete").disabled = !picked.length;
+            }) || !canManageKnowledge();
+        document.getElementById("drive-batch-move").disabled = !picked.length || !canManageDrive();
+        document.getElementById("drive-batch-delete").disabled = !picked.length || !canManageDrive();
         selectAllBox.checked = currentEntries.length > 0 && picked.length === currentEntries.length;
     }
 
@@ -586,7 +633,7 @@ function initDrive() {
     function createFolder() {
         openInputModal("新建文件夹", "文件夹名称", "").then(function (name) {
             if (!name) return;
-            fetch("/api/drive/folders", {
+            fetch(driveUrl("/folders"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -613,7 +660,7 @@ function initDrive() {
         form.append("path", state.path);
         form.append("overwrite", overwrite ? "true" : "false");
         form.append("file", file);
-        return fetch("/api/drive/upload", { method: "POST", body: form })
+        return fetch(driveUrl("/upload"), { method: "POST", body: form })
             .then(function (r) {
                 if (r.ok) return r.json();
                 return r.json().catch(function () { return {}; }).then(function (body) {
@@ -847,7 +894,7 @@ function initDrive() {
         var fullPath = joinDrivePath(task.basePath, relativeDirectory);
         var parent = parentPath(fullPath);
         var name = uploadFilenameOf(fullPath);
-        return fetch("/api/drive/folders", {
+        return fetch(driveUrl("/folders"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -880,7 +927,7 @@ function initDrive() {
             form.append("file", item.file, uploadFilenameOf(item.relativePath));
 
             var xhr = new XMLHttpRequest();
-            xhr.open("POST", "/api/drive/upload");
+            xhr.open("POST", driveUrl("/upload"));
             xhr.upload.addEventListener("progress", function (event) {
                 if (event.lengthComputable) onProgress(Math.min(event.loaded, item.file.size));
             });
@@ -1094,7 +1141,7 @@ function initDrive() {
         form.append("path", dir);
         form.append("overwrite", overwrite ? "true" : "false");
         form.append("file", new File([content], filename, { type: "text/plain" }));
-        return fetch("/api/drive/upload", { method: "POST", body: form })
+        return fetch(driveUrl("/upload"), { method: "POST", body: form })
             .then(function (r) { return r.ok ? r.json() : handleError(r); });
     }
 
@@ -1102,7 +1149,7 @@ function initDrive() {
         var params = scopeParams();
         params.path = entry.path;
         params.max_bytes = EDIT_MAX_BYTES;
-        fetch("/api/drive/preview" + query(params))
+        fetch(driveUrl("/preview") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (result) {
                 if (result.truncated) {
@@ -1166,7 +1213,7 @@ function initDrive() {
     }
 
     function entryAction(action, entry, target) {
-        return fetch("/api/drive/entries", {
+        return fetch(driveUrl("/entries"), {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1230,7 +1277,7 @@ function initDrive() {
                 var params = scopeParams();
                 params.path = entry.path;
                 if (entry.type === "folder") params.recursive = "true";
-                return fetch("/api/drive/entries" + query(params), { method: "DELETE" })
+                return fetch(driveUrl("/entries") + query(params), { method: "DELETE" })
                     .then(function (r) { return r.ok ? r.json() : handleError(r); });
             }).then(function (failures) {
                 if (failures.length) {
@@ -1248,7 +1295,7 @@ function initDrive() {
         var params = scopeParams();
         params.path = entry.path;
         var anchor = document.createElement("a");
-        anchor.href = "/api/drive/download" + query(params);
+        anchor.href = driveUrl("/download") + query(params);
         anchor.download = entry.name;
         document.body.appendChild(anchor);
         anchor.click();
@@ -1320,7 +1367,7 @@ function initDrive() {
     function previewFile(entry) {
         var params = scopeParams();
         params.path = entry.path;
-        return fetch("/api/drive/preview" + query(params))
+        return fetch(driveUrl("/preview") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (result) {
                 var suffix = result.truncated ? "（内容过长，仅显示开头部分）" : "";
@@ -1343,7 +1390,7 @@ function initDrive() {
     function previewImageFile(entry) {
         var params = scopeParams();
         params.path = entry.path;
-        return fetch("/api/drive/download" + query(params))
+        return fetch(driveUrl("/download") + query(params))
             .then(function (r) { return r.ok ? r.blob() : handleError(r); })
             .then(function (blob) {
                 // Render via data URL: page CSP allows img-src data: but not blob:.
@@ -1374,7 +1421,7 @@ function initDrive() {
             var win = window.open("", "_blank");
             var params = scopeParams();
             params.path = entry.path;
-            fetch("/api/drive/download" + query(params))
+            fetch(driveUrl("/download") + query(params))
                 .then(function (r) { return r.ok ? r.blob() : handleError(r); })
                 .then(function (blob) {
                     win.location = URL.createObjectURL(
@@ -1402,7 +1449,7 @@ function initDrive() {
             limit: state.auditLimit,
             offset: state.auditOffset
         };
-        fetch("/api/drive/audit" + query(params))
+        fetch(driveUrl("/audit") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (result) {
                 state.auditTotal = result.total;
@@ -1446,7 +1493,8 @@ function initDrive() {
     function switchScope(scope) {
         state.scope = scope;
         state.path = "";
-        tenantSelect.style.display = scope === "tenant" ? "" : "none";
+        tenantSelect.style.display = "none";
+        updateWritableState();
         mainTree.reset().then(function () { mainTree.setSelected(""); });
         loadEntries();
     }
@@ -1541,7 +1589,7 @@ function initDrive() {
     }
 
     function dropUploadEnabled() {
-        return hasPermission("drive.manage") &&
+        return canManageDrive() &&
             filesPanel.style.display !== "none" &&
             !(state.scope === "tenant" && !state.tenantId);
     }
@@ -1592,10 +1640,10 @@ function initDrive() {
         if (!files.length) { showToast("请选择支持的文档文件", "error"); return; }
         var params = { scope: state.scope };
         if (state.scope === "tenant") params.tenant_id = state.tenantId;
-        fetch("/api/knowledge/categories" + query(params))
+        fetch(knowledgeUrl("/categories"))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (data) {
-                var categories = (data.categories || []).filter(function (item) {
+                var categories = (data.categories || data.items || []).filter(function (item) {
                     return item.scope === state.scope &&
                         (state.scope === "public" || item.tenant_id === state.tenantId);
                 });
@@ -1617,7 +1665,7 @@ function initDrive() {
             return entry.type === "file" &&
                 /\.(txt|md|markdown|pdf|docx|xlsx|pptx)$/i.test(entry.name);
         });
-        fetch("/api/knowledge/from-drive", {
+        fetch(knowledgeUrl("/from-drive"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1660,13 +1708,9 @@ function initDrive() {
         }
     });
 
-    loadMe()
+    (window.BP_CONTEXT_READY || loadMe())
         .then(function () {
-            if (!hasPermission("drive.manage")) {
-                document.querySelectorAll("[data-manage='1']").forEach(function (el) {
-                    el.style.display = "none";
-                });
-            }
+            updateWritableState();
             return loadTenants();
         })
         .then(function () {

@@ -214,6 +214,12 @@ class ChannelAddressStore:
 
     def resolve(self, message: InboundMessage) -> TenantContext:
         with self.registry.database.read() as connection:
+            fixed_channel = connection.execute(
+                "SELECT organization_id FROM organization_channels "
+                "WHERE channel_instance_id=? AND enabled=1",
+                (message.channel_id,),
+            ).fetchone()
+        with self.registry.database.read() as connection:
             row = connection.execute(
                 "SELECT identity_id, tenant_id, user_id, active_organization_id "
                 "FROM channel_identities "
@@ -221,8 +227,10 @@ class ChannelAddressStore:
                 (message.channel_id, message.account_id, message.sender_id),
             ).fetchone()
         if row is not None:
-            tenant_id = str(
-                row["active_organization_id"] or row["tenant_id"]
+            tenant_id = (
+                str(fixed_channel["organization_id"])
+                if fixed_channel is not None
+                else str(row["active_organization_id"] or row["tenant_id"])
             )
             member_user_id = (
                 int(row["user_id"]) if row["user_id"] is not None else None
@@ -232,13 +240,16 @@ class ChannelAddressStore:
                 try:
                     organizations.membership(member_user_id, tenant_id)
                 except ValueError:
-                    active = organizations.active_organization(member_user_id)
-                    if active:
-                        tenant_id = active
+                    if fixed_channel is not None:
+                        member_user_id = None
                     else:
-                        raise ChannelBindingError(
-                            "当前账号没有可用组织，请联系平台管理员邀请加入组织"
-                        )
+                        active = organizations.active_organization(member_user_id)
+                        if active:
+                            tenant_id = active
+                        else:
+                            raise ChannelBindingError(
+                                "当前账号没有可用组织，请联系平台管理员邀请加入组织"
+                            )
             tenant = replace(
                 self.registry.get(tenant_id),
                 member_user_id=member_user_id,
@@ -247,21 +258,36 @@ class ChannelAddressStore:
                         tenant_id, member_user_id
                     ).tenant_id
                     if member_user_id is not None
-                    else None
+                    else (
+                        str(row["tenant_id"])
+                        if str(row["tenant_id"]) != tenant_id
+                        else None
+                    )
                 ),
             )
         else:
-            legacy_bot_id = (
-                message.account_id
-                if message.platform == "wechat_ilink"
-                else "{}:{}".format(message.channel_id, message.account_id)
-            )
-            legacy_user_id = (
-                message.sender_id
-                if message.platform == "wechat_ilink"
-                else "{}:{}".format(message.platform, message.sender_id)
-            )
-            tenant = self.registry.resolve(legacy_bot_id, legacy_user_id)
+            if fixed_channel is not None:
+                organization_id = str(fixed_channel["organization_id"])
+                personal = self.registry.resolve(
+                    "organization-channel:{}".format(message.channel_id),
+                    "{}:{}".format(message.platform, message.sender_id),
+                )
+                tenant = replace(
+                    self.registry.get(organization_id),
+                    personal_tenant_id=personal.tenant_id,
+                )
+            else:
+                legacy_bot_id = (
+                    message.account_id
+                    if message.platform == "wechat_ilink"
+                    else "{}:{}".format(message.channel_id, message.account_id)
+                )
+                legacy_user_id = (
+                    message.sender_id
+                    if message.platform == "wechat_ilink"
+                    else "{}:{}".format(message.platform, message.sender_id)
+                )
+                tenant = self.registry.resolve(legacy_bot_id, legacy_user_id)
 
         seen_at = message.occurred_at or _iso(_now())
         identity_id = _stable_id(
@@ -274,22 +300,81 @@ class ChannelAddressStore:
             connection.execute(
                 "INSERT INTO channel_identities("
                 "identity_id, tenant_id, channel_id, platform, account_id, "
-                "external_user_id, created_at, last_seen_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "external_user_id, active_organization_id, created_at, last_seen_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(channel_id, account_id, external_user_id) DO UPDATE SET "
-                "tenant_id=excluded.tenant_id, last_seen_at=excluded.last_seen_at",
+                "tenant_id=excluded.tenant_id, "
+                "active_organization_id=COALESCE("
+                "excluded.active_organization_id, channel_identities.active_organization_id), "
+                "last_seen_at=excluded.last_seen_at",
                 (
                     identity_id,
-                    tenant.tenant_id,
+                    tenant.personal_tenant_id or tenant.tenant_id,
                     message.channel_id,
                     message.platform,
                     message.account_id,
                     message.sender_id,
+                    (
+                        tenant.tenant_id
+                        if tenant.personal_tenant_id is not None
+                        else None
+                    ),
                     seen_at,
                     seen_at,
                 ),
             )
         return tenant
+
+    def ensure_organization_conversation(
+        self, message: InboundMessage, tenant: TenantContext
+    ) -> Optional[str]:
+        """Create the shared conversation projection for an organization channel."""
+        if not tenant.personal_tenant_id:
+            return None
+        with self.registry.database.read() as connection:
+            channel = connection.execute(
+                "SELECT channel_instance_id FROM organization_channels "
+                "WHERE channel_instance_id=? AND organization_id=?",
+                (message.channel_id, tenant.tenant_id),
+            ).fetchone()
+        if channel is None:
+            return None
+        identity_id = _stable_id(
+            "identity", message.channel_id, message.account_id, message.sender_id
+        )
+        conversation_ref = (
+            message.conversation_id
+            if message.conversation_type != "direct"
+            else message.sender_id
+        )
+        conversation_id = _stable_id(
+            "conversation",
+            tenant.tenant_id,
+            message.channel_id,
+            message.conversation_type,
+            conversation_ref,
+        )
+        timestamp = message.occurred_at or _iso(_now())
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO organization_conversations("
+                "conversation_id, organization_id, source, channel_instance_id, "
+                "external_participant_ref, external_participant_name, title, "
+                "created_at, updated_at) VALUES (?, ?, 'channel', ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET "
+                "status='active', updated_at=excluded.updated_at",
+                (
+                    conversation_id,
+                    tenant.tenant_id,
+                    message.channel_id,
+                    identity_id,
+                    message.sender_id,
+                    "{} · {}".format(message.platform, message.sender_id),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return conversation_id
 
     def organization_choices(self, message: InboundMessage) -> List[Dict[str, Any]]:
         organizations = getattr(self.registry, "organization_store", None)
@@ -308,6 +393,13 @@ class ChannelAddressStore:
         organizations = getattr(self.registry, "organization_store", None)
         if organizations is None:
             raise ChannelBindingError("当前未启用组织切换")
+        with self.registry.database.read() as connection:
+            fixed = connection.execute(
+                "SELECT 1 FROM organization_channels WHERE channel_instance_id=?",
+                (message.channel_id,),
+            ).fetchone()
+        if fixed is not None:
+            raise ChannelBindingError("组织专属渠道固定路由到所属组织，不能切换组织")
         choices = self.organization_choices(message)
         normalized = organization_ref.strip()
         matches = [
@@ -364,11 +456,14 @@ class ChannelAddressStore:
     ) -> DeliveryEndpoint:
         with self.registry.database.read() as connection:
             identity_row = connection.execute(
-                "SELECT identity_id, tenant_id FROM channel_identities "
+                "SELECT identity_id, tenant_id, active_organization_id "
+                "FROM channel_identities "
                 "WHERE channel_id=? AND account_id=? AND external_user_id=?",
                 (message.channel_id, message.account_id, message.sender_id),
             ).fetchone()
-        if identity_row is None or str(identity_row["tenant_id"]) != tenant.tenant_id:
+        if identity_row is None or str(
+            identity_row["active_organization_id"] or identity_row["tenant_id"]
+        ) != tenant.tenant_id:
             raise ValueError("消息身份尚未解析或租户不匹配")
         identity_id = str(identity_row["identity_id"])
         endpoint = message.endpoint
@@ -503,6 +598,19 @@ class ChannelAddressStore:
             row = connection.execute(
                 "SELECT * FROM delivery_endpoints WHERE endpoint_id=?",
                 (endpoint_id,),
+            ).fetchone()
+        return self._endpoint_from_row(row) if row is not None else None
+
+    def latest_endpoint_for_identity(
+        self, identity_id: str, channel_id: str
+    ) -> Optional[DeliveryEndpoint]:
+        """Return the latest active route for one external channel identity."""
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT * FROM delivery_endpoints WHERE identity_id=? "
+                "AND channel_id=? AND status='active' "
+                "ORDER BY last_seen_at DESC, endpoint_id DESC LIMIT 1",
+                (identity_id, channel_id),
             ).fetchone()
         return self._endpoint_from_row(row) if row is not None else None
 

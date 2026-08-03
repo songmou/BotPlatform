@@ -79,6 +79,8 @@
 
 .plugin-search input[type="search"] {
     min-width: 0;
+    min-height: 0;
+    padding: 0;
     font-family: var(--font);
 }
 
@@ -97,7 +99,6 @@
     min-width: 126px;
 }
 
-.plugin-filter::after,
 .plugin-setting-select:not(.plugin-setting-select-multiple)::after {
     content: "";
     position: absolute;
@@ -397,6 +398,7 @@
     min-height: 40px;
     padding: 9px 36px 9px 12px;
     appearance: none;
+    background-image: none;
     background: var(--bg);
     cursor: pointer;
     transition: border-color 0.15s ease, box-shadow 0.15s ease;

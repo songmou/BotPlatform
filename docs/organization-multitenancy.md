@@ -10,22 +10,26 @@
 - Owner、Admin、Member 控制 `/api/v2/orgs/{organization_id}/*`。
 - 每个组织接口都根据登录账号验证 URL 中的组织，不接受请求体覆盖组织编号。
 - Owner 才能转移所有权；Owner 不能在未转移所有权前退出组织。
-- 公共资源只能由平台管理员发布，组织成员可以共建组织资源和覆盖公共资源。
-- 插件包、本机脚本、工具引擎等可信代码只能由平台发布；组织只能启停或覆盖。
-- 组织 MCP 只允许远程 HTTPS Streamable HTTP，资源 JSON 禁止保存密钥字段。
+- 公共资源只能由平台角色按权限发布。组织所有成员可以共建智能体、知识、文件、
+  非密钥渠道配置和定时任务；Owner/Admin 维护组织服务凭据、成员、预算与生命周期。
+- 插件包、本机脚本、工具引擎与 MCP 等能力只能由平台发布，组织不能覆盖或单独启停。
+- 组织可以新建智能体，或复制指定版本的平台智能体模板；复制后完全独立，不跟随模板升级。
+- 资源 JSON 禁止保存密钥字段；模型 Key、MCP 请求头和插件密钥继续保存在受限密钥存储。
 
 ## 资源解析
 
-`scoped_resources` 保存公共和组织资源，
-`organization_resource_overrides` 保存公共资源的组织级覆盖。有效配置顺序为：
+`platform_resources` 保存资源指针，`platform_resource_versions` 保存不可变版本。
+资源区分草稿、已发布和实际运行版本，并记录激活状态与失败原因。数据库是平台
+配置的唯一事实来源；`config/*.json` 只在首次启动且数据库不存在对应资源时导入，
+后续文件变化不会覆盖数据库版本。
 
-1. 组织自有资源；
-2. 公共资源的组织覆盖；
-3. 已发布的公共资源；
-4. 首次启动时从 `config/*.json` 写入的公共种子。
+组织资源不再使用通用覆盖模型。`organization_agents` 只保存组织自己的智能体及
+模板来源 ID/版本。模型、工具、Skill、插件工具和 MCP 始终引用当前已激活的平台
+目录；新引用不能选择弃用项，已有引用在迁移完成前可以继续使用弃用项。
 
-字段覆盖只保存差异。列表字段必须选择 `inherit`、`replace` 或 `disable`，
-恢复默认时删除覆盖记录，因此公共资源升级后未覆盖字段会继续继承。
+聊天模型、智能体模板、Skill、MCP 和工具策略发布后可热应用。热应用失败时运行时
+继续使用旧快照。嵌入/重排模型、插件包和脚本代码变更进入“等待重启”，重启前组织
+仍只看到旧运行版本。
 
 ## 成员私有数据
 
@@ -35,10 +39,11 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 `member-personal:<organization_id> + user_id` 对应的内部存储主体。内部主体不会在
 平台租户列表中展示。
 
-组织服务凭据与成员个人凭据只在 `credential_metadata` 保存归属、资源引用和
+消息渠道凭据与成员个人业务集成凭据只在 `credential_metadata` 保存归属、资源引用和
 外置密钥引用；密文值写入权限为 `0600` 的独立凭据存储，任何列表、详情、
-日志和审计响应都不会返回明文。Owner/Admin 可维护组织服务凭据，成员只能
-维护并查看自己的个人凭据；成员退出与组织注销会同步清理对应的外置密钥。
+日志和审计响应都不会返回明文。Owner/Admin 可维护渠道凭据，成员只能维护并
+查看自己的个人业务集成凭据；成员退出与组织注销会同步清理对应的外置密钥。
+历史组织级模型、插件与 MCP 凭据只保留只读迁移元数据，不参与运行。
 
 渠道命令：
 
@@ -76,11 +81,20 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 
 ## V2 接口
 
-- `/api/v2/me`：账号、成员关系和活动组织；
+- `/api/v2/me`：账号、平台权限和组织成员关系列表，不返回当前或所选组织；
 - `/api/v2/catalog/*`：可见公共目录；
-- `/api/v2/orgs/{organization_id}/*`：资源、成员、对话、知识、文件、凭据和审计；
-- `/api/v2/platform/*`：组织管理、公共资源发布和平台审计。
+- `/api/v2/platform/knowledge/*`、`/api/v2/platform/drive/*`：平台公共知识与公共文件管理；
+- `/api/v2/orgs/{organization_id}/agents|channels|schedules|knowledge|drive|members|analytics|audit`：类型化组织能力；
+- `/api/v2/platform/catalog/{type}/{id}/draft|publish|rollback|activation`：平台目录版本与激活；
+- `/api/v2/platform/*`：组织管理和平台审计。
 
-租户控制台入口为 `/app`；平台后台兼容入口为 `/admin`。平台管理员可在
-`/users#organizations` 查看所有组织与自动迁移的存量个人空间，并完成组织
-生命周期管理；组织成员继续在 `/app` 管理其所属组织。
+统一控制台首页 `/` 对平台管理员进入 `/platform`，组织账号进入
+`/organization/overview`。平台页面位于 `/platform/*`，不读取任何组织上下文；
+组织页面位于 `/organization/<module>?organization_id=<uuid>`。只有一个组织时前端
+自动补全 URL；多个组织且 URL 未指定时显示选择状态，不会静默选择首项。无权访问
+URL 中的组织直接返回 403。旧页面地址只进行 308 跳转。
+
+知识库与文件管理采用双入口：`/platform/knowledge`、`/platform/drive` 管理公共内容，
+`/organization/knowledge`、`/organization/drive` 管理 URL 指定组织的共享内容。
+组织成员可在组织页面浏览公共知识和公共文件，但公共内容始终只读；平台管理员需要
+代管具体组织时也必须通过带 `organization_id` 的组织页面进入并留下代管审计。

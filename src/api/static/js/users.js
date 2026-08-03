@@ -4,7 +4,7 @@ function initUsers() {
     var roleCache = [];
     var VIEWS = {
         tenants: { title: "机器人用户", desc: "管理通过机器人接入的终端用户（租户）" },
-        organizations: { title: "组织管理", desc: "管理组织、存量个人空间及其成员关系" },
+        organizations: { title: "组织管理", desc: "管理组织、存量未认领空间及其成员与接入身份" },
         admins: { title: "管理员账号", desc: "管理可登录面板的管理员账号" },
         roles: { title: "角色权限", desc: "查看与编辑各角色的权限" }
     };
@@ -20,6 +20,10 @@ function initUsers() {
         });
         document.querySelectorAll(".nav-sub-item[data-tab]").forEach(function (a) {
             a.classList.toggle("active", a.getAttribute("data-tab") === name);
+        });
+        document.querySelectorAll("[data-users-view]").forEach(function (button) {
+            button.classList.toggle("active", button.getAttribute("data-users-view") === name);
+            button.setAttribute("aria-selected", button.getAttribute("data-users-view") === name ? "true" : "false");
         });
         var titleEl = document.getElementById("users-title");
         var descEl = document.getElementById("users-desc");
@@ -38,10 +42,17 @@ function initUsers() {
     }
 
     function currentView() {
-        return (window.location.hash || "").replace("#", "") || "tenants";
+        var page = document.getElementById("users-page");
+        return (window.location.hash || "").replace("#", "") ||
+            (page && page.getAttribute("data-initial-view")) || "organizations";
     }
 
     window.addEventListener("hashchange", function () { activate(currentView()); });
+    document.querySelectorAll("[data-users-view]").forEach(function (button) {
+        button.addEventListener("click", function () {
+            window.location.hash = button.getAttribute("data-users-view");
+        });
+    });
 
     function fmtTime(value) {
         if (!value) return "-";
@@ -239,7 +250,7 @@ function initUsers() {
                 fetch("/api/admins/" + rid + "/password", { method: "POST" })
                     .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
                     .then(function (data) {
-                        window.prompt("新密码（仅显示一次，请立即复制）：", data.new_password);
+                        showNoticeDialog("新密码（仅显示一次，请立即复制）", data.new_password);
                     })
                     .catch(function () { showToast("重置失败", "error"); });
             });
@@ -403,19 +414,22 @@ function initUsers() {
             .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
             .then(function (data) {
                 var members = data.items || [];
-                if (!members.length) {
-                    body.innerHTML = '<div class="tenant-section-empty">暂无成员</div>';
-                    return;
-                }
-                body.innerHTML = '<div class="organization-members"><ul class="tenant-detail-list">' +
-                    members.map(function (member) {
+                var identities = data.identities || [];
+                var memberHtml = members.length ? '<ul class="tenant-detail-list">' + members.map(function (member) {
                         var name = member.display_name || member.legacy_subject_id || "待认领成员";
                         var identity = member.user_id ? "账号 ID：" + member.user_id : "渠道身份：" + (member.legacy_subject_id || "-");
                         return "<li><div class=\"organization-member-meta\"><strong>" + escapeHtml(name) +
                             "</strong><span>" + escapeHtml(identity) + "</span></div>" +
                             '<span class="badge ' + (member.status === "active" ? "badge-success" : "badge-muted") + '">' +
                             escapeHtml(member.role) + " · " + escapeHtml(member.status) + "</span></li>";
-                    }).join("") + "</ul></div>";
+                    }).join("") + "</ul>" : '<div class="tenant-section-empty">暂无成员</div>';
+                var identityHtml = identities.length ? '<ul class="tenant-detail-list">' + identities.map(function (identity) {
+                    return '<li><div class="organization-member-meta"><strong>' + escapeHtml(identity.platform) +
+                        '</strong><span>' + escapeHtml(identity.external_user_id) + '</span></div>' +
+                        '<span class="badge badge-muted">' + escapeHtml(identity.channel_id) + '</span></li>';
+                }).join("") + '</ul>' : '<div class="tenant-section-empty">暂无接入身份</div>';
+                body.innerHTML = '<div class="organization-members"><h4>成员</h4>' + memberHtml +
+                    '<h4>接入身份与历史身份</h4>' + identityHtml + '</div>';
             })
             .catch(function () {
                 body.innerHTML = '<div class="tenant-detail-error">加载组织成员失败，请稍后重试</div>';
@@ -449,7 +463,7 @@ function initUsers() {
         }).then(function (data) {
             closeOrganizationModal();
             loadOrganizations();
-            window.prompt("组织已创建。请立即复制并安全发送以下所有者邀请信息：", organizationInvitationText(data.owner_invitation_token));
+            showNoticeDialog("组织已创建，请安全发送以下所有者邀请信息", organizationInvitationText(data.owner_invitation_token));
         }).catch(function (error) { showToast(error.message || "创建组织失败", "error"); });
     });
 
@@ -463,13 +477,14 @@ function initUsers() {
             return;
         }
         if (button.classList.contains("organization-rename")) {
-            var name = window.prompt("新的组织名称", item ? item.name : "");
-            if (!name || name.trim() === (item ? item.name : "")) return;
-            fetch("/api/v2/platform/organizations/" + encodeURIComponent(organizationId), {
-                method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: name.trim()})
+            showFormDialog({title: "修改组织名称", fields: [{name: "name", label: "组织名称", value: item ? item.name : "", required: true}]}).then(function (value) {
+            if (!value || value.name === (item ? item.name : "")) return null;
+            return fetch("/api/v2/platform/organizations/" + encodeURIComponent(organizationId), {
+                method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: value.name})
             }).then(function (r) {
                 if (!r.ok) return r.json().then(function (data) { throw new Error(data.detail || "改名失败"); });
                 showToast("组织名称已更新", "success"); loadOrganizations();
+            });
             }).catch(function (error) { showToast(error.message || "改名失败", "error"); });
             return;
         }
@@ -488,25 +503,26 @@ function initUsers() {
                 .then(function (r) {
                     return r.ok ? r.json() : r.json().then(function (data) { throw new Error(data.detail || "生成认领码失败"); });
                 }).then(function (data) {
-                    window.prompt("请立即复制并安全发送以下认领信息：", organizationInvitationText(data.claim_token));
+                    showNoticeDialog("请立即复制并安全发送以下认领信息", organizationInvitationText(data.claim_token));
                 }).catch(function (error) { showToast(error.message || "生成认领码失败", "error"); });
             return;
         }
         if (button.classList.contains("organization-delete")) {
             showConfirm("删除组织会先创建数据备份，再清理组织数据及凭据；此操作不可撤销。确定继续？").then(function (ok) {
                 if (!ok) return;
-                var confirmation = window.prompt("请输入组织名称“" + (item ? item.name : "") + "”以确认删除");
-                if (confirmation !== (item ? item.name : "")) {
+                return showFormDialog({title: "确认删除组织", fields: [{name: "confirmation", label: "请输入组织名称“" + (item ? item.name : "") + "”", required: true}]}).then(function (value) {
+                if (!value || value.confirmation !== (item ? item.name : "")) {
                     showToast("组织名称不匹配，已取消删除", "info");
-                    return;
+                    return null;
                 }
-                fetch("/api/v2/orgs/" + encodeURIComponent(organizationId), {method: "DELETE"})
+                return fetch("/api/v2/orgs/" + encodeURIComponent(organizationId), {method: "DELETE"})
                     .then(function (r) {
                         return r.ok ? r.json() : r.json().then(function (data) { throw new Error(data.detail || "删除失败"); });
                     }).then(function (data) {
                         showToast("组织已删除，备份编号：" + data.backup_id, "success");
                         loadOrganizations();
-                    }).catch(function (error) { showToast(error.message || "删除组织失败", "error"); });
+                    });
+                }).catch(function (error) { showToast(error.message || "删除组织失败", "error"); });
             });
         }
     });
@@ -626,7 +642,7 @@ function initUsers() {
 
     /* --- bootstrap --- */
 
-    loadMe().then(function () {
+    (window.BP_CONTEXT_READY || loadMe()).then(function () {
         activate(currentView());
     }).catch(function () {
         window.location.href = "/login";
