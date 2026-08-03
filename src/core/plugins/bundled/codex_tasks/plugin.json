@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "id": "codex_tasks",
+  "name": "Codex 开发任务",
+  "version": "2.0.0",
+  "description": "在项目白名单中创建、查询、继续和中止隔离的 Codex 后台任务。",
+  "entrypoint": "src.core.plugins.codex_tasks:CodexTasksPlugin",
+  "core_api": "1",
+  "icon": "C",
+  "color": "#10a37f",
+  "dependencies": [
+    {"distribution": "openai-codex", "import": "openai_codex", "version": "==0.144.4"}
+  ],
+  "services": ["tenant_storage", "project_paths", "background_executor"],
+  "instructions": "用户明确要求管理 Codex 后台开发任务时使用 codex_* 工具。创建、继续和中止会由平台请求确认；任务需要额外权限或补充信息时会安全失败。",
+  "settings_aliases": {
+    "admin_tenant_ids": "allowed_tenant_ids"
+  },
+  "discard_unknown_settings": true,
+  "tools": {
+    "codex_list_tasks": {
+      "description": "列出当前用户通过本插件创建的 Codex 开发任务。",
+      "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["all", "active", "completed", "failed", "interrupted"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "additionalProperties": false}
+    },
+    "codex_get_task": {
+      "description": "按任务编号查看 Codex 开发任务状态、结果摘要或错误。",
+      "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"], "additionalProperties": false}
+    },
+    "codex_create_task": {
+      "description": "在预先配置的项目中创建并后台执行新的 Codex 开发任务。",
+      "approval": "required",
+      "parameters": {"type": "object", "properties": {"title": {"type": "string", "minLength": 1, "maxLength": 100}, "instruction": {"type": "string", "minLength": 1, "maxLength": 4000}, "project_id": {"type": "string"}}, "required": ["title", "instruction"], "additionalProperties": false}
+    },
+    "codex_continue_task": {
+      "description": "继续一个已结束或中断的插件自有 Codex 开发任务。",
+      "approval": "required",
+      "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}, "instruction": {"type": "string", "minLength": 1, "maxLength": 4000}}, "required": ["task_id", "instruction"], "additionalProperties": false}
+    },
+    "codex_cancel_task": {
+      "description": "中止当前用户通过本插件启动的 Codex 开发任务。",
+      "approval": "required",
+      "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"], "additionalProperties": false}
+    }
+  },
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "allowed_tenant_ids": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "uniqueItems": true,
+        "x-ui": "tenant-list",
+        "title": "允许使用的租户",
+        "description": "只有选中的租户可以创建和管理 Codex 开发任务。"
+      },
+      "projects": {
+        "type": "array",
+        "minItems": 1,
+        "x-unique-key": "id",
+        "title": "可用项目",
+        "description": "配置允许 Codex 任务访问的项目编号与本机目录。",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+            "path": {"type": "string", "minLength": 1, "x-ui": "path"}
+          },
+          "required": ["id", "path"],
+          "additionalProperties": false
+        }
+      },
+      "default_project": {
+        "type": "string",
+        "minLength": 1,
+        "title": "默认项目",
+        "description": "创建任务时未指定项目所使用的项目编号。"
+      },
+      "max_concurrent_tasks": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4,
+        "title": "最大并发任务数",
+        "description": "平台允许同时运行的 Codex 后台任务数量。"
+      }
+    },
+    "required": ["allowed_tenant_ids", "projects", "default_project"],
+    "additionalProperties": false,
+    "x-references": [
+      {"field": "default_project", "array": "projects", "key": "id"}
+    ]
+  }
+}

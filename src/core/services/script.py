@@ -305,6 +305,7 @@ class ScriptService:
     def _integration_id(script_id: str) -> Optional[str]:
         return {
             "ctsehr_check": "ctsehr",
+            "ctsoa_check": "ctsoa",
             "autogen_monitor": "autogen",
         }.get(script_id)
 

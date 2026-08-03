@@ -70,6 +70,7 @@ class ModelAnalyticsStore:
         *,
         run_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        user_id: Optional[int] = None,
         source: str = "internal",
         agent_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
@@ -80,11 +81,12 @@ class ModelAnalyticsStore:
         with self.registry.database.transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO model_runs("
-                "run_id, tenant_id, source, agent_id, conversation_id, status, started_at"
-                ") VALUES (?, ?, ?, ?, ?, 'running', ?)",
+                "run_id, tenant_id, user_id, source, agent_id, conversation_id, "
+                "status, started_at) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
                 (
                     identifier,
                     tenant_id,
+                    user_id,
                     source,
                     agent_id,
                     conversation_id,
@@ -140,11 +142,12 @@ class ModelAnalyticsStore:
         with self.registry.database.transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO model_runs("
-                "run_id, tenant_id, source, agent_id, conversation_id, status, started_at"
-                ") VALUES (?, ?, ?, ?, ?, 'running', ?)",
+                "run_id, tenant_id, user_id, source, agent_id, conversation_id, "
+                "status, started_at) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
                 (
                     run_id,
                     context.tenant_id,
+                    context.user_id,
                     context.source
                     if context.source in {"wechat", "web", "schedule", "internal"}
                     else "internal",

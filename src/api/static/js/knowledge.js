@@ -1,6 +1,9 @@
 /* Scoped knowledge library management page. */
 
 function initKnowledge() {
+    var page = document.getElementById("knowledge-page");
+    var resourceMode = page ? page.getAttribute("data-resource-mode") : "platform-public";
+    var organizationMode = resourceMode === "organization";
     var state = {
         tenants: [], categories: [], sources: [], selected: {}, drivePath: "",
         driveSelected: {}, editingCategory: null, embeddingEnabled: true
@@ -13,6 +16,33 @@ function initKnowledge() {
     var searchResults = document.getElementById("knowledge-search-results");
     var libraryPanel = document.getElementById("knowledge-library-panel");
     var embeddingPanel = document.getElementById("knowledge-embedding-panel");
+
+    function knowledgeUrl(path) {
+        return organizationMode
+            ? organizationApi("/knowledge" + path)
+            : "/api/v2/platform/knowledge" + path;
+    }
+    function driveUrl(path, scope) {
+        if (!organizationMode) return "/api/v2/platform/drive" + path;
+        var separator = path.indexOf("?") === -1 ? "?" : "&";
+        return organizationApi("/drive" + path) + separator +
+            "scope=" + encodeURIComponent(scope === "public" ? "public" : "organization");
+    }
+    function readOnlyScope() {
+        return organizationMode && scopeEl.value === "public";
+    }
+    function updateWritableState() {
+        var disabled = readOnlyScope();
+        [
+            "knowledge-category-add", "knowledge-category-edit", "knowledge-category-delete",
+            "knowledge-add-text-btn", "knowledge-from-drive-btn", "knowledge-upload-btn",
+            "knowledge-refresh-selected", "knowledge-move-selected", "knowledge-move-target",
+            "knowledge-delete-selected", "knowledge-reindex-btn"
+        ].forEach(function (id) {
+            var element = document.getElementById(id);
+            if (element) element.disabled = disabled;
+        });
+    }
 
     function apiError(response) {
         return response.json().catch(function () { return {}; }).then(function (data) {
@@ -33,7 +63,9 @@ function initKnowledge() {
         statusEl.style.display = message ? "" : "none";
         statusEl.textContent = message || "";
     }
-    function currentTenant() { return tenantEl.value || ""; }
+    function currentTenant() {
+        return organizationMode ? selectedOrganizationId() : (tenantEl.value || "");
+    }
     function currentCategoryId() { return categoryEl.value || ""; }
     function currentCategory() {
         return state.categories.find(function (item) {
@@ -73,6 +105,7 @@ function initKnowledge() {
         libraryPanel.style.display = "";
         embeddingPanel.style.display = "none";
         scopeEl.value = target;
+        updateWritableState();
         loadCategories();
     }
 
@@ -83,32 +116,29 @@ function initKnowledge() {
     });
 
     function loadTenants() {
-        return jsonFetch("/api/knowledge/tenants").then(function (items) {
-            state.tenants = items || [];
-            tenantEl.innerHTML = state.tenants.map(function (tenant) {
-                return '<option value="' + escapeHtml(tenant.tenant_id) + '">' +
-                    escapeHtml(tenant.bot_id + " / " + tenant.user_id +
-                    "（" + tenant.tenant_id.slice(0, 8) + "）") + "</option>";
-            }).join("");
-            if (!state.tenants.length) {
-                tenantEl.innerHTML = '<option value="">暂无租户</option>';
-            }
-            return loadCategories();
-        }).catch(function (err) { setStatus(err.message); });
+        state.tenants = organizationMode
+            ? [{ tenant_id: selectedOrganizationId() }]
+            : [];
+        tenantEl.innerHTML = organizationMode
+            ? '<option value="' + escapeHtml(selectedOrganizationId()) + '">当前组织</option>'
+            : '<option value="">公共范围</option>';
+        tenantEl.style.display = "none";
+        updateWritableState();
+        return loadCategories();
     }
 
     function updateEmbeddingNotice() {
         var notice = document.getElementById("knowledge-embedding-notice");
         var reindexBtn = document.getElementById("knowledge-reindex-btn");
         notice.style.display = state.embeddingEnabled ? "none" : "";
-        reindexBtn.disabled = !state.embeddingEnabled;
+        reindexBtn.disabled = !state.embeddingEnabled || readOnlyScope();
         reindexBtn.title = state.embeddingEnabled
             ? "" : "向量化服务未启用，无法补齐向量";
     }
 
     function loadCategories(preferred) {
         var scope = scopeEl.value;
-        tenantEl.style.display = scope === "tenant" ? "" : "none";
+        tenantEl.style.display = "none";
         if (scope === "tenant" && !state.tenants.length) {
             state.categories = [];
             categoryEl.innerHTML = '<option value="">暂无租户</option>';
@@ -116,14 +146,11 @@ function initKnowledge() {
             setStatus("暂无租户，请先接入机器人用户后再管理私有知识库");
             return loadSources();
         }
-        var url = "/api/knowledge/categories?scope=" + encodeURIComponent(scope);
-        if (scope === "tenant" && currentTenant()) {
-            url += "&tenant_id=" + encodeURIComponent(currentTenant());
-        }
+        var url = knowledgeUrl("/categories");
         return jsonFetch(url).then(function (data) {
             state.embeddingEnabled = data.embedding_enabled !== false;
             updateEmbeddingNotice();
-            state.categories = (data.categories || []).filter(function (item) {
+            state.categories = (data.categories || data.items || []).filter(function (item) {
                 return item.scope === scope &&
                     (scope === "public" || item.tenant_id === currentTenant());
             });
@@ -137,6 +164,7 @@ function initKnowledge() {
                 return item.category_id === preferred;
             })) categoryEl.value = preferred;
             rebuildMoveTargets();
+            updateWritableState();
             return loadSources();
         }).catch(function (err) { setStatus(err.message); });
     }
@@ -161,9 +189,9 @@ function initKnowledge() {
             renderSources();
             return Promise.resolve();
         }
-        return jsonFetch("/api/knowledge?category_id=" +
+        return jsonFetch(knowledgeUrl("/sources?category_id=") +
             encodeURIComponent(currentCategoryId())).then(function (data) {
-            state.sources = data.sources || [];
+            state.sources = data.sources || data.items || [];
             setStatus("");
             renderSources();
         }).catch(function (err) { setStatus(err.message); });
@@ -183,11 +211,10 @@ function initKnowledge() {
             var sourceCell = '<div class="knowledge-source-cell"><span class="knowledge-source-badge">' +
                 sourceLabel + "</span>";
             if (source.drive_path) {
-                var href = "/api/drive/download" + query({
-                    scope: source.drive_scope,
-                    tenant_id: source.drive_tenant_id,
-                    path: source.drive_path
-                });
+                var href = driveUrl(
+                    "/download" + query({ path: source.drive_path }),
+                    source.drive_scope
+                );
                 sourceCell += '<a class="knowledge-source-link" href="' + escapeHtml(href) +
                     '" data-preview-source="' + escapeHtml(source.source_id) +
                     '" title="预览网盘原文件：' + escapeHtml(source.drive_path) + '">' +
@@ -204,8 +231,9 @@ function initKnowledge() {
                 escapeHtml(statusLabel(source.status)) + "</span></td>" +
                 "<td>" + Number(source.chunks || 0) + "</td>" +
                 "<td>" + escapeHtml((source.updated_at || "").slice(0, 19).replace("T", " ")) + "</td>" +
-                '<td><button class="btn-danger btn-small" data-delete-source="' +
-                escapeHtml(source.source_id) + '">删除</button></td></tr>';
+                '<td>' + (readOnlyScope() ? '<span class="text-muted">只读</span>' :
+                '<button class="btn-danger btn-small" data-delete-source="' +
+                escapeHtml(source.source_id) + '">删除</button>') + '</td></tr>';
         }).join("");
     }
 
@@ -213,8 +241,9 @@ function initKnowledge() {
     function updateBatchButtons() {
         var count = selectedIds().length;
         var any = count > 0;
-        document.getElementById("knowledge-refresh-selected").disabled = !any;
-        document.getElementById("knowledge-move-selected").disabled = !any;
+        document.getElementById("knowledge-refresh-selected").disabled = !any || readOnlyScope();
+        document.getElementById("knowledge-move-selected").disabled = !any || readOnlyScope();
+        document.getElementById("knowledge-delete-selected").disabled = !any || readOnlyScope();
         document.getElementById("knowledge-selection-count").textContent =
             count ? "已选 " + count + " 项" : "";
     }
@@ -248,7 +277,7 @@ function initKnowledge() {
         var sourceId = button.getAttribute("data-delete-source");
         showConfirm("只删除知识索引和关联，不会删除网盘原文件。确定继续吗？").then(function (ok) {
             if (!ok) return;
-            return jsonFetch("/api/knowledge/" + encodeURIComponent(sourceId), { method: "DELETE" })
+            return jsonFetch(knowledgeUrl("/sources/" + encodeURIComponent(sourceId)), { method: "DELETE" })
                 .then(function () { showToast("知识来源已删除", "success"); return loadCategories(currentCategoryId()); })
                 .catch(function (err) { showToast(err.message, "error"); });
         });
@@ -275,7 +304,7 @@ function initKnowledge() {
         if (!category) { showToast("请先选择知识库", "error"); return; }
         showConfirm("确定删除知识库“" + category.name + "”吗？非空知识库不能删除。").then(function (ok) {
             if (!ok) return;
-            jsonFetch("/api/knowledge/categories/" + encodeURIComponent(category.category_id), { method: "DELETE" })
+            jsonFetch(knowledgeUrl("/categories/" + encodeURIComponent(category.category_id)), { method: "DELETE" })
                 .then(function () { showToast("知识库已删除", "success"); loadCategories(); })
                 .catch(function (err) { showToast(err.message, "error"); });
         });
@@ -289,7 +318,7 @@ function initKnowledge() {
             description: document.getElementById("knowledge-category-description").value.trim()
         };
         var editing = state.editingCategory;
-        var url = "/api/knowledge/categories";
+        var url = knowledgeUrl("/categories");
         var method = "POST";
         if (editing) {
             url += "/" + encodeURIComponent(editing.category_id);
@@ -321,7 +350,7 @@ function initKnowledge() {
         if (owner.tenant_id) form.append("tenant_id", owner.tenant_id);
         form.append("file", file);
         showToast("正在上传、解析并建立索引…", "info");
-        fetch("/api/knowledge/upload", { method: "POST", body: form })
+        fetch(knowledgeUrl("/upload"), { method: "POST", body: form })
             .then(function (r) { return r.ok ? r.json() : apiError(r); })
             .then(function (result) {
                 showToast("已处理 " + result.chunks + " 个分块", "success");
@@ -340,7 +369,7 @@ function initKnowledge() {
     document.getElementById("knowledge-text-modal-cancel").addEventListener("click", closeTextModal);
     document.getElementById("knowledge-text-form").addEventListener("submit", function (evt) {
         evt.preventDefault();
-        jsonFetch("/api/knowledge/text", {
+        jsonFetch(knowledgeUrl("/text"), {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 category_id: currentCategoryId(),
@@ -355,7 +384,7 @@ function initKnowledge() {
     });
 
     document.getElementById("knowledge-refresh-selected").addEventListener("click", function () {
-        jsonFetch("/api/knowledge/refresh", {
+        jsonFetch(knowledgeUrl("/refresh"), {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ source_ids: selectedIds() })
         }).then(function (data) {
@@ -367,7 +396,7 @@ function initKnowledge() {
     document.getElementById("knowledge-move-selected").addEventListener("click", function () {
         var target = document.getElementById("knowledge-move-target").value;
         if (!target) { showToast("请选择目标知识库", "error"); return; }
-        jsonFetch("/api/knowledge/sources/move", {
+        jsonFetch(knowledgeUrl("/sources/move"), {
             method: "PATCH", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ source_ids: selectedIds(), target_category_id: target })
         }).then(function () {
@@ -375,16 +404,30 @@ function initKnowledge() {
             loadCategories(currentCategoryId());
         }).catch(function (err) { showToast(err.message, "error"); });
     });
+    document.getElementById("knowledge-delete-selected").addEventListener("click", function () {
+        var sourceIds = selectedIds();
+        if (!sourceIds.length) return;
+        showConfirm("只删除所选知识索引和关联，不会删除网盘原文件。确定继续吗？")
+            .then(function (ok) {
+                if (!ok) return null;
+                return Promise.all(sourceIds.map(function (sourceId) {
+                    return jsonFetch(
+                        knowledgeUrl("/sources/" + encodeURIComponent(sourceId)),
+                        { method: "DELETE" }
+                    );
+                }));
+            })
+            .then(function (result) {
+                if (!result) return;
+                showToast("所选知识来源已删除", "success");
+                return loadCategories(currentCategoryId());
+            })
+            .catch(function (err) { showToast(err.message, "error"); });
+    });
     document.getElementById("knowledge-reindex-btn").addEventListener("click", function () {
-        var owner = currentOwner();
-        var tenantContext = owner.tenant_id || currentTenant();
-        if (!tenantContext) {
-            showToast("向量补齐需要至少一个租户上下文", "info");
-            return;
-        }
-        jsonFetch("/api/knowledge/reindex", {
+        jsonFetch(knowledgeUrl("/reindex"), {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenant_id: tenantContext, category_ids: [currentCategoryId()] })
+            body: JSON.stringify({ category_ids: [currentCategoryId()] })
         }).then(function (result) {
             showToast("已补齐 " + result.completed + " 个向量", "success");
             loadSources();
@@ -393,12 +436,10 @@ function initKnowledge() {
 
     function runSearch() {
         var query = document.getElementById("knowledge-search-input").value.trim();
-        var tenant = currentOwner().tenant_id || currentTenant();
-        if (!query || !tenant || !currentCategoryId()) {
-            showToast("检索测试需要知识库、租户上下文和关键词", "error"); return;
+        if (!query || !currentCategoryId()) {
+            showToast("检索测试需要知识库和关键词", "error"); return;
         }
-        jsonFetch("/api/knowledge/search?tenant_id=" + encodeURIComponent(tenant) +
-            "&q=" + encodeURIComponent(query) + "&category_ids=" +
+        jsonFetch(knowledgeUrl("/search") + "?q=" + encodeURIComponent(query) + "&category_ids=" +
             encodeURIComponent(currentCategoryId())).then(function (data) {
             var results = data.results || [];
             searchResults.innerHTML = results.length ? results.map(function (item) {
@@ -421,9 +462,9 @@ function initKnowledge() {
         state.driveSelected = {};
         document.getElementById("knowledge-drive-path").textContent =
             state.drivePath || "根目录";
-        var url = "/api/drive/entries?scope=" + encodeURIComponent(owner.scope) +
-            "&tenant_id=" + encodeURIComponent(owner.tenant_id || "") +
-            "&path=" + encodeURIComponent(state.drivePath);
+        var url = driveUrl(
+            "/entries?path=" + encodeURIComponent(state.drivePath), owner.scope
+        );
         jsonFetch(url).then(function (data) {
             var rows = [];
             if (state.drivePath) {
@@ -462,7 +503,7 @@ function initKnowledge() {
         var paths = Object.keys(state.driveSelected).filter(function (path) { return state.driveSelected[path]; });
         if (!paths.length) { showToast("请选择至少一个支持的文件", "error"); return; }
         var owner = currentOwner();
-        jsonFetch("/api/knowledge/from-drive", {
+        jsonFetch(knowledgeUrl("/from-drive"), {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 category_id: currentCategoryId(), scope: owner.scope,
@@ -492,7 +533,7 @@ function initKnowledge() {
             (source.drive_path || "");
         document.getElementById("knowledge-preview-content").textContent = "正在读取原文件…";
         previewModal.style.display = "";
-        jsonFetch("/api/knowledge/source-preview/" + encodeURIComponent(sourceId))
+        jsonFetch(knowledgeUrl("/sources/" + encodeURIComponent(sourceId)))
             .then(function (data) {
                 document.getElementById("knowledge-preview-content").textContent =
                     data.content + (data.truncated ? "\n\n（内容过长，仅显示前 200000 个字符）" : "");
@@ -507,38 +548,28 @@ function initKnowledge() {
     });
 
     function loadEmbeddingConfig() {
-        return jsonFetch("/api/knowledge/embedding-config").then(function (data) {
-            document.getElementById("knowledge-embedding-id").value = data.id;
-            document.getElementById("knowledge-embedding-enabled").checked = data.enabled;
-            document.getElementById("knowledge-embedding-url").value = data.base_url;
-            document.getElementById("knowledge-embedding-model").value = data.model;
-            document.getElementById("knowledge-embedding-dimensions").value = data.dimensions;
-            document.getElementById("knowledge-embedding-timeout").value = data.timeout_seconds;
+        return jsonFetch(knowledgeUrl("/embedding-config")).then(function (data) {
+            var badge = document.getElementById("knowledge-embedding-badge");
+            document.getElementById("knowledge-embedding-id").textContent = data.profile_id || "—";
+            document.getElementById("knowledge-embedding-model").textContent = data.model || "—";
+            document.getElementById("knowledge-embedding-dimensions").textContent =
+                data.dimensions != null ? String(data.dimensions) : "—";
             document.getElementById("knowledge-embedding-runtime").textContent =
                 data.runtime_enabled
                     ? "当前进程：向量服务已启用"
                     : "当前进程：向量服务未启用";
+            if (!data.bound) {
+                badge.textContent = "未绑定";
+                badge.className = "badge badge-fallback";
+            } else if (data.runtime_enabled) {
+                badge.textContent = "已启用";
+                badge.className = "badge badge-primary";
+            } else {
+                badge.textContent = "已绑定（未启用）";
+                badge.className = "badge badge-fallback";
+            }
         }).catch(function (err) { showToast(err.message, "error"); });
     }
-    document.getElementById("knowledge-embedding-form").addEventListener("submit", function (evt) {
-        evt.preventDefault();
-        var payload = {
-            id: document.getElementById("knowledge-embedding-id").value.trim(),
-            enabled: document.getElementById("knowledge-embedding-enabled").checked,
-            base_url: document.getElementById("knowledge-embedding-url").value.trim(),
-            model: document.getElementById("knowledge-embedding-model").value.trim(),
-            dimensions: Number(document.getElementById("knowledge-embedding-dimensions").value),
-            timeout_seconds: Number(document.getElementById("knowledge-embedding-timeout").value)
-        };
-        jsonFetch("/api/knowledge/embedding-config", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        }).then(function () {
-            showToast("向量配置已保存，完整重启服务后生效", "success");
-            loadEmbeddingConfig();
-        }).catch(function (err) { showToast(err.message, "error"); });
-    });
 
     loadTenants();
 }

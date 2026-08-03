@@ -1,30 +1,57 @@
 {% extends "base.html" %}
 {% block title %}定时任务 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/schedules.css">{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
-        <div class="page-header-row">
-            <div>
-                <h2>定时任务</h2>
-                <p class="page-desc">管理 cron 定时任务，支持文本/智能体/脚本/插件动作</p>
-            </div>
-            <button id="create-schedule-btn" class="btn-primary">+ 新建任务</button>
-        </div>
+        <h2>定时任务</h2>
+        <p class="page-desc">集中管理消息与动作任务，以及按租户授权的脚本自动化</p>
     </div>
-    <div id="schedule-status" class="status-card"></div>
-    <div id="schedule-list" class="card-grid"></div>
 
-    <div class="page-header" style="margin-top:28px">
-        <div>
-            <h2>租户脚本自动化</h2>
-            <p class="page-desc">创建时一次授权，之后按计划无人值守执行</p>
-        </div>
-        <div class="page-header-row">
-            <select id="script-schedule-tenant"></select>
-            <button id="create-script-schedule-btn" class="btn-primary">+ 新建脚本计划</button>
-        </div>
+    <div class="tab-bar schedule-tabs" role="tablist" aria-label="定时任务视图">
+        <button id="schedule-tab-tasks" class="tab-btn active" type="button"
+                data-schedule-tab="tasks" role="tab" aria-selected="true"
+                aria-controls="schedule-pane-tasks">定时任务</button>
+        <button id="schedule-tab-automation" class="tab-btn" type="button"
+                data-schedule-tab="automation" role="tab" aria-selected="false"
+                aria-controls="schedule-pane-automation">租户脚本自动化</button>
     </div>
-    <div id="script-schedule-list" class="card-grid"></div>
+
+    <section id="schedule-pane-tasks" class="schedule-pane active"
+             data-schedule-pane="tasks" role="tabpanel"
+             aria-labelledby="schedule-tab-tasks">
+        <div class="schedule-pane-header">
+            <div>
+                <h3>定时任务</h3>
+                <p class="page-desc">通过 Cron 定时发送文本、调用智能体、执行脚本或插件</p>
+            </div>
+            <button id="create-schedule-btn" class="btn-primary" type="button">+ 新建任务</button>
+        </div>
+        <div id="schedule-status" class="status-card"></div>
+        <div id="schedule-list" class="card-grid"></div>
+    </section>
+
+    <section id="schedule-pane-automation" class="schedule-pane"
+             data-schedule-pane="automation" role="tabpanel"
+             aria-labelledby="schedule-tab-automation" hidden>
+        <div class="schedule-pane-header">
+            <div>
+                <h3>租户脚本自动化</h3>
+                <p class="page-desc">创建时一次授权，之后按计划为所选租户无人值守执行</p>
+            </div>
+            <div class="schedule-pane-actions">
+                <label class="tenant-picker" for="script-schedule-tenant">
+                    <span>机器人用户</span>
+                    <select id="script-schedule-tenant" class="tenant-select"
+                            aria-label="机器人用户"></select>
+                </label>
+                <button id="create-script-schedule-btn" class="btn-primary" type="button">
+                    + 新建脚本计划
+                </button>
+            </div>
+        </div>
+        <div id="script-schedule-list" class="card-grid" aria-live="polite"></div>
+    </section>
 </div>
 
 <!-- Modal -->
@@ -131,5 +158,5 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/js/schedules.js"></script>
-<script>initSchedules(); initScriptAutomation();</script>
+<script>runScopedModule("schedules", function () { initScheduleTabs(); initSchedules(); initScriptAutomation(); });</script>
 {% endblock %}

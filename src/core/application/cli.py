@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Optional, Sequence, TextIO
 
 from src.core.application.bot import (
-    delete_credentials,
     display_qr_code,
     load_credentials,
     print_login_status,
@@ -21,8 +20,13 @@ from src.core.infrastructure.diagnostics import check_configuration, print_repor
 from src.core.infrastructure.instance_lock import AlreadyRunning, SingleInstanceLock
 from src.core.integrations.images import ImageSource
 from src.core.integrations.ilink import ILinkClient, ILinkError
-from src.core.messaging import ChannelAddressStore, MessageRouter
-from src.core.messaging.adapters import WeChatILinkAdapter
+from src.core.messaging import (
+    ChannelAddressStore,
+    ChannelCredentialError,
+    ChannelCredentialStore,
+    MessageRouter,
+    build_channel_adapter,
+)
 from src.core.paths import (
     CONFIG_DIR,
     DATA_DIR,
@@ -30,7 +34,6 @@ from src.core.paths import (
     SYSTEM_DATA_DIR,
     channel_credentials_path,
 )
-from src.core.plugins.codex_tasks import CodexHookIngestor, CodexTasksConfig
 from src.core.services.notification import (
     NotificationEnqueueResult,
     NotificationError,
@@ -82,18 +85,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     channel_parser.add_argument(
         "action",
-        choices=("list", "status", "login", "logout"),
+        choices=("list", "status", "login", "logout", "configure", "test"),
     )
     channel_parser.add_argument("channel_id", nargs="?")
-    hook_parser = subparsers.add_parser(
-        "codex-hook",
-        help=argparse.SUPPRESS,
-    )
-    hook_parser.add_argument(
+    channel_parser.add_argument(
         "--stdin",
         action="store_true",
-        required=True,
-        help=argparse.SUPPRESS,
+        help="从标准输入读取渠道凭据 JSON",
     )
     args = parser.parse_args(argv)
     if args.command is not None and args.logout:
@@ -103,10 +101,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ):
         parser.error("notify 至少需要 --message、--stdin、--image 或 --image-url 之一")
     if args.command == "channel":
-        if args.action in {"login", "logout"} and not args.channel_id:
+        if args.action in {"login", "logout", "configure", "test"} and not args.channel_id:
             parser.error("channel {} 必须指定渠道实例编号".format(args.action))
         if args.action == "list" and args.channel_id:
             parser.error("channel list 不接受渠道实例编号")
+        if args.action == "configure" and not args.stdin:
+            parser.error("channel configure 必须指定 --stdin")
     return args
 
 
@@ -149,23 +149,30 @@ def run_notify_command(
             registry = TenantRegistry(DATA_DIR)
             registry.get(tenant_id)
             project_config = load_project_config(CONFIG_DIR)
+            credential_store = ChannelCredentialStore()
+            adapters = []
+            for channel in project_config.channels.values():
+                if not channel.enabled:
+                    continue
+                try:
+                    channel_credentials = credential_store.load(
+                        channel.id,
+                        channel.type,
+                        required=True,
+                    )
+                    assert channel_credentials is not None
+                    adapters.append(
+                        build_channel_adapter(
+                            channel,
+                            channel_credentials,
+                        )
+                    )
+                except (ChannelCredentialError, ValueError):
+                    continue
             notification_service = NotificationService(
                 credentials_loader=None,
                 recipient_store=TenantRecipientStore(registry),
-                message_router=MessageRouter(
-                    [
-                        WeChatILinkAdapter(
-                            ILinkClient(
-                                credentials=load_credentials(
-                                    channel_credentials_path(channel.id)
-                                )
-                            ),
-                            channel_id=channel.id,
-                        )
-                        for channel in project_config.channels.values()
-                        if channel.enabled
-                    ]
-                ),
+                message_router=MessageRouter(adapters),
                 address_store=ChannelAddressStore(registry),
                 conversation_store=ConversationStore(
                     registry,
@@ -266,9 +273,11 @@ def run_notify_command(
 
 def run_channel_command(
     args: argparse.Namespace,
+    input_stream: Optional[TextIO] = None,
     output_stream: Optional[TextIO] = None,
     error_stream: Optional[TextIO] = None,
 ) -> int:
+    input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
     error_stream = error_stream or sys.stderr
     try:
@@ -277,11 +286,17 @@ def run_channel_command(
         print("读取渠道配置失败：{}。".format(exc), file=error_stream)
         return 1
 
+    credential_store = ChannelCredentialStore()
     if args.action == "list":
         for channel in config.channels.values():
             state = "启用" if channel.enabled else "停用"
             print(
-                "{}\t{}\t{}".format(channel.id, channel.type, state),
+                "{}\t{}\t{}\t{}".format(
+                    channel.id,
+                    channel.type,
+                    state,
+                    channel.agent_id or config.app.default_agent,
+                ),
                 file=output_stream,
             )
         return 0
@@ -289,16 +304,12 @@ def run_channel_command(
     channel_id = str(args.channel_id or "")
     if args.action == "status" and not channel_id:
         for item in config.channels.values():
-            credential_state = (
-                "已保存凭证"
-                if load_credentials(channel_credentials_path(item.id))
-                else "需要登录"
-            )
+            credential_state = "已保存凭证" if credential_store.configured(item.id) else "需要配置"
             print(
                 "{}：{}，{}。".format(
                     item.id,
                     "已启用" if item.enabled else "未启用",
-                    credential_state if item.type == "wechat_ilink" else "未检查",
+                    credential_state,
                 ),
                 file=output_stream,
             )
@@ -308,9 +319,10 @@ def run_channel_command(
         print("未知消息渠道：{}。".format(channel_id), file=error_stream)
         return 1
     if args.action == "status":
-        credential_path = channel_credentials_path(channel.id)
         credential_state = (
-            "已保存凭证" if load_credentials(credential_path) else "需要登录"
+            "已保存凭证"
+            if credential_store.configured(channel.id)
+            else "需要配置"
         )
         print(
             "{}：{}，{}。".format(
@@ -322,9 +334,46 @@ def run_channel_command(
         )
         return 0
     if args.action == "logout":
-        delete_credentials(channel_credentials_path(channel.id))
-        print("已清除渠道 {} 的登录凭证。".format(channel.id), file=output_stream)
+        credential_store.delete(channel.id)
+        print("已清除渠道 {} 的凭据。".format(channel.id), file=output_stream)
         return 0
+    if args.action == "configure":
+        try:
+            payload = json.loads(input_stream.read())
+            if not isinstance(payload, dict):
+                raise ValueError("凭据必须是 JSON 对象")
+            credential_store.save(channel.id, channel.type, payload)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print("保存渠道凭据失败：{}。".format(exc), file=error_stream)
+            return 1
+        print(
+            "渠道 {} 的凭据已保存，重启后生效。".format(channel.id),
+            file=output_stream,
+        )
+        return 0
+    if args.action == "test":
+        try:
+            credentials = credential_store.load(
+                channel.id,
+                channel.type,
+                required=True,
+            )
+            assert credentials is not None
+            build_channel_adapter(channel, credentials).close()
+        except (ChannelCredentialError, OSError, ValueError) as exc:
+            print("渠道检查失败：{}。".format(exc), file=error_stream)
+            return 1
+        print("渠道 {} 的凭据格式有效。".format(channel.id), file=output_stream)
+        return 0
+    if channel.type != "wechat_ilink":
+        print(
+            "渠道 {} 使用静态应用凭据，请运行 channel configure {} --stdin。".format(
+                channel.id,
+                channel.id,
+            ),
+            file=error_stream,
+        )
+        return 1
     try:
         credential_path = channel_credentials_path(channel.id)
         existing = load_credentials(credential_path)
@@ -349,49 +398,6 @@ def run_channel_command(
     return 0
 
 
-def run_codex_hook_command(
-    args: argparse.Namespace,
-    input_stream: Optional[TextIO] = None,
-    output_stream: Optional[TextIO] = None,
-    error_stream: Optional[TextIO] = None,
-) -> int:
-    """Ingest a lifecycle hook without taking the bot's single-instance lock."""
-
-    input_stream = input_stream or sys.stdin
-    output_stream = output_stream or sys.stdout
-    error_stream = error_stream or sys.stderr
-    payload: object = {}
-    try:
-        payload = json.loads(input_stream.read())
-        if not isinstance(payload, dict):
-            raise ValueError("hook 输入必须是 JSON 对象")
-        project_config = load_project_config(CONFIG_DIR)
-        plugin_config = project_config.plugins.get("codex_tasks")
-        if plugin_config is None or not plugin_config.enabled:
-            raise ValueError("codex_tasks 插件未启用")
-        registry = TenantRegistry(DATA_DIR)
-        config = CodexTasksConfig.from_mapping(
-            plugin_config.settings,
-            CONFIG_DIR.parent,
-        )
-        CodexHookIngestor(config, registry).ingest(payload)
-    except Exception as exc:
-        safe_error = str(exc).strip().splitlines()[0] or type(exc).__name__
-        print(
-            "Codex hook 采集失败：{}".format(safe_error[:1000]),
-            file=error_stream,
-        )
-
-    event_name = (
-        str(payload.get("hook_event_name") or "")
-        if isinstance(payload, dict)
-        else ""
-    )
-    response = {"continue": True} if event_name in {"UserPromptSubmit", "Stop"} else {}
-    print(json.dumps(response, ensure_ascii=False), file=output_stream)
-    return 0
-
-
 def _load_model_env() -> None:
     """Load API keys from data/system/model.env and mcp.env if present."""
     import os
@@ -413,12 +419,10 @@ def _load_model_env() -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _load_model_env()
-    args = parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parse_args(raw_argv)
     if args.command == "notify":
         return run_notify_command(args)
-
-    if args.command == "codex-hook":
-        return run_codex_hook_command(args)
 
     if args.command == "channel":
         return run_channel_command(args)

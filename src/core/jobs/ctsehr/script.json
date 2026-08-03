@@ -1,0 +1,17 @@
+{
+  "id": "ctsehr_check",
+  "name": "CTS EHR 考勤与待审批检查",
+  "description": "查询【EHR系统 / CTSEHR】的考勤打卡与待审批汇总：昨天与今天的上下班打卡、缺卡情况及待审批数量，并生成摘要与 PNG。触发词：考勤、打卡、缺卡、上班卡、下班卡、EHR、CTSEHR。不要用于 OA 审批流程待办（用 ctsoa_check），也不要用于私人清单待办（用 todo_manage）。",
+  "entrypoint": "monitor.py",
+  "timeout_seconds": 300,
+  "requires_approval": false,
+  "data_directory": "ctsehr",
+  "parameters": {
+    "date": {
+      "type": "date",
+      "required": false,
+      "flag": "--date"
+    }
+  },
+  "artifact_types": ["image"]
+}

@@ -1,4 +1,4 @@
-"""Channel-neutral message handling and legacy WeChat presentation helpers."""
+"""Channel-neutral message handling for the bot core."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import json
 import os
 import sys
 import threading
-import time
 import traceback
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -16,17 +14,13 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from src.core.infrastructure.logging import log_interaction
 from src.core.integrations.ilink import (
     Credentials,
-    ILinkClient,
     ILinkError,
     SessionExpired,
-    extract_text_and_image,
-    is_private_user_message,
 )
 from src.core.messaging import (
     DIRECT,
-    AttachmentRef,
     ChannelAddressStore,
-    ChannelCapabilities,
+    ChannelBindingError,
     DeliveryEndpoint,
     InboundMessage,
     MessageRouter,
@@ -39,7 +33,6 @@ from src.core.services.agent import AgentService
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService
-from src.core.plugins import PluginError
 from src.core.services.publish import (
     PLATFORM_WECHAT,
     AgentBindingResolver,
@@ -56,6 +49,7 @@ from src.core.storage.tenants import (
     TenantStoreError,
     new_confirmation_code,
 )
+from src.core.config.loader import ChannelConfig
 APPROVAL_TIMEOUT_TEXT = (
     "确认已超时，已默认按“不同意”处理；以上本机操作均未执行。"
 )
@@ -127,63 +121,11 @@ def print_login_status(status: str) -> None:
         print(labels[status])
 
 
-class _LegacyILinkAdapter:
-    """Compatibility wrapper for callers that still pass an ILink-like client."""
-
-    channel_id = "wechat-main"
-    platform = "wechat_ilink"
-    capabilities = ChannelCapabilities(
-        receive_text=True,
-        receive_image=True,
-        send_text=True,
-        send_image=True,
-        typing=True,
-        proactive=True,
-    )
-
-    def __init__(self, client: Any) -> None:
-        self.client = client
-
-    @property
-    def account_id(self) -> str:
-        credentials = getattr(self.client, "credentials", None)
-        return str(getattr(credentials, "bot_id", "") or "legacy-bot")
-
-    def send(self, endpoint: DeliveryEndpoint, message: OutboundMessage) -> None:
-        token = str(endpoint.route_context.get("context_token") or "")
-        if message.image_bytes is not None and hasattr(self.client, "send_image"):
-            self.client.send_image(
-                endpoint.recipient_id,
-                token,
-                message.image_bytes,
-                caption=message.text,
-            )
-        else:
-            self.client.send_text(endpoint.recipient_id, token, message.text)
-
-    @contextmanager
-    def typing(self, endpoint: DeliveryEndpoint):
-        token = str(endpoint.route_context.get("context_token") or "")
-        with self.client.typing(endpoint.recipient_id, token, on_error=None):
-            yield
-
-    def load_attachment(self, attachment: AttachmentRef) -> bytes:
-        return self.client.download_image(dict(attachment.adapter_ref))
-
-    def start(self, _emit, _stop_event) -> None:
-        raise RuntimeError("兼容适配器不负责接收循环")
-
-    def close(self) -> None:
-        closer = getattr(self.client, "close", None)
-        if callable(closer):
-            closer()
-
-
 class MessageBot:
     def __init__(
         self,
-        ilink: Optional[ILinkClient],
         agent_service: AgentService,
+        message_router: MessageRouter,
         interaction_logger: Callable[[str, str, str], None] = log_interaction,
         recipient_recorder: Optional[Callable[[str, str], None]] = None,
         timer_factory: Callable[[float, Callable[[], None]], Any] = threading.Timer,
@@ -195,20 +137,15 @@ class MessageBot:
         script_service: Optional[ScriptService] = None,
         knowledge_service: Optional[KnowledgeService] = None,
         memory_service: Optional[MemoryService] = None,
-        codex_tasks_plugin: Optional[Any] = None,
         integration_service: Optional[IntegrationService] = None,
         notification_dispatcher: Optional[NotificationDispatcher] = None,
-        message_router: Optional[MessageRouter] = None,
         address_store: Optional[ChannelAddressStore] = None,
         publish_store: Optional[PublishStore] = None,
+        channel_configs: Optional[Dict[str, ChannelConfig]] = None,
     ) -> None:
-        self.ilink = ilink
-        self._legacy_mode = message_router is None
-        self._legacy_adapter = _LegacyILinkAdapter(ilink) if ilink is not None else None
-        self.message_router = message_router or MessageRouter(
-            [self._legacy_adapter] if self._legacy_adapter is not None else []
-        )
+        self.message_router = message_router
         self.address_store = address_store
+        self.channel_configs = dict(channel_configs or {})
         self.agent_service = agent_service
         self._log = interaction_logger
         self._record_recipient = recipient_recorder
@@ -221,7 +158,6 @@ class MessageBot:
         self.script_service = script_service
         self.knowledge_service = knowledge_service
         self.memory_service = memory_service
-        self.codex_tasks_plugin = codex_tasks_plugin
         self.integration_service = integration_service
         self.notification_dispatcher = notification_dispatcher
         self._binding_resolver = (
@@ -231,10 +167,13 @@ class MessageBot:
         self._approval_timers: Dict[str, Tuple[str, Any]] = {}
         self._deletion_pending: Dict[str, Tuple[str, datetime]] = {}
         self._memory_clear_pending: Dict[str, Tuple[str, datetime]] = {}
+        self._message_context = threading.local()
 
     @staticmethod
     def _subject_key(subject: Any) -> str:
-        return subject.tenant_id if isinstance(subject, TenantContext) else str(subject)
+        if isinstance(subject, TenantContext):
+            return subject.personal_tenant_id or subject.tenant_id
+        return str(subject)
 
     def _resolve_tenant(self, message: InboundMessage) -> Optional[TenantContext]:
         if self.tenant_registry is None:
@@ -252,8 +191,69 @@ class MessageBot:
     ) -> None:
         if tenant is not None and self.conversation_store is not None:
             self.conversation_store.append_transcript(
-                tenant.tenant_id, role, content, image=image
+                tenant.personal_tenant_id or tenant.tenant_id,
+                role,
+                content,
+                image=image,
+                session_key=str(
+                    getattr(self._message_context, "session_key", "direct")
+                    or "direct"
+                ),
+                actor_type="channel_user" if role == "user" else "agent",
+                actor_account=(
+                    str(getattr(self._message_context, "actor_account", ""))
+                    if role == "user"
+                    else str(getattr(self._message_context, "agent_id", ""))
+                ),
             )
+            organization_conversation_id = getattr(
+                self._message_context, "organization_conversation_id", None
+            )
+            if organization_conversation_id:
+                self.conversation_store.append_transcript(
+                    tenant.tenant_id,
+                    role,
+                    content,
+                    image=image,
+                    session_key="organization:{}".format(
+                        organization_conversation_id
+                    ),
+                    actor_type="channel_user" if role == "user" else "agent",
+                    actor_account=(
+                        str(getattr(self._message_context, "actor_account", ""))
+                        if role == "user"
+                        else str(getattr(self._message_context, "agent_id", ""))
+                    ),
+                )
+
+    def _channel_config(self, channel_id: str) -> Optional[ChannelConfig]:
+        return self.channel_configs.get(channel_id)
+
+    def _channel_agent_id(self, channel_id: str) -> Optional[str]:
+        config = self._channel_config(channel_id)
+        return (config.agent_id or None) if config is not None else None
+
+    def _accept_message(self, message: InboundMessage) -> bool:
+        if message.conversation_type == DIRECT:
+            return True
+        config = self._channel_config(message.channel_id)
+        policy = (
+            str(config.settings.get("group_policy") or "mention_only")
+            if config is not None
+            else "mention_only"
+        )
+        return policy == "mention_only" and message.addressed_to_bot
+
+    @staticmethod
+    def _session_key(message: InboundMessage) -> str:
+        if message.conversation_type == DIRECT:
+            return "direct"
+        return "{}:{}:{}:{}".format(
+            message.channel_id,
+            message.conversation_type,
+            message.conversation_id,
+            message.sender_id,
+        )
 
     def _reply(
         self,
@@ -278,8 +278,6 @@ class MessageBot:
         print("消息渠道输入状态更新失败：{}".format(exc), file=sys.stderr)
 
     def _direction(self, action: str, endpoint: DeliveryEndpoint) -> str:
-        if self._legacy_mode and endpoint.platform == "wechat_ilink":
-            return "微信{}".format(action)
         return "消息{}[{}]".format(action, endpoint.channel_id)
 
     def _cancel_approval_timer(self, user_id: Any) -> None:
@@ -389,47 +387,60 @@ class MessageBot:
             reply,
         )
 
-    def handle_message(self, message: Dict[str, Any]) -> None:
-        """One-release compatibility entry point for raw iLink dictionaries."""
-        if not is_private_user_message(message):
-            return
-        text, image_item = extract_text_and_image(message)
-        inbound = InboundMessage(
-            event_id=str(
-                message.get("message_id")
-                or message.get("msg_id")
-                or message.get("client_id")
-                or "legacy-{}".format(id(message))
-            ),
-            channel_id="wechat-main",
-            platform="wechat_ilink",
-            account_id=(
-                self._legacy_adapter.account_id
-                if self._legacy_adapter is not None
-                else "legacy-bot"
-            ),
-            sender_id=str(message["from_user_id"]),
-            conversation_type=DIRECT,
-            conversation_id=str(message["from_user_id"]),
-            text=text,
-            attachments=(
-                (AttachmentRef("image", dict(image_item)),)
-                if image_item is not None
-                else ()
-            ),
-            reply_context={"context_token": str(message["context_token"])},
-        )
-        self.handle_inbound(inbound)
-
     def handle_inbound(self, message: InboundMessage) -> None:
-        if message.conversation_type != DIRECT:
+        if not self._accept_message(message):
             return
 
         user_id = message.sender_id
         endpoint = message.endpoint
-        tenant = self._resolve_tenant(message)
+        self._message_context.session_key = self._session_key(message)
+        self._message_context.organization_conversation_id = None
+        self._message_context.actor_account = message.sender_id
+        self._message_context.agent_id = self._channel_agent_id(message.channel_id) or ""
+        normalized_text = message.text.strip()
+        lowered_text = normalized_text.lower()
+        tenant: Optional[TenantContext] = None
+        binding_completed = False
+        if (
+            message.conversation_type == DIRECT
+            and lowered_text.startswith("/bind ")
+            and self.address_store is not None
+        ):
+            parts = normalized_text.split()
+            if len(parts) != 2:
+                reply = "格式错误，请使用 /bind <绑定码>。"
+                self._reply(endpoint, reply, None, record=False)
+                self._log(self._direction("输出", endpoint), user_id, reply)
+                return
+            try:
+                tenant = self.address_store.bind_with_code(message, parts[1])
+            except ChannelBindingError as exc:
+                reply = str(exc)
+                self._reply(endpoint, reply, None, record=False)
+                self._log(self._direction("输出", endpoint), user_id, reply)
+                return
+            binding_completed = True
+        if tenant is None:
+            try:
+                tenant = self._resolve_tenant(message)
+            except ChannelBindingError as exc:
+                reply = str(exc)
+                self._reply(endpoint, reply, None, record=False)
+                self._log(self._direction("输出", endpoint), user_id, reply)
+                return
+        if self.address_store is not None and tenant is not None:
+            self._message_context.organization_conversation_id = (
+                self.address_store.ensure_organization_conversation(
+                    message, tenant
+                )
+            )
         if tenant is not None and self.address_store is not None:
             endpoint = self.address_store.record_endpoint(tenant, message)
+        if binding_completed:
+            reply = "跨渠道身份绑定成功，当前渠道将使用同一租户数据。"
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
         subject: Any = tenant or user_id
         if (
             tenant is not None
@@ -440,28 +451,15 @@ class MessageBot:
                 tenant,
                 str(endpoint.route_context.get("context_token") or ""),
             )
+        if tenant is not None and message.conversation_type == DIRECT:
             if self.notification_dispatcher is not None:
                 try:
                     self.notification_dispatcher.on_recipient_refreshed(
-                        tenant.tenant_id
+                        tenant.personal_tenant_id or tenant.tenant_id
                     )
                 except Exception as exc:
                     print(
                         "恢复主动微信通知失败：{}".format(exc),
-                        file=sys.stderr,
-                    )
-            if self.codex_tasks_plugin is not None:
-                try:
-                    refresher = getattr(
-                        self.codex_tasks_plugin,
-                        "on_recipient_refreshed",
-                        None,
-                    )
-                    if callable(refresher):
-                        refresher(tenant.tenant_id)
-                except Exception as exc:
-                    print(
-                        "恢复 Codex 微信通知失败：{}".format(exc),
                         file=sys.stderr,
                     )
         if self._record_recipient:
@@ -478,36 +476,97 @@ class MessageBot:
         normalized_text = text.strip()
         lowered_text = normalized_text.lower()
 
-        if not image_item and (
-            lowered_text == "/codex" or lowered_text.startswith("/codex ")
+        if (
+            message.conversation_type == DIRECT
+            and not image_item
+            and lowered_text == "/bind"
         ):
-            log_text = (
-                "/codex answer <已隐藏>"
-                if lowered_text.startswith("/codex answer ")
-                else text
-            )
-            self._log(self._direction("输入", endpoint), user_id, log_text)
-            if tenant is None or self.codex_tasks_plugin is None:
-                reply = "当前未启用 Codex 任务确认。"
+            if tenant is None or self.address_store is None:
+                reply = "当前未启用跨渠道身份绑定。"
             else:
                 try:
-                    resolver = getattr(
-                        self.codex_tasks_plugin,
-                        "resolve_channel_command",
-                        None,
-                    ) or getattr(
-                        self.codex_tasks_plugin,
-                        "resolve_wechat_command",
-                    )
-                    reply = resolver(tenant, normalized_text)
-                except PluginError as exc:
+                    code = self.address_store.issue_binding_code(tenant, message)
+                except ChannelBindingError as exc:
+                    reply = str(exc)
+                else:
+                    reply = (
+                        "跨渠道绑定码：{}\n"
+                        "请在 10 分钟内通过新渠道首次私聊发送 /bind {}。"
+                    ).format(code, code)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
+
+        if (
+            message.conversation_type == DIRECT
+            and not image_item
+            and lowered_text == "/claim"
+        ):
+            if tenant is None or self.address_store is None:
+                reply = "当前未启用组织认领。"
+            else:
+                try:
+                    token = self.address_store.issue_claim_token(message, tenant)
+                except ChannelBindingError as exc:
+                    reply = str(exc)
+                else:
+                    reply = (
+                        "组织认领码：{}\n"
+                        "请打开平台登录页，选择“认领组织”，并在 1 小时内完成账号创建。"
+                    ).format(token)
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
+
+        if (
+            message.conversation_type == DIRECT
+            and not image_item
+            and (lowered_text == "/org" or lowered_text.startswith("/org "))
+        ):
+            if tenant is None or self.address_store is None:
+                reply = "当前未启用组织切换。"
+            else:
+                parts = normalized_text.split()
+                try:
+                    if len(parts) == 1 or (
+                        len(parts) == 2 and parts[1].lower() == "list"
+                    ):
+                        choices = self.address_store.organization_choices(message)
+                        lines = ["可用组织："]
+                        for item in choices:
+                            marker = (
+                                "（当前）"
+                                if str(item["organization_id"]) == tenant.tenant_id
+                                else ""
+                            )
+                            lines.append(
+                                "- {} [{}] {}".format(
+                                    item["name"],
+                                    str(item["organization_id"])[:8],
+                                    marker,
+                                ).rstrip()
+                            )
+                        reply = "\n".join(lines)
+                    elif len(parts) == 3 and parts[1].lower() == "use":
+                        tenant = self.address_store.switch_organization(
+                            message, parts[2]
+                        )
+                        subject = tenant
+                        organization = getattr(
+                            self.tenant_registry, "organization_store", None
+                        ).get(tenant.tenant_id)
+                        reply = "已切换到组织：{}。".format(organization["name"])
+                    else:
+                        reply = "格式错误，请使用 /org list 或 /org use <组织编号>。"
+                except (ChannelBindingError, ValueError) as exc:
                     reply = str(exc)
             self._reply(endpoint, reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, reply)
             return
 
         if (
-            tenant is not None
+            message.conversation_type == DIRECT
+            and tenant is not None
             and self.integration_service is not None
             and self.integration_service.has_pending(tenant)
         ):
@@ -525,6 +584,17 @@ class MessageBot:
                 "[图片] {}".format(transcript_input) if image_item else transcript_input,
                 image=bool(image_item),
             )
+
+        if (
+            message.conversation_type != DIRECT
+            and not image_item
+            and normalized_text.startswith("/")
+            and lowered_text != "/help"
+        ):
+            reply = "群聊仅支持安全问答；工具、知识库、记忆和数据管理请私聊机器人使用。"
+            self._reply(endpoint, reply, tenant)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return
 
         if not image_item and (
             lowered_text.startswith("/approve") or lowered_text.startswith("/deny")
@@ -556,7 +626,8 @@ class MessageBot:
 
         decision_words = APPROVAL_WORDS | DENIAL_WORDS
         if (
-            not image_item
+            message.conversation_type == DIRECT
+            and not image_item
             and normalized_text in decision_words
             and self.agent_service.has_pending_approval(subject)
         ):
@@ -634,8 +705,9 @@ class MessageBot:
                 reply = "格式错误，请使用 /soul 或 /soul rebuild。"
             else:
                 try:
+                    private_key = tenant.personal_tenant_id or tenant.tenant_id
                     profile = self.memory_service.get_soul(
-                        tenant.tenant_id,
+                        private_key,
                         force_rebuild=lowered_text == "/soul rebuild",
                     )
                     reply = (
@@ -657,8 +729,9 @@ class MessageBot:
                 reply = "当前未启用长期记忆。"
             else:
                 parts = normalized_text.split()
+                private_key = tenant.personal_tenant_id or tenant.tenant_id
                 if len(parts) == 1:
-                    items = self.memory_service.list(tenant.tenant_id)
+                    items = self.memory_service.list(private_key)
                     lines = ["长期记忆：{} 项。".format(len(items))]
                     for item in items[:20]:
                         label = "有效" if item["status"] == "active" else "待确认"
@@ -670,29 +743,29 @@ class MessageBot:
                 elif len(parts) == 3 and parts[1].lower() == "confirm":
                     reply = (
                         "已确认该项长期记忆。"
-                        if self.memory_service.confirm(tenant.tenant_id, parts[2])
+                        if self.memory_service.confirm(private_key, parts[2])
                         else "未找到唯一的待确认记忆编号。"
                     )
                 elif len(parts) == 3 and parts[1].lower() == "forget":
                     reply = (
                         "已停用该项长期记忆。"
-                        if self.memory_service.forget(tenant.tenant_id, parts[2])
+                        if self.memory_service.forget(private_key, parts[2])
                         else "未找到唯一的有效记忆编号。"
                     )
                 elif len(parts) == 2 and parts[1].lower() == "clear":
                     code = new_confirmation_code()
-                    self._memory_clear_pending[tenant.tenant_id] = (
+                    self._memory_clear_pending[private_key] = (
                         code, datetime.now(timezone.utc) + timedelta(minutes=5)
                     )
                     reply = "此操作会停用全部长期记忆。如确定，请在 5 分钟内回复 /memory clear {}。".format(code)
                 elif len(parts) == 3 and parts[1].lower() == "clear":
-                    pending = self._memory_clear_pending.get(tenant.tenant_id)
+                    pending = self._memory_clear_pending.get(private_key)
                     if not pending or datetime.now(timezone.utc) >= pending[1] or parts[2] != pending[0]:
-                        self._memory_clear_pending.pop(tenant.tenant_id, None)
+                        self._memory_clear_pending.pop(private_key, None)
                         reply = "长期记忆清除确认无效或已经过期。"
                     else:
-                        self._memory_clear_pending.pop(tenant.tenant_id, None)
-                        count = self.memory_service.clear(tenant.tenant_id)
+                        self._memory_clear_pending.pop(private_key, None)
+                        count = self.memory_service.clear(private_key)
                         reply = "已停用全部长期记忆，共 {} 项。".format(count)
                 else:
                     reply = "格式错误，请使用 /memory、/memory confirm <编号>、/memory forget <编号> 或 /memory clear。"
@@ -752,13 +825,13 @@ class MessageBot:
                 reply = "当前未启用多用户存储。"
             else:
                 code = new_confirmation_code()
-                self._deletion_pending[tenant.tenant_id] = (
+                private_key = tenant.personal_tenant_id or tenant.tenant_id
+                self._deletion_pending[private_key] = (
                     code,
                     datetime.now(timezone.utc) + timedelta(minutes=5),
                 )
                 reply = (
                     "此操作会永久删除你的历史、设置、订阅、工作区、脚本产物和集成凭据。"
-                    "Codex 账号级任务历史仍由 Codex 自身保存，不会随本操作删除。"
                     "如确定，请在 5 分钟内回复 /confirm-delete {}。"
                 ).format(code)
             self._reply(endpoint, reply, tenant)
@@ -767,35 +840,71 @@ class MessageBot:
 
         if not image_item and lowered_text.startswith("/confirm-delete"):
             parts = normalized_text.split()
-            pending = self._deletion_pending.get(tenant.tenant_id) if tenant else None
+            private_key = (
+                tenant.personal_tenant_id or tenant.tenant_id
+                if tenant
+                else ""
+            )
+            pending = self._deletion_pending.get(private_key) if tenant else None
             if tenant is None or self.tenant_registry is None:
                 reply = "当前未启用多用户存储。"
             elif len(parts) != 2 or not pending or datetime.now(timezone.utc) >= pending[1]:
-                self._deletion_pending.pop(tenant.tenant_id, None)
+                self._deletion_pending.pop(private_key, None)
                 reply = "删除确认无效或已经过期，请重新使用 /delete-data。"
             elif parts[1] != pending[0]:
                 reply = "删除确认码不匹配。"
             else:
-                self._deletion_pending.pop(tenant.tenant_id, None)
-                self._memory_clear_pending.pop(tenant.tenant_id, None)
+                self._deletion_pending.pop(private_key, None)
+                self._memory_clear_pending.pop(private_key, None)
                 self._cancel_approval_timer(subject)
                 try:
-                    if self.script_service is not None:
+                    is_member = bool(
+                        tenant.member_user_id is not None
+                        and tenant.personal_tenant_id
+                    )
+                    if self.script_service is not None and not is_member:
                         self.script_service.cancel_tenant(tenant.tenant_id)
                     close_resources = getattr(
                         self.agent_service, "close_tenant_resources", None
                     )
-                    if callable(close_resources):
+                    if callable(close_resources) and not is_member:
                         close_resources(tenant.tenant_id)
+                    organization_store = getattr(
+                        self.tenant_registry, "organization_store", None
+                    )
+                    organization_backup = None
+                    if not is_member and organization_store is not None:
+                        with self.tenant_registry.database.read() as connection:
+                            registered = connection.execute(
+                                "SELECT 1 FROM organizations "
+                                "WHERE organization_id=?",
+                                (tenant.tenant_id,),
+                            ).fetchone()
+                        if registered is not None:
+                            organization_backup = (
+                                organization_store.backup_organization(
+                                    tenant.tenant_id
+                                )
+                            )
                     if self.integration_service is not None:
                         self.integration_service.delete_all(tenant)
-                    self.tenant_registry.delete(tenant)
+                    deletion_context = (
+                        self.tenant_registry.get(tenant.personal_tenant_id)
+                        if is_member
+                        else tenant
+                    )
+                    if organization_backup is not None:
+                        organization_store.delete_after_backup(tenant.tenant_id)
+                    else:
+                        self.tenant_registry.delete(deletion_context)
                 except (OSError, ValueError, TenantStoreError) as exc:
                     reply = "暂时无法删除用户数据：{}。请稍后重试。".format(exc)
                 else:
                     reply = (
-                        "你的全部 BotPlatform 租户数据已经删除；下次私聊将创建新的租户编号。"
-                        "Codex 账号级任务历史仍需在 Codex 中单独管理。"
+                        "你在当前组织中的个人对话、记忆、待办和个人凭据已经删除；"
+                        "组织共享资源及成员关系不受影响。"
+                        if is_member
+                        else "你的全部 BotPlatform 租户数据已经删除；下次私聊将创建新的租户编号。"
                     )
                     self._reply(endpoint, reply, None, record=False)
                     self._log(self._direction("输出", endpoint), user_id, reply)
@@ -939,7 +1048,13 @@ class MessageBot:
                     subject,
                     question,
                     image_bytes=image_bytes,
-                    agent_id=resolved_agent_id,
+                    agent_id=(
+                        resolved_agent_id
+                        or self._channel_agent_id(message.channel_id)
+                    ),
+                    conversation_id=self._session_key(message),
+                    allow_tools=message.conversation_type == DIRECT,
+                    allow_private_context=message.conversation_type == DIRECT,
                 )
             answer = self._outcome_text(outcome)
         except SessionExpired:
@@ -970,30 +1085,3 @@ class MessageBot:
         self._track_approval_outcome(subject, endpoint, outcome)
         self._reply(endpoint, answer, tenant)
         self._log(self._direction("输出", endpoint), user_id, answer)
-
-    def run(self) -> None:
-        cursor = ""
-        print("机器人已启动，正在等待微信消息。按 Ctrl+C 退出。")
-        while True:
-            try:
-                updates = self.ilink.get_updates(cursor)
-            except SessionExpired:
-                raise
-            except ILinkError as exc:
-                print("接收微信消息失败：{}；2 秒后重试。".format(exc), file=sys.stderr)
-                time.sleep(2.0)
-                continue
-
-            if updates.get("get_updates_buf"):
-                cursor = str(updates["get_updates_buf"])
-            for message in updates.get("msgs") or []:
-                try:
-                    self.handle_message(message)
-                except SessionExpired:
-                    raise
-                except ILinkError as exc:
-                    print("回复微信消息失败：{}".format(exc), file=sys.stderr)
-
-
-# Compatibility name retained for one release.
-WeChatBot = MessageBot

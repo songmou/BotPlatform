@@ -86,11 +86,73 @@ class DriveApiTest(WebApiTestBase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["path"], "docs")
+        self.assertTrue(response.json()["created"])
         response = self.client.post(
             "/api/drive/folders",
             json={"scope": "public", "path": "", "name": "docs"},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_create_folder_exist_ok_reuses_and_audits_once(self):
+        body = {
+            "scope": "public",
+            "path": "",
+            "name": "docs",
+            "exist_ok": True,
+        }
+        created = self.client.post("/api/drive/folders", json=body)
+        reused = self.client.post("/api/drive/folders", json=body)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(reused.status_code, 200)
+        self.assertTrue(created.json()["created"])
+        self.assertFalse(reused.json()["created"])
+
+        audit = self.client.get("/api/drive/audit", params={"action": "mkdir"})
+        self.assertEqual(audit.status_code, 200)
+        self.assertEqual(audit.json()["total"], 1)
+
+    def test_create_folder_exist_ok_rejects_file_collision(self):
+        self.drive_service.save_file("public", None, "", "taken", b"data")
+        response = self.client.post(
+            "/api/drive/folders",
+            json={
+                "scope": "public",
+                "path": "",
+                "name": "taken",
+                "exist_ok": True,
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_nested_folder_upload_sequence_overwrites_files(self):
+        for path, name in (("", "bundle"), ("bundle", "nested")):
+            response = self.client.post(
+                "/api/drive/folders",
+                json={
+                    "scope": "public",
+                    "path": path,
+                    "name": name,
+                    "exist_ok": True,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+
+        for payload in (b"first", b"second"):
+            response = self.client.post(
+                "/api/drive/upload",
+                data={
+                    "scope": "public",
+                    "path": "bundle/nested",
+                    "overwrite": "true",
+                },
+                files={"file": ("item.txt", payload)},
+            )
+            self.assertEqual(response.status_code, 200)
+
+        saved = self.drive_service.read_file(
+            "public", None, "bundle/nested/item.txt"
+        )
+        self.assertEqual(saved.read_bytes(), b"second")
 
     def test_upload_download_round_trip(self):
         payload = "你好，网盘".encode("utf-8")

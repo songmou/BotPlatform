@@ -115,35 +115,20 @@
 }
 
 /* ===== Agent tool picker ===== */
-.tool-picker {
+.agent-tools-section {
     border: 1px solid var(--border, #e2e8f0);
     border-radius: 8px;
     overflow: hidden;
 }
-.tool-group + .tool-group {
-    border-top: 1px solid var(--border, #e2e8f0);
+
+.agent-tool-bulk-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border, #e2e8f0);
+    background: var(--bg);
 }
-.tool-group > summary {
-    cursor: pointer;
-    padding: 10px 12px;
-    font-weight: 600;
-    font-size: 13px;
-    background: var(--bg-subtle, #f8fafc);
-    user-select: none;
-    list-style: none;
-}
-.tool-group > summary::-webkit-details-marker {
-    display: none;
-}
-.tool-group > summary::before {
-    content: "▸";
-    display: inline-block;
-    margin-right: 6px;
-    transition: transform 0.15s ease;
-}
-.tool-group[open] > summary::before {
-    transform: rotate(90deg);
-}
+
 .tool-count {
     font-weight: 400;
     color: var(--text-muted, #64748b);
@@ -331,4 +316,15 @@
     font-size: 12px;
     cursor: pointer;
     padding: 0;
+}
+
+/* ===== Agent modal sub-tabs ===== */
+.agent-modal-tabs {
+    margin: 12px 24px 0;
+}
+.agent-tab-panel[hidden] {
+    display: none;
+}
+.agent-tab-panel > .form-group:first-child {
+    margin-top: 0;
 }

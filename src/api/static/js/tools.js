@@ -1,17 +1,10 @@
 
 /* ===== Plugins page ===== */
-var PLUGIN_META = {
-    browser_automation: { icon: "B", color: "#4285f4", desc: "Playwright 驱动的浏览器自动化，支持网页快照与交互" },
-    codex_tasks: { icon: "C", color: "#10a37f", desc: "Codex 编码任务管理，支持创建、继续和审批" },
-    todo: { icon: "T", color: "#f59e0b", desc: "私人待办事项管理，支持增删改查与提醒" }
-};
-
 function initTools() {
-    var listEl = document.getElementById("plugin-list");
-    var modal = document.getElementById("plugin-modal");
-    var searchInput = document.getElementById("plugin-search");
-    var filterSelect = document.getElementById("plugin-filter-status");
-    var allPlugins = [];
+    if (location.hash === "#plugins") {
+        location.replace("/plugins");
+        return;
+    }
     var auditOffset = 0;
     var auditLimit = 20;
     var auditSearchTimer = null;
@@ -21,9 +14,9 @@ function initTools() {
     var builtinTabsEl = document.getElementById("builtin-category-tabs");
     var builtinListEl = document.getElementById("builtin-tools-list");
 
-    var validTabs = ["skills", "mcp", "plugins", "builtin", "audit"];
+    var validTabs = ["skills", "mcp", "builtin", "audit"];
     function switchTab() {
-        var hash = location.hash.replace("#", "");
+        var hash = location.hash.replace("#", "") || window.BP_INITIAL_TOOLS_TAB;
         if (validTabs.indexOf(hash) === -1) hash = "builtin";
         var detailPane = document.getElementById("tools-pane-mcp-detail");
         if (detailPane) detailPane.style.display = "none";
@@ -43,13 +36,10 @@ function initTools() {
     switchTab();
     window.addEventListener("hashchange", switchTab);
 
-    loadPlugins();
     loadBuiltinTools();
     loadSkills();
     loadMcpServers();
 
-    searchInput.addEventListener("input", renderPlugins);
-    filterSelect.addEventListener("change", renderPlugins);
     builtinTabsEl.addEventListener("click", function (event) {
         var tab = event.target.closest("[data-tool-category]");
         if (!tab) return;
@@ -71,175 +61,6 @@ function initTools() {
         tabs[next].focus();
         tabs[next].click();
     });
-
-    document.getElementById("plugin-modal-close").addEventListener("click", closeModal);
-    document.getElementById("plugin-modal-cancel").addEventListener("click", closeModal);
-    modal.addEventListener("click", function (e) { if (e.target === modal) closeModal(); });
-
-    document.getElementById("plugin-edit-settings-btn").addEventListener("click", function () {
-        var wrap = document.getElementById("plugin-settings-edit-wrap");
-        var view = document.getElementById("plugin-settings-view");
-        if (wrap.style.display === "none") {
-            wrap.style.display = "";
-            view.style.display = "none";
-            this.textContent = "取消编辑";
-        } else {
-            wrap.style.display = "none";
-            view.style.display = "";
-            this.textContent = "编辑";
-        }
-    });
-
-    document.getElementById("plugin-save-btn").addEventListener("click", function () {
-        var editingId = modal.getAttribute("data-plugin-id");
-        var settingsWrap = document.getElementById("plugin-settings-edit-wrap");
-        var settings;
-
-        if (settingsWrap.style.display !== "none") {
-            var settingsText = document.getElementById("plugin-settings").value.trim();
-            settings = {};
-            if (settingsText) {
-                try {
-                    settings = JSON.parse(settingsText);
-                } catch (err) {
-                    showToast("设置 JSON 格式错误：" + err.message, "error");
-                    return;
-                }
-            }
-        } else {
-            settings = JSON.parse(document.getElementById("plugin-settings-view").textContent || "{}");
-        }
-
-        var payload = {
-            enabled: document.getElementById("plugin-enabled").checked,
-            settings: settings
-        };
-
-        fetch("/api/plugins/" + editingId, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        })
-            .then(function (r) {
-                if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-                showToast("已保存修改", "success");
-                closeModal();
-                loadPlugins();
-            })
-            .catch(function (err) { showToast("保存失败：" + err.message, "error"); });
-    });
-
-    function openModal() { modal.style.display = ""; }
-    function closeModal() { modal.style.display = "none"; }
-
-    function getMeta(id) {
-        return PLUGIN_META[id] || { icon: id.charAt(0).toUpperCase(), color: "#6b7280", desc: "" };
-    }
-
-    function loadPlugins() {
-        fetch("/api/plugins")
-            .then(function (r) { return r.json(); })
-            .then(function (plugins) {
-                allPlugins = plugins;
-                renderPlugins();
-            });
-    }
-
-    function renderPlugins() {
-        var query = searchInput.value.trim().toLowerCase();
-        var statusFilter = filterSelect.value;
-
-        var filtered = allPlugins.filter(function (p) {
-            if (query && p.id.toLowerCase().indexOf(query) === -1) return false;
-            if (statusFilter === "enabled" && !p.enabled) return false;
-            if (statusFilter === "disabled" && p.enabled) return false;
-            return true;
-        });
-
-        if (!filtered.length) {
-            listEl.innerHTML = '<div class="empty-state">' +
-                (allPlugins.length ? "未找到匹配的插件" : "暂无已注册插件") + "</div>";
-            return;
-        }
-
-        listEl.innerHTML = filtered.map(function (p) {
-            var meta = getMeta(p.id);
-            var statusBadge = p.enabled
-                ? '<span class="badge badge-success">已启用</span>'
-                : '<span class="badge badge-muted">已禁用</span>';
-
-            return '<div class="plugin-tile" data-id="' + p.id + '">' +
-                '<div class="plugin-tile-header">' +
-                    '<div class="plugin-avatar" style="background:' + meta.color + '">' + meta.icon + "</div>" +
-                    '<div class="plugin-tile-info">' +
-                        '<div class="plugin-tile-name">' + escapeHtml(p.id) + "</div>" +
-                        '<div class="plugin-tile-meta">' + statusBadge +
-                        '<span class="text-muted">' + p.tool_count + " 个工具</span></div>" +
-                    "</div>" +
-                "</div>" +
-                '<p class="plugin-tile-desc">' + escapeHtml(meta.desc) + "</p>" +
-                '<div class="plugin-tile-tags">' +
-                    p.tools.map(function (t) {
-                        return '<span class="tag' + (t.requires_approval ? " tag-warning" : "") + '">' +
-                            escapeHtml(t.name) + "</span>";
-                    }).join("") +
-                "</div>" +
-            "</div>";
-        }).join("");
-    }
-
-    listEl.addEventListener("click", function (e) {
-        var tile = e.target.closest(".plugin-tile");
-        if (!tile) return;
-        var id = tile.getAttribute("data-id");
-        openPluginDetail(id);
-    });
-
-    function openPluginDetail(id) {
-        var p = allPlugins.find(function (x) { return x.id === id; });
-        if (!p) return;
-        var meta = getMeta(p.id);
-
-        modal.setAttribute("data-plugin-id", id);
-        document.getElementById("plugin-modal-icon").textContent = meta.icon;
-        document.getElementById("plugin-modal-icon").style.background = meta.color;
-        document.getElementById("plugin-modal-title").textContent = p.id;
-        document.getElementById("plugin-modal-subtitle").textContent = meta.desc;
-        document.getElementById("plugin-enabled").checked = p.enabled;
-        document.getElementById("plugin-status-text").textContent = p.enabled ? "启用" : "禁用";
-        document.getElementById("plugin-tool-count").textContent = p.tool_count;
-
-        var toolsHtml = p.tools.map(function (t) {
-            var approvalBadge = t.requires_approval
-                ? '<span class="badge badge-warning">需审批</span>'
-                : '<span class="badge badge-muted">自动</span>';
-            return '<div class="tool-def-item">' +
-                '<div class="tool-def-header">' +
-                    '<code class="tool-def-name">' + escapeHtml(t.name) + "</code>" +
-                    approvalBadge +
-                "</div>" +
-                '<p class="tool-def-desc">' + escapeHtml(t.description) + "</p>" +
-                '<details class="tool-def-params"><summary>参数定义</summary>' +
-                "<pre>" + escapeHtml(JSON.stringify(t.parameters, null, 2)) + "</pre></details>" +
-            "</div>";
-        }).join("");
-
-        document.getElementById("plugin-tools-table").innerHTML = toolsHtml || '<p class="text-muted">无工具定义</p>';
-
-        var settingsJson = JSON.stringify(p.settings, null, 2);
-        document.getElementById("plugin-settings-view").textContent = settingsJson;
-        document.getElementById("plugin-settings-view").style.display = "";
-        document.getElementById("plugin-settings-edit-wrap").style.display = "none";
-        document.getElementById("plugin-settings").value = settingsJson;
-        document.getElementById("plugin-edit-settings-btn").textContent = "编辑";
-
-        var enabledCheckbox = document.getElementById("plugin-enabled");
-        enabledCheckbox.onchange = function () {
-            document.getElementById("plugin-status-text").textContent = this.checked ? "启用" : "禁用";
-        };
-
-        openModal();
-    }
 
     function builtinCategories() {
         var seen = {};
@@ -295,15 +116,27 @@ function initTools() {
                 if (tool.requires_approval) {
                     badges += ' <span class="badge badge-warning">需审批</span>';
                 }
+                if (tool.source_type === "plugin") {
+                    badges += ' <span class="badge badge-muted">来源：' +
+                        escapeHtml(tool.source_id || "plugin") + "</span>";
+                }
                 var toggle = '<label class="switch-label">' +
                     '<input type="checkbox" class="tool-toggle" data-tool="' + escapeHtml(tool.name) + '"' +
                     (tool.enabled ? " checked" : "") + ">" +
                     '<span class="switch switch-sm"></span>' +
                     "</label>";
+                var approvalToggle = '<label class="switch-label" title="要求审批">' +
+                    '<input type="checkbox" class="tool-approval-toggle" data-tool="' +
+                    escapeHtml(tool.name) + '"' +
+                    (tool.requires_approval ? " checked" : "") +
+                    (tool.approval_policy === "required" ? " disabled" : "") + ">" +
+                    '<span class="switch switch-sm"></span>' +
+                    '<span class="text-muted">审批</span></label>';
                 return '<div class="builtin-tool-item">' +
                     '<div class="builtin-tool-header">' +
                         '<code class="builtin-tool-name">' + escapeHtml(tool.name) + "</code>" +
-                        '<div class="builtin-tool-badges">' + toggle + badges + "</div>" +
+                        '<div class="builtin-tool-badges">' + toggle +
+                        approvalToggle + badges + "</div>" +
                     "</div>" +
                     '<p class="builtin-tool-desc">' + escapeHtml(tool.description) + "</p>" +
                 "</div>";
@@ -329,6 +162,30 @@ function initTools() {
                             return response.json().then(function (data) { throw new Error(data.detail); });
                         }
                         showToast(enabled ? "已启用 " + toolName : "已禁用 " + toolName, "success");
+                        loadBuiltinTools();
+                    })
+                    .catch(function (error) {
+                        showToast("操作失败：" + error.message, "error");
+                        renderBuiltinTools();
+                    });
+            });
+        });
+        builtinListEl.querySelectorAll(".tool-approval-toggle").forEach(function (checkbox) {
+            checkbox.addEventListener("change", function () {
+                var toolName = this.getAttribute("data-tool");
+                var requireApproval = this.checked;
+                fetch("/api/tools/" + encodeURIComponent(toolName), {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ require_approval: requireApproval }),
+                })
+                    .then(function (response) {
+                        if (!response.ok) {
+                            return response.json().then(function (data) {
+                                throw new Error(data.detail);
+                            });
+                        }
+                        showToast("已更新 " + toolName + " 的审批策略", "success");
                         loadBuiltinTools();
                     })
                     .catch(function (error) {
@@ -476,6 +333,7 @@ function initTools() {
         document.getElementById("skill-enabled").checked = true;
         document.getElementById("skill-desc-count").textContent = "0";
         document.getElementById("skill-submit-btn").textContent = "立即创建";
+        document.getElementById("skill-delete-btn").style.display = "none";
         skillModal.style.display = "";
     });
 
@@ -555,8 +413,23 @@ function initTools() {
             document.getElementById("skill-enabled").checked = s.enabled;
             document.getElementById("skill-desc-count").textContent = (s.description || "").length;
             document.getElementById("skill-submit-btn").textContent = "保存";
+            document.getElementById("skill-delete-btn").style.display = "";
             skillModal.style.display = "";
         });
+    });
+    document.getElementById("skill-delete-btn").addEventListener("click", function () {
+        if (!skillEditingId) return;
+        var id = skillEditingId;
+        showConfirm("确定删除技能“" + id + "”吗？").then(function (ok) {
+            if (!ok) return null;
+            return fetch("/api/skills/" + encodeURIComponent(id), { method: "DELETE" });
+        }).then(function (response) {
+            if (!response) return;
+            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            skillModal.style.display = "none";
+            showToast("技能已删除", "success");
+            loadSkills();
+        }).catch(function (error) { showToast("删除失败：" + error.message, "error"); });
     });
 
     /* ---- MCP 服务 ---- */
@@ -873,6 +746,19 @@ function initTools() {
     });
     document.getElementById("mcp-detail-edit").addEventListener("click", function () {
         if (currentMcpServer) openMcpEdit(currentMcpServer);
+    });
+    document.getElementById("mcp-detail-delete").addEventListener("click", function () {
+        if (!currentMcpServer) return;
+        var id = currentMcpServer.id;
+        showConfirm("确定删除 MCP 服务“" + id + "”吗？").then(function (ok) {
+            if (!ok) return null;
+            return fetch("/api/mcp/" + encodeURIComponent(id), { method: "DELETE" });
+        }).then(function (response) {
+            if (!response) return;
+            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            showToast("MCP 服务已删除", "success");
+            showMcpList();
+        }).catch(function (error) { showToast("删除失败：" + error.message, "error"); });
     });
     document.getElementById("mcp-detail-copy").addEventListener("click", function () {
         var text = document.getElementById("mcp-detail-config").textContent;

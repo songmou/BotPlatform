@@ -27,6 +27,8 @@ class ModelProfileOut(BaseModel):
     base_url: str
     api_key_env: Optional[str] = None
     model: str
+    modality: str = "chat"
+    dimensions: Optional[int] = None
     temperature: float
     max_tokens: int
     timeout_seconds: float
@@ -35,6 +37,7 @@ class ModelProfileOut(BaseModel):
     pricing: Optional[Dict[str, Optional[str]]] = None
     is_primary: bool = False
     is_fallback: bool = False
+    restart_required: bool = False
 
 
 class ModelStatusOut(BaseModel):
@@ -44,6 +47,8 @@ class ModelStatusOut(BaseModel):
     flash_profile_id: Optional[str] = None
     pro_profile_id: Optional[str] = None
     vision_profile_id: Optional[str] = None
+    embedding_profile_id: Optional[str] = None
+    rerank_profile_id: Optional[str] = None
     cooling_down: bool
     last_primary_error: Optional[str] = None
 
@@ -58,6 +63,8 @@ class ModelCreate(BaseModel):
     provider: str = ""
     base_url: str = ""
     model: str = ""
+    modality: str = "chat"
+    dimensions: Optional[int] = None
     api_key_env: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 2048
@@ -72,6 +79,8 @@ class ModelUpdate(BaseModel):
     provider: Optional[str] = None
     base_url: Optional[str] = None
     model: Optional[str] = None
+    modality: Optional[str] = None
+    dimensions: Optional[int] = None
     api_key_env: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -79,6 +88,33 @@ class ModelUpdate(BaseModel):
     enabled: Optional[bool] = None
     capabilities: Optional[Dict[str, bool]] = None
     pricing: Optional[Dict[str, Optional[str]]] = None
+
+
+class ModelRoleCandidate(BaseModel):
+    id: str
+    model: str
+    enabled: bool
+
+
+class ModelRolesOut(BaseModel):
+    active_model: str
+    fallback_model: str
+    local_model: str
+    flash_model: str
+    pro_model: str
+    vision_model: str
+    embedding_model: str
+    rerank_model: str
+    chat_candidates: List[ModelRoleCandidate] = []
+    vision_candidates: List[ModelRoleCandidate] = []
+    embedding_candidates: List[ModelRoleCandidate] = []
+    rerank_candidates: List[ModelRoleCandidate] = []
+
+
+class ModelRolesUpdate(BaseModel):
+    vision_model: Optional[str] = None
+    embedding_model: Optional[str] = None
+    rerank_model: Optional[str] = None
 
 
 class ModelFeedbackIn(BaseModel):
@@ -102,6 +138,7 @@ class AgentOut(BaseModel):
     system_prompt: str
     capabilities: List[Dict[str, str]]
     tools: List[str]
+    plugin_tools: Dict[str, List[str]] = {}
     skills: List[str] = []
     mcp_servers: List[str] = []
     model: Optional[str] = None
@@ -125,6 +162,7 @@ class AgentCreate(BaseModel):
     system_prompt: str = ""
     capabilities: List[AgentCapabilityIn] = []
     tools: List[str] = []
+    plugin_tools: Dict[str, List[str]] = {}
     skills: List[str] = []
     mcp_servers: List[str] = []
     model: Optional[str] = None
@@ -142,6 +180,7 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = None
     capabilities: Optional[List[AgentCapabilityIn]] = None
     tools: Optional[List[str]] = None
+    plugin_tools: Optional[Dict[str, List[str]]] = None
     skills: Optional[List[str]] = None
     mcp_servers: Optional[List[str]] = None
     model: Optional[str] = None
@@ -227,19 +266,42 @@ class PluginToolOut(BaseModel):
     description: str
     requires_approval: bool = False
     parameters: Dict[str, Any] = {}
+    approval_policy: str = "none"
 
 
 class PluginOut(BaseModel):
     id: str
+    name: str = ""
+    version: str = ""
+    description: str = ""
+    source: str = "bundled"
+    icon: str = ""
+    color: str = "#6b7280"
+    installed: bool = True
     enabled: bool
+    configuration_status: str = "valid"
+    runtime_status: str = "disabled"
+    restart_required: bool = False
+    missing_dependencies: List[str] = []
+    load_error: Optional[str] = None
+    setup_status: Optional[Dict[str, Any]] = None
     tool_count: int
     tools: List[PluginToolOut] = []
     settings: Dict[str, Any] = {}
+    settings_schema: Dict[str, Any] = {}
 
 
 class PluginUpdate(BaseModel):
     enabled: Optional[bool] = None
     settings: Optional[Dict[str, Any]] = None
+
+
+class PluginPackageIn(BaseModel):
+    source_path: str
+
+
+class PluginDataDeleteIn(BaseModel):
+    confirmation: str
 
 
 class ToolStateUpdate(BaseModel):
@@ -431,6 +493,15 @@ class KnowledgeEmbeddingConfigIn(BaseModel):
     timeout_seconds: float
 
 
+class KnowledgeEmbeddingStatusOut(BaseModel):
+    bound: bool
+    profile_id: Optional[str] = None
+    model: Optional[str] = None
+    dimensions: Optional[int] = None
+    enabled: bool = False
+    runtime_enabled: bool = False
+
+
 class KnowledgeAgentBindingsIn(BaseModel):
     category_ids: List[str]
 
@@ -459,6 +530,7 @@ class DriveFolderIn(BaseModel):
     tenant_id: Optional[str] = None
     path: str = ""
     name: str
+    exist_ok: bool = False
 
 
 class DriveEntryActionIn(BaseModel):

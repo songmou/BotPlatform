@@ -16,5 +16,7 @@ results/
 *.temp
 Thumbs.db
 Desktop.ini
-.github/
 .qoder/
+reports/
+
+Future.MD

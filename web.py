@@ -153,6 +153,7 @@ def _run_combined(args) -> int:
             print("警告：{}".format(warning), file=sys.stderr)
 
         try:
+            config = services.project_config
             registry = services.tenant_registry
             (
                 admin_auth,
@@ -185,15 +186,22 @@ def _run_combined(args) -> int:
                 drive_service=services.drive_service,
                 drive_audit_store=drive_audit_store,
                 plugin_context=runtime.plugin_context,
+                plugin_manager=runtime.plugin_manager,
                 scheduler=runtime.scheduler,
                 tool_audit_store=tool_audit_store,
                 model_analytics_store=services.model_analytics_store,
+                organization_store=services.organization_store,
+                resource_store=services.resource_store,
+                organization_control_store=services.organization_control_store,
+                credential_service=services.credential_service,
+                notification_service=runtime.notification_service,
                 admin_auth=admin_auth,
                 admin_user_store=admin_user_store,
                 admin_role_store=admin_role_store,
                 script_service=runtime.script_service,
                 script_registry=runtime.external_script_registry,
                 script_schedule_service=runtime.script_schedule_service,
+                channel_statuses=runtime.channel_statuses,
                 secure_cookies=args.behind_https,
                 owns_services=False,
             )
@@ -249,8 +257,9 @@ def _run_panel_only(args) -> int:
     from src.core.storage.tool_audit import ToolAuditStore
     from src.core.storage.drive_audit import DriveAuditStore
     from src.core.tooling import ToolRuntime
-    from src.core.plugins.registry import build_plugins
+    from src.core.plugins.registry import build_plugin_manager
     from src.core.plugins.base import PluginContext
+    from src.core.services.notification import NotificationService
     from src.core.paths import PROJECT_ROOT, SYSTEM_DATA_DIR
     from src.api.app import create_app
 
@@ -272,6 +281,7 @@ def _run_panel_only(args) -> int:
     for warning in services.model_warnings:
         print("警告：{}".format(warning), file=sys.stderr)
 
+    config = services.project_config
     model_router = services.model_router
     registry = services.tenant_registry
     conversation_store = services.conversation_store
@@ -308,14 +318,20 @@ def _run_panel_only(args) -> int:
         config.app.timezone,
     )
 
+    notification_service = NotificationService(
+        credentials_loader=lambda: credentials,
+        recipient_store=recipient_store,
+    )
     plugin_context = PluginContext(
         project_root=PROJECT_ROOT,
         tenant_registry=registry,
+        notification_service=notification_service,
+        timezone=config.app.timezone,
+        data_root=DATA_DIR / "plugins",
     )
-    platform_plugins = (
-        build_plugins(config.plugins, context=plugin_context)
-        if config.tools.enabled
-        else []
+    plugin_manager = build_plugin_manager(
+        config.plugins if config.tools.enabled else {},
+        context=plugin_context,
     )
 
     tool_audit_store = ToolAuditStore(registry)
@@ -336,7 +352,7 @@ def _run_panel_only(args) -> int:
             config.app.timezone,
             tenant_registry=registry,
             knowledge_service=knowledge_service,
-            plugins=platform_plugins,
+            plugin_manager=plugin_manager,
             script_service=script_service,
             script_schedule_service=script_schedule_service,
             tool_audit_store=tool_audit_store,
@@ -370,8 +386,11 @@ def _run_panel_only(args) -> int:
         script_schedule_service=script_schedule_service,
         tenant_registry=registry,
         schedule_store=schedule_store,
-        plugins=platform_plugins,
+        plugin_manager=plugin_manager,
+        notification_service=notification_service,
+        organization_control_store=services.organization_control_store,
     )
+    plugin_manager.start()
     scheduler.start()
 
     admin_auth, admin_user_store, admin_role_store, initial_password = (
@@ -385,9 +404,15 @@ def _run_panel_only(args) -> int:
         drive_service=services.drive_service,
         drive_audit_store=drive_audit_store,
         plugin_context=plugin_context,
+        plugin_manager=plugin_manager,
         scheduler=scheduler,
         tool_audit_store=tool_audit_store,
         model_analytics_store=model_analytics_store,
+        organization_store=services.organization_store,
+        resource_store=services.resource_store,
+        organization_control_store=services.organization_control_store,
+        credential_service=services.credential_service,
+        notification_service=notification_service,
         admin_auth=admin_auth,
         admin_user_store=admin_user_store,
         admin_role_store=admin_role_store,

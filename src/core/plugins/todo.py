@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from src.core.storage.database import Database
 
-from .base import PluginContext, PluginError, PluginToolDefinition
+from .base import PluginContext, PluginError, PluginJobDefinition, PluginToolDefinition
 
 
 SCHEMA_VERSION = 1
@@ -834,6 +834,51 @@ class TodoPlugin:
             raise ValueError("todo 缺少插件运行上下文")
         self._database_path: Path = context.tenant_registry.database_path
         self._timezone_name = context.timezone
+        self._notification_service = context.notification_service
+
+    @property
+    def background_jobs(self) -> List[PluginJobDefinition]:
+        return [PluginJobDefinition("due_reminders", 30)]
+
+    def start(self) -> None:
+        self.recover_inflight_reminders()
+
+    def run_background_job(
+        self, job_id: str, now: Optional[datetime] = None
+    ) -> bool:
+        if job_id != "due_reminders":
+            raise PluginError("未知待办后台任务：{}".format(job_id))
+        if self._notification_service is None:
+            return False
+        any_success = False
+        for event in self.claim_due_reminders(now):
+            tenant_id = str(event["tenant_id"])
+            number = int(event["todo_number"])
+            try:
+                enqueue = getattr(
+                    self._notification_service, "enqueue_todo_reminder", None
+                )
+                if callable(enqueue):
+                    enqueue(
+                        tenant_id,
+                        number,
+                        str(event["due_at"]),
+                        str(event["title"]),
+                    )
+                else:
+                    self._notification_service.enqueue_text_to_tenant(
+                        tenant_id,
+                        "【待办提醒】T{:04d} {}".format(number, event["title"]),
+                        source_type="todo",
+                        source_key="{}:{}".format(number, event["due_at"]),
+                        source_ref=str(number),
+                    )
+                any_success = True
+            except Exception as exc:
+                self.finish_reminder(
+                    tenant_id, number, False, str(exc), now=now
+                )
+        return any_success
 
     @property
     def tool_definitions(self) -> Mapping[str, PluginToolDefinition]:
@@ -845,7 +890,11 @@ class TodoPlugin:
     def execute(self, tool_name: str, arguments: Dict[str, Any], tenant: Any) -> Any:
         if tool_name != "todo_manage":
             raise PluginError("未知待办工具：{}".format(tool_name))
-        tenant_id = str(getattr(tenant, "tenant_id", "") or "")
+        tenant_id = str(
+            getattr(tenant, "personal_tenant_id", None)
+            or getattr(tenant, "tenant_id", "")
+            or ""
+        )
         if not tenant_id:
             raise PluginError("待办工具需要租户身份")
         action = arguments.get("action")

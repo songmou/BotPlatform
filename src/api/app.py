@@ -9,13 +9,18 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from src.api.auth import SecurityHeadersMiddleware, SessionAuthMiddleware
+from src.api.auth import (
+    OrganizationAuditMiddleware,
+    SecurityHeadersMiddleware,
+    SessionAuthMiddleware,
+)
 from src.api.routers import (
     admins,
     agents,
     auth,
     bots,
     chat,
+    content_v2,
     drive,
     knowledge,
     models,
@@ -28,6 +33,7 @@ from src.api.routers import (
     system,
     tenants,
     model_analytics,
+    v2,
 )
 
 API_DIR = Path(__file__).resolve().parent
@@ -37,6 +43,7 @@ STATIC_DIR = API_DIR / "static"
 
 def create_app(config, model_router, registry, conversation_store,
                tool_runtime=None, knowledge_service=None, plugin_context=None,
+               plugin_manager=None,
                scheduler=None, tool_audit_store=None,
                model_analytics_store=None,
                admin_auth=None, admin_user_store=None, admin_role_store=None,
@@ -44,7 +51,114 @@ def create_app(config, model_router, registry, conversation_store,
                script_schedule_service=None,
                drive_service=None, drive_audit_store=None,
                publish_store=None,
+               channel_statuses=None,
+               organization_store=None, resource_store=None,
+               organization_control_store=None,
+               credential_service=None,
+               notification_service=None,
                secure_cookies=False, owns_services=True) -> FastAPI:
+    if organization_store is None:
+        from src.core.storage.organizations import OrganizationStore
+
+        organization_store = OrganizationStore(registry)
+    unified_database = (
+        admin_user_store is not None
+        and getattr(getattr(organization_store, "database", None), "path", None)
+        == getattr(getattr(admin_user_store, "database", None), "path", None)
+    )
+    platform_owner = None
+    if unified_database:
+        organization_store.sync_users(admin_user_store)
+        users = admin_user_store.list_users()
+        if admin_role_store is not None:
+            for user in users:
+                try:
+                    if admin_role_store.get(user.role_id).code == "admin":
+                        platform_owner = user
+                        break
+                except Exception:  # noqa: BLE001 - migration must not block startup
+                    continue
+        if platform_owner is not None:
+            legacy_root = getattr(registry, "system_root", None)
+            if isinstance(legacy_root, Path):
+                organization_store.migrate_legacy_web_conversations(
+                    legacy_root / "web_conversations.json",
+                    platform_owner.user_id,
+                    platform_owner.username,
+                )
+    if resource_store is None:
+        from src.core.services.resources import ScopedResourceStore
+
+        resource_store = ScopedResourceStore(organization_store, config)
+    if organization_control_store is None:
+        from src.core.services.organization_controls import OrganizationControlStore
+
+        organization_control_store = OrganizationControlStore(
+            organization_store, resource_store, config
+        )
+    if credential_service is None:
+        from src.core.integrations.keychain import KeychainService
+        from src.core.services.credentials import CredentialService
+
+        credential_root = getattr(organization_store.registry, "system_root", None)
+        if not isinstance(credential_root, Path):
+            credential_root = getattr(admin_auth, "system_root", None)
+        if not isinstance(credential_root, Path):
+            database_path = getattr(organization_store.database, "path", None)
+            credential_root = (
+                database_path.parent
+                if isinstance(database_path, Path)
+                else API_DIR
+            )
+        credential_service = CredentialService(
+            organization_store,
+            KeychainService(
+                storage_path=credential_root / "organization_credentials.json"
+            ),
+            KeychainService(
+                storage_path=credential_root / "integration_credentials.json"
+            ),
+        )
+    if platform_owner is not None:
+        try:
+            legacy_script_schedules = (
+                script_schedule_service.store.list()
+                if script_schedule_service is not None
+                else []
+            )
+            if config.channels or config.schedules or legacy_script_schedules:
+                default_organization_id = organization_store.active_organization(
+                    platform_owner.user_id
+                ) or organization_store.ensure_debug_organization(
+                    platform_owner.user_id, platform_owner.username
+                )
+                if config.channels:
+                    organization_control_store.migrate_legacy_channels(
+                        default_organization_id,
+                        config.channels,
+                        platform_owner.user_id,
+                        credential_service,
+                    )
+                organization_control_store.migrate_legacy_schedules(
+                    default_organization_id,
+                    config.schedules,
+                    legacy_script_schedules,
+                    platform_owner.user_id,
+                )
+            if scheduler is not None:
+                reload_scripts = getattr(scheduler, "reload_script_schedules", None)
+                if callable(reload_scripts):
+                    reload_scripts()
+                reload_organizations = getattr(
+                    scheduler, "reload_organization_schedules", None
+                )
+                if callable(reload_organizations):
+                    reload_organizations()
+        except Exception:
+            # Migration errors are surfaced by organization management pages;
+            # startup must remain available for corrective administration.
+            pass
+
     # When the panel shares its service graph with the bot process
     # (owns_services=False), shutdown is handled by the bot runtime and the
     # lifespan hook must not close the shared services a second time.
@@ -74,6 +188,9 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.tool_runtime = tool_runtime
     app.state.knowledge_service = knowledge_service
     app.state.plugin_context = plugin_context
+    app.state.plugin_manager = plugin_manager or getattr(
+        tool_runtime, "plugin_manager", None
+    )
     app.state.scheduler = scheduler
     app.state.tool_audit_store = tool_audit_store
     app.state.model_analytics_store = model_analytics_store
@@ -88,14 +205,87 @@ def create_app(config, model_router, registry, conversation_store,
     from src.core.services.publish import PublishStore
 
     app.state.publish_store = publish_store or PublishStore()
+    app.state.channel_statuses = channel_statuses
+    app.state.organization_store = organization_store
+    app.state.resource_store = resource_store
+    app.state.organization_control_store = organization_control_store
+    app.state.credential_service = credential_service
+    app.state.notification_service = notification_service
     app.state.secure_cookies = secure_cookies
     app.state.owns_services = owns_services
+    if resource_store is not None:
+        def activate_platform_resource(
+            resource_type, resource_id, payload, _previous
+        ):
+            if resource_type == "agents":
+                return
+            if resource_type == "skills":
+                values = [
+                    item["payload"]
+                    for item in resource_store.list_public("skills")
+                    if item["resource_id"] != resource_id
+                ]
+                if payload is not None:
+                    values.append(payload)
+                config.update_skills(values)
+                return
+            if resource_type == "mcp":
+                from src.core.config.mcp_headers import merge_headers
+
+                values = [
+                    item["payload"]
+                    for item in resource_store.list_public("mcp")
+                    if item["resource_id"] != resource_id
+                ]
+                if payload is not None:
+                    values.append(payload)
+                values = merge_headers(values)
+                config.update_mcp_servers(values)
+                manager = getattr(tool_runtime, "mcp_manager", None)
+                if manager is not None:
+                    manager.reload(values)
+                return
+            if resource_type == "models":
+                if payload is None:
+                    previous = model_router.clients.pop(resource_id, None)
+                    if previous is not None:
+                        previous.close()
+                    return
+                from src.core.modeling.factory import create_model_client
+                from src.core.services.resources import _model_from_payload
+
+                profile = _model_from_payload(resource_id, payload)
+                if profile.modality != "chat":
+                    raise RuntimeError("向量或重排模型需要重启后生效")
+                replacement = None
+                if profile.enabled:
+                    logger = (
+                        model_analytics_store.record_model_call
+                        if model_analytics_store is not None
+                        else None
+                    )
+                    replacement = create_model_client(profile, logger=logger)
+                previous = model_router.clients.get(resource_id)
+                if replacement is None:
+                    model_router.clients.pop(resource_id, None)
+                else:
+                    model_router.clients[resource_id] = replacement
+                if previous is not None:
+                    previous.close()
+                return
+            if resource_type == "tools" and tool_runtime is not None:
+                from src.core.config.loader import ToolConfig
+
+                tool_runtime.reload_config(ToolConfig(**dict(payload)))
+
+        resource_store.set_activation_handler(activate_platform_resource)
     if drive_service is not None and knowledge_service is not None:
         attach = getattr(drive_service, "attach_knowledge_service", None)
         if callable(attach):
             attach(knowledge_service)
 
     app.add_middleware(SessionAuthMiddleware)
+    app.add_middleware(OrganizationAuditMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -104,6 +294,7 @@ def create_app(config, model_router, registry, conversation_store,
 
     app.include_router(auth.router)
     app.include_router(system.router)
+    app.include_router(content_v2.router)
     app.include_router(models.router)
     app.include_router(model_analytics.router)
     app.include_router(agents.router)
@@ -114,11 +305,12 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
     app.include_router(publish.router)
-    app.include_router(bots.bots_router)
+    app.include_router(bots.channels_router)
     app.include_router(skills.router)
     app.include_router(scripts.router)
     app.include_router(mcp.router)
     app.include_router(tenants.router)
     app.include_router(admins.router)
+    app.include_router(v2.router)
 
     return app

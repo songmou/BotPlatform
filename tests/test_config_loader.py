@@ -31,6 +31,10 @@ class ConfigLoaderTests(unittest.TestCase):
     def save_json(path: Path, data) -> None:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    @staticmethod
+    def script_manifest(directory: str, folder: str) -> Path:
+        return Path(directory) / "src" / "core" / "jobs" / folder / "script.json"
+
     def test_valid_project_configuration_loads(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
         self.assertEqual(config.app.default_agent, "general")
@@ -38,7 +42,7 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertIn("translator", config.agents)
         self.assertEqual(len(config.schedules), 7)
         self.assertEqual(
-            set(config.scripts), {"autogen_monitor", "ctsehr_check"}
+            set(config.scripts), {"autogen_monitor", "ctsehr_check", "ctsoa_check"}
         )
         self.assertTrue(
             all(not script.requires_approval for script in config.scripts.values())
@@ -64,6 +68,14 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(reminder.condition.after_hours, 20)
         self.assertEqual(reminder.condition.before_hours, 24)
         self.assertTrue(config.tools.enabled)
+        self.assertTrue(config.plugins["ocr"].enabled)
+        self.assertTrue(config.plugins["ocr"].settings["auto_process_chat_images"])
+        self.assertEqual(config.plugins["ocr"].settings["model_tier"], "small")
+        self.assertEqual(config.plugins["ocr"].settings["max_pdf_pages"], 10)
+        self.assertNotIn("ocr_extract_text", config.active_agent.tools)
+        self.assertIn(
+            "ocr_extract_text", config.active_agent.plugin_tools.get("ocr", [])
+        )
         self.assertIn("run_command", config.active_agent.tools)
         self.assertEqual(config.app.active_model, "deepseek_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
@@ -72,7 +84,11 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config.models["ollama_local"].model, "gemma4:e4b")
         self.assertEqual(config.app.local_model, "ollama_local")
         self.assertEqual(config.app.vision_model, "ollama_local")
-        self.assertFalse(config.embedding.enabled)
+        self.assertEqual(config.app.embedding_model, "bge_m3_local")
+        self.assertEqual(config.app.rerank_model, "")
+        self.assertEqual(config.models["bge_m3_local"].modality, "embedding")
+        self.assertEqual(config.models["bge_m3_local"].dimensions, 1024)
+        self.assertFalse(config.models["bge_m3_local"].enabled)
         self.assertEqual(config.app.fallback_model, "deepseek_cloud")
         self.assertEqual(config.app.fallback_cooldown_seconds, 60)
         self.assertIn("deepseek_cloud", config.models)
@@ -103,23 +119,33 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_script_approval_defaults_to_true_and_must_be_boolean(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            path = config_dir / "scripts.json"
+            path = self.script_manifest(directory, "ctsehr")
             data = self.load_json(path)
-            ctsehr = next(item for item in data["scripts"] if item["id"] == "ctsehr_check")
-            ctsehr.pop("requires_approval")
+            data.pop("requires_approval")
             self.save_json(path, data)
             config = load_project_config(config_dir)
             self.assertTrue(config.scripts["ctsehr_check"].requires_approval)
 
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            path = config_dir / "scripts.json"
+            path = self.script_manifest(directory, "ctsehr")
             data = self.load_json(path)
-            ctsehr = next(item for item in data["scripts"] if item["id"] == "ctsehr_check")
-            ctsehr["requires_approval"] = "false"
+            data["requires_approval"] = "false"
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "requires_approval.*布尔值"):
                 load_project_config(config_dir)
+
+    def test_jobs_folder_without_manifest_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            helper_dir = Path(directory) / "src" / "core" / "jobs" / "helpers"
+            helper_dir.mkdir()
+            (helper_dir / "shared.py").write_text("VALUE = 1\n", encoding="utf-8")
+            config = load_project_config(config_dir)
+            self.assertEqual(
+                set(config.scripts),
+                {"autogen_monitor", "ctsehr_check", "ctsoa_check"},
+            )
 
     def test_invalid_tool_root_and_unknown_agent_tool_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -318,6 +344,59 @@ class ConfigLoaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "未知 MCP 服务.*missing_server"):
                 load_project_config(config_dir)
 
+    def test_missing_plugin_binding_remains_visible_without_blocking_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            plugins_path = config_dir / "plugins.json"
+            plugins = self.load_json(plugins_path)
+            plugins["plugins"].append(
+                {
+                    "id": "retired_plugin",
+                    "enabled": True,
+                    "settings": {"legacy": True},
+                }
+            )
+            self.save_json(plugins_path, plugins)
+            agent_path = config_dir / "agents" / "general.json"
+            agent = self.load_json(agent_path)
+            agent.setdefault("plugin_tools", {})["retired_plugin"] = [
+                "retired_tool"
+            ]
+            self.save_json(agent_path, agent)
+
+            config = load_project_config(config_dir)
+            self.assertTrue(config.plugins["retired_plugin"].enabled)
+            self.assertEqual(
+                config.agents["general"].plugin_tools["retired_plugin"],
+                ["retired_tool"],
+            )
+
+    def test_installed_plugin_binding_rejects_unknown_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent = self.load_json(agent_path)
+            agent.setdefault("plugin_tools", {})["todo"] = ["missing_tool"]
+            self.save_json(agent_path, agent)
+            with self.assertRaisesRegex(
+                ConfigError,
+                r"plugin_tools\.todo\[0\].*插件中不存在的工具",
+            ):
+                load_project_config(config_dir)
+
+    def test_plugin_tool_in_tools_array_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent = self.load_json(agent_path)
+            agent["tools"] = list(agent.get("tools") or []) + ["todo_manage"]
+            self.save_json(agent_path, agent)
+            with self.assertRaisesRegex(
+                ConfigError,
+                r"tools\[\d+\].*请写入 plugin_tools",
+            ):
+                load_project_config(config_dir)
+
     def test_invalid_skill_and_mcp_entries_are_rejected_at_load_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
@@ -479,13 +558,11 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_script_registry_and_schedule_parameters_are_strictly_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            outside = Path(directory) / "outside.py"
-            outside.write_text("print('outside')\n", encoding="utf-8")
-            path = config_dir / "scripts.json"
+            path = self.script_manifest(directory, "ctsehr")
             data = self.load_json(path)
-            data["scripts"][0]["entrypoint"] = "outside.py"
+            data["entrypoint"] = "../ctsoa/monitor.py"
             self.save_json(path, data)
-            with self.assertRaisesRegex(ConfigError, "src/core/jobs 目录内"):
+            with self.assertRaisesRegex(ConfigError, "脚本目录内"):
                 load_project_config(config_dir)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -510,10 +587,14 @@ class ConfigLoaderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            path = config_dir / "scripts.json"
-            data = self.load_json(path)
-            data["scripts"].append(dict(data["scripts"][0]))
-            self.save_json(path, data)
+            duplicate_dir = Path(directory) / "src" / "core" / "jobs" / "zz_duplicate"
+            duplicate_dir.mkdir()
+            (duplicate_dir / "monitor.py").write_text(
+                "print('dup')\n", encoding="utf-8"
+            )
+            manifest = self.load_json(self.script_manifest(directory, "ctsehr"))
+            manifest["entrypoint"] = "monitor.py"
+            self.save_json(duplicate_dir / "script.json", manifest)
             with self.assertRaisesRegex(ConfigError, "脚本 id 重复"):
                 load_project_config(config_dir)
 
@@ -573,6 +654,80 @@ class ConfigLoaderTests(unittest.TestCase):
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "不能覆盖核心字段.*model"):
                 load_project_config(config_dir)
+
+    def test_modality_defaults_to_chat_when_field_absent(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        # Existing chat profiles omit the modality field entirely.
+        self.assertEqual(config.models["deepseek_cloud"].modality, "chat")
+        self.assertIsNone(config.models["deepseek_cloud"].dimensions)
+
+    def test_embedding_profile_requires_positive_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "models.json"
+            data = self.load_json(path)
+            del data["profiles"]["bge_m3_local"]["dimensions"]
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "dimensions.*大于 0 的整数"):
+                load_project_config(config_dir)
+
+    def test_embedding_profile_rejects_chat_only_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "models.json"
+            data = self.load_json(path)
+            data["profiles"]["bge_m3_local"]["temperature"] = 0.5
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "包含未知字段.*temperature"):
+                load_project_config(config_dir)
+
+    def test_rerank_profile_rejects_ollama_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "models.json"
+            data = self.load_json(path)
+            data["profiles"]["local_rerank"] = {
+                "enabled": False,
+                "modality": "rerank",
+                "type": "ollama",
+                "provider": "ollama",
+                "base_url": "http://127.0.0.1:11434",
+                "model": "bge-reranker",
+                "timeout_seconds": 60,
+            }
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "重排模型仅支持 openai_compatible"):
+                load_project_config(config_dir)
+
+    def test_role_binding_modalities_are_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "app.json"
+            data = self.load_json(path)
+            data["vision_model"] = "bge_m3_local"
+            self.save_json(path, data)
+            with self.assertRaisesRegex(
+                ConfigError, "vision_model 必须引用对话（chat）"
+            ):
+                load_project_config(config_dir)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "app.json"
+            data = self.load_json(path)
+            data["embedding_model"] = "deepseek_cloud"
+            self.save_json(path, data)
+            with self.assertRaisesRegex(
+                ConfigError, "embedding_model 必须引用向量（embedding）"
+            ):
+                load_project_config(config_dir)
+
+    def test_ollama_model_override_skips_embedding_profile(self) -> None:
+        with patch.dict("os.environ", {"OLLAMA_MODEL": "custom-chat"}, clear=False):
+            config = load_project_config(SOURCE_CONFIG)
+        # OLLAMA_MODEL rewrites the chat model but leaves embedding untouched.
+        self.assertEqual(config.models["ollama_local"].model, "custom-chat")
+        self.assertEqual(config.models["bge_m3_local"].model, "bge-m3")
 
 
 if __name__ == "__main__":

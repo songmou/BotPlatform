@@ -49,6 +49,7 @@ class WeChatILinkAdapter:
         send_image=True,
         typing=True,
         proactive=True,
+        reply=True,
         direct=True,
         group=False,
         max_image_bytes=MAX_IMAGE_BYTES,
@@ -140,6 +141,7 @@ class WeChatILinkAdapter:
             conversation_id=conversation_id,
             text=text,
             attachments=attachments,
+            addressed_to_bot=conversation_type == DIRECT,
             reply_context=(
                 {"context_token": context_token} if context_token else {}
             ),

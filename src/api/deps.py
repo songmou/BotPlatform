@@ -38,6 +38,10 @@ def get_plugin_context(request: Request):
     return request.app.state.plugin_context
 
 
+def get_plugin_manager(request: Request):
+    return getattr(request.app.state, "plugin_manager", None)
+
+
 def get_scheduler(request: Request):
     return getattr(request.app.state, "scheduler", None)
 
@@ -68,6 +72,34 @@ def get_drive_service(request: Request):
 
 def get_drive_audit_store(request: Request):
     return getattr(request.app.state, "drive_audit_store", None)
+
+
+def get_organization_store(request: Request):
+    service = getattr(request.app.state, "organization_store", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="组织服务不可用")
+    return service
+
+
+def get_resource_store(request: Request):
+    service = getattr(request.app.state, "resource_store", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="资源目录服务不可用")
+    return service
+
+
+def get_organization_control_store(request: Request):
+    service = getattr(request.app.state, "organization_control_store", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="组织运行配置服务不可用")
+    return service
+
+
+def get_credential_service(request: Request):
+    service = getattr(request.app.state, "credential_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="凭据服务不可用")
+    return service
 
 
 def get_admin_auth(request: Request) -> "AdminAuthService":

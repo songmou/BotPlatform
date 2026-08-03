@@ -41,6 +41,10 @@ _KNOWN_PERMISSIONS = {
     "model_analytics.manage",
     "knowledge.read",
     "knowledge.manage",
+    "plugins.read",
+    "plugins.manage",
+    "channels.read",
+    "channels.manage",
 }
 
 

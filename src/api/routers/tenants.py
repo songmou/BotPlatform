@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from src.api.deps import get_registry, require_permission
+from src.api.deps import (
+    get_credential_service,
+    get_organization_store,
+    get_registry,
+    require_permission,
+)
 from src.api.schemas import TenantDetailOut, TenantOverviewOut
+from src.core.services.credentials import CredentialError
+from src.core.storage.organizations import OrganizationError
 from src.core.storage.tenants import TenantStoreError
 
 router = APIRouter(prefix="/api/tenants", tags=["tenants"])
@@ -90,7 +97,23 @@ def delete_tenant(
     registry = get_registry(request)
     try:
         context = registry.get(tenant_id)
-        registry.delete(context)
+        with registry.database.read() as connection:
+            is_organization = connection.execute(
+                "SELECT 1 FROM organizations WHERE organization_id=?",
+                (tenant_id,),
+            ).fetchone()
+        if is_organization is None:
+            registry.delete(context)
+            return {"status": "ok"}
+        organization_store = get_organization_store(request)
+        backup_path = organization_store.backup_organization(tenant_id)
+        get_credential_service(request).delete_all(tenant_id)
+        organization_store.delete_after_backup(tenant_id)
     except TenantStoreError:
         raise HTTPException(status_code=404, detail="租户不存在")
-    return {"status": "ok"}
+    except (CredentialError, OrganizationError, OSError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="组织删除失败，未完成删除：{}".format(exc),
+        ) from exc
+    return {"status": "ok", "backup_id": backup_path.name}

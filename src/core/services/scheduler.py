@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.core.plugins.base import PlatformPlugin, PluginError
+from src.core.plugins.manager import PluginManager
 from src.core.services.agent import AgentService
 from src.core.config.loader import ScheduledTask
 from src.core.infrastructure.logging import log_scheduled_task
@@ -27,6 +28,7 @@ from src.core.services.script_schedule import (
     ScriptScheduleService,
     TenantScriptSchedule,
 )
+from src.core.services.organization_controls import OrganizationControlStore
 from src.core.storage.tenants import ScheduleStore, TenantContext, TenantRegistry
 
 
@@ -49,9 +51,11 @@ class SchedulerService:
         tenant_registry: TenantRegistry = None,
         schedule_store: ScheduleStore = None,
         plugins: Optional[List[PlatformPlugin]] = None,
+        plugin_manager: Optional[PluginManager] = None,
         memory_service: Optional[MemoryService] = None,
         notification_service: Optional[NotificationService] = None,
         script_schedule_service: Optional[ScriptScheduleService] = None,
+        organization_control_store: Optional[OrganizationControlStore] = None,
     ) -> None:
         self.credentials = credentials
         self.tasks = tasks or []
@@ -71,11 +75,14 @@ class SchedulerService:
         self.now_provider = now_provider
         self.script_service = script_service
         self.script_schedule_service = script_schedule_service
+        self.organization_control_store = organization_control_store
         self.tenant_registry = tenant_registry
         self.schedule_store = schedule_store
         self.memory_service = memory_service
+        self.plugin_manager = plugin_manager
         self._plugins: Dict[str, PlatformPlugin] = {
-            plugin.id: plugin for plugin in (plugins or [])
+            plugin.id: plugin
+            for plugin in (plugins or [])
         }
         if self.tenant_registry is None or self.schedule_store is None:
             raise ValueError("多用户调度器需要租户注册表和订阅存储")
@@ -92,6 +99,8 @@ class SchedulerService:
             self.notification_service = None
         self._started = False
         self._script_schedule_job_ids: set[str] = set()
+        self._organization_schedule_job_ids: set[str] = set()
+        self._organization_schedule_revisions: Dict[str, int] = {}
         if self.script_schedule_service is not None:
             self.script_schedule_service.set_reload_callback(
                 self.reload_script_schedules
@@ -125,19 +134,19 @@ class SchedulerService:
                     max_instances=1,
                     misfire_grace_time=1,
                 )
-        todo = self._plugins.get("todo")
-        if todo is not None and hasattr(todo, "claim_due_reminders"):
-            recover = getattr(todo, "recover_inflight_reminders", None)
-            if recover is not None:
-                recover(self.now_provider())
+        for plugin_id, job in self._plugin_background_jobs():
             self.scheduler.add_job(
-                self.run_due_todo_reminders,
-                trigger=IntervalTrigger(seconds=30, timezone=self.timezone_name),
-                id="todo_due_reminders",
+                self.run_plugin_background_job,
+                trigger=IntervalTrigger(
+                    seconds=job.interval_seconds,
+                    timezone=self.timezone_name,
+                ),
+                args=[plugin_id, job.id],
+                id="plugin:{}:{}".format(plugin_id, job.id),
                 replace_existing=True,
                 coalesce=True,
                 max_instances=1,
-                misfire_grace_time=30,
+                misfire_grace_time=job.interval_seconds,
             )
         if self.memory_service is not None:
             self.memory_service.recover_dirty()
@@ -167,6 +176,16 @@ class SchedulerService:
                 misfire_grace_time=3600,
             )
         self._register_script_schedules()
+        self._register_organization_schedules()
+        if self.organization_control_store is not None:
+            self.scheduler.add_job(
+                self._refresh_organization_schedules,
+                trigger=IntervalTrigger(seconds=5, timezone=self.timezone_name),
+                id="organization-schedules:refresh",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
         self.scheduler.start()
         self._started = True
 
@@ -182,6 +201,7 @@ class SchedulerService:
             return
         self.scheduler.remove_all_jobs()
         self._script_schedule_job_ids.clear()
+        self._organization_schedule_job_ids.clear()
         for task in self.tasks:
             if not task.enabled:
                 continue
@@ -200,6 +220,7 @@ class SchedulerService:
                     misfire_grace_time=1,
                 )
         self._register_script_schedules()
+        self._register_organization_schedules()
 
     @staticmethod
     def _script_schedule_job_id(item: TenantScriptSchedule, index: int) -> str:
@@ -314,6 +335,172 @@ class SchedulerService:
             run.tenant_id, schedule_id, run.run_id, run.status
         )
 
+    @staticmethod
+    def _organization_schedule_job_id(item: Dict[str, Any], index: int) -> str:
+        return "organization-schedule:{}:{}".format(item["schedule_id"], index + 1)
+
+    def _schedule_revision_snapshot(self) -> Dict[str, int]:
+        if self.organization_control_store is None:
+            return {}
+        return {
+            organization_id: int(row.get("schedules_revision", 0))
+            for organization_id, row in
+            self.organization_control_store.runtime_revisions().items()
+        }
+
+    def _register_organization_schedules(self) -> None:
+        controls = self.organization_control_store
+        if controls is None:
+            return
+        for item in controls.enabled_schedules():
+            action = item["action"]
+            try:
+                current = controls.dependency_revision(action)
+                if current != item["dependency_revision"]:
+                    raise ValueError("依赖版本已变化，需要组织管理员重新确认")
+            except Exception as exc:
+                controls.pause_schedule(
+                    item["schedule_id"], "定时任务已暂停：{}".format(exc)
+                )
+                continue
+            for index, cron in enumerate(item["crons"]):
+                job_id = self._organization_schedule_job_id(item, index)
+                self.scheduler.add_job(
+                    self.run_organization_schedule,
+                    trigger=CronTrigger.from_crontab(
+                        cron, timezone=self.timezone_name
+                    ),
+                    args=[item["organization_id"], item["id"]],
+                    id=job_id,
+                    replace_existing=True,
+                    coalesce=True,
+                    max_instances=1,
+                    misfire_grace_time=30,
+                )
+                self._organization_schedule_job_ids.add(job_id)
+        self._organization_schedule_revisions = self._schedule_revision_snapshot()
+
+    def _refresh_organization_schedules(self) -> None:
+        current = self._schedule_revision_snapshot()
+        if current == self._organization_schedule_revisions:
+            return
+        for job_id in list(self._organization_schedule_job_ids):
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception:
+                pass
+        self._organization_schedule_job_ids.clear()
+        self._register_organization_schedules()
+
+    def reload_organization_schedules(self) -> None:
+        """Force an immediate reload after panel-side database migration."""
+        self._organization_schedule_revisions = {}
+        if self._started:
+            self._refresh_organization_schedules()
+
+    def run_organization_schedule(
+        self, organization_id: str, schedule_key: str
+    ) -> bool:
+        controls = self.organization_control_store
+        if controls is None or self.notification_service is None:
+            return False
+        item = controls.get_schedule(organization_id, schedule_key)
+        if not item["enabled"]:
+            return False
+        run_id = controls.record_schedule_run(
+            item["schedule_id"], organization_id, "running", "任务开始执行"
+        )
+        try:
+            action = item["action"]
+            current = controls.dependency_revision(action)
+            if current != item["dependency_revision"]:
+                controls.finish_schedule_run(
+                    run_id, "failed", "依赖版本已变化，需要组织管理员重新确认"
+                )
+                controls.pause_schedule(
+                    item["schedule_id"],
+                    "依赖版本已变化，需要组织管理员重新确认",
+                )
+                self._refresh_organization_schedules()
+                return False
+            address_store = getattr(self.notification_service, "address_store", None)
+            endpoint = (
+                address_store.latest_endpoint(organization_id)
+                if address_store is not None
+                else None
+            )
+            if endpoint is None:
+                controls.finish_schedule_run(
+                    run_id, "skipped", "当前组织没有有效的最近活跃渠道用户"
+                )
+                return False
+            message = ""
+            action_type = str(action.get("type") or "")
+            tenant = self.tenant_registry.get(organization_id)
+            if action_type == "text":
+                message = str(action.get("content") or "")
+            elif action_type == "agent_prompt":
+                if self.agent_service is None:
+                    raise ValueError("智能体服务不可用")
+                outcome = self.agent_service.chat(
+                    tenant,
+                    str(action.get("prompt") or ""),
+                    agent_id=str(action.get("agent_id") or ""),
+                    source="schedule",
+                    allow_tools=True,
+                    allow_private_context=False,
+                )
+                message = outcome.text
+            elif action_type == "script":
+                if self.script_service is None:
+                    raise ValueError("平台脚本服务不可用")
+                result = self.script_service.submit(
+                    tenant,
+                    str(action.get("script_id") or ""),
+                    action.get("parameters", {}),
+                    trigger="organization_schedule:{}".format(item["schedule_id"]),
+                    recipient=None,
+                )
+                status = str(result.get("status") or "running")
+                controls.finish_schedule_run(
+                    run_id,
+                    "skipped" if status == "skipped" else "succeeded",
+                    "脚本任务已提交：{}".format(result.get("run_id", "-")),
+                )
+                return status != "skipped"
+            elif action_type == "plugin":
+                if self.plugin_manager is None:
+                    raise ValueError("平台插件服务不可用")
+                result = self.plugin_manager.execute(
+                    str(action.get("tool_name") or ""),
+                    action.get("parameters", {}),
+                    tenant,
+                )
+                if isinstance(result, dict):
+                    message = str(result.get("summary") or "")
+                elif isinstance(result, str):
+                    message = result
+                if not message:
+                    controls.finish_schedule_run(
+                        run_id, "succeeded", "插件任务执行成功，无需发送消息"
+                    )
+                    return True
+            else:
+                raise ValueError("不支持的组织定时任务动作")
+            self.notification_service.enqueue_text_to_tenant(
+                organization_id,
+                message,
+                source_type="organization_schedule",
+                source_ref=item["schedule_id"],
+                attempt_immediately=True,
+            )
+            controls.finish_schedule_run(run_id, "succeeded", "消息已入队")
+            return True
+        except Exception as exc:
+            controls.finish_schedule_run(run_id, "failed", str(exc))
+            self.logger(schedule_key, "失败", str(exc), organization_id)
+            return False
+
     def run_task(self, task: ScheduledTask) -> bool:
         tenants = self.schedule_store.enabled_tenants(task.id)
         any_success = False
@@ -324,52 +511,42 @@ class SchedulerService:
             self.logger(task.id, "跳过", "没有用户订阅此任务", None)
         return any_success
 
-    def run_due_todo_reminders(self) -> bool:
-        """Deliver due one-off todo reminders claimed atomically by the plugin."""
-        todo = self._plugins.get("todo")
-        if todo is None:
-            return False
-        due = getattr(todo, "due_reminders", None)
-        claim = getattr(todo, "claim_due_reminders", None)
-        finish = getattr(todo, "finish_reminder", None)
-        if (due is None and claim is None) or finish is None:
-            return False
-        any_success = False
-        events = due(self.now_provider()) if due is not None else claim(self.now_provider())
-        for event in events:
-            tenant_id = str(event["tenant_id"])
-            number = int(event["todo_number"])
-            try:
-                enqueue_todo = getattr(
-                    self.notification_service, "enqueue_todo_reminder", None
+    def _plugin_background_jobs(self):
+        if self.plugin_manager is not None:
+            return self.plugin_manager.background_jobs()
+        result = []
+        for plugin in self._plugins.values():
+            for job in getattr(plugin, "background_jobs", []):
+                result.append((plugin.id, job))
+        return result
+
+    def run_plugin_background_job(self, plugin_id: str, job_id: str) -> bool:
+        try:
+            if self.plugin_manager is not None:
+                result = self.plugin_manager.run_background_job(
+                    plugin_id, job_id, self.now_provider()
                 )
-                if callable(enqueue_todo):
-                    enqueue_todo(
-                        tenant_id,
-                        number,
-                        str(event["due_at"]),
-                        str(event["title"]),
-                    )
-                else:
-                    message = "【待办提醒】{} {}".format(
-                        "T{:04d}".format(number), event["title"]
-                    )
-                    self.notification_service.enqueue_text_to_tenant(
-                        tenant_id,
-                        message,
-                        source_type="todo",
-                        source_key="{}:{}".format(number, event["due_at"]),
-                        source_ref=str(number),
-                    )
-                message = "【待办提醒】{} {}".format(
-                    "T{:04d}".format(number), event["title"]
-                )
-                self.logger("todo_due_reminders", "已入队", message, tenant_id)
-                any_success = True
-            except Exception as exc:
-                finish(tenant_id, number, False, str(exc), now=self.now_provider())
-                self.logger("todo_due_reminders", "失败", str(exc), tenant_id)
-        return any_success
+            else:
+                plugin = self._plugins.get(plugin_id)
+                runner = getattr(plugin, "run_background_job", None) if plugin else None
+                if not callable(runner):
+                    return False
+                result = runner(job_id, self.now_provider())
+            self.logger(
+                "plugin:{}:{}".format(plugin_id, job_id),
+                "完成",
+                "插件后台任务已执行",
+                None,
+            )
+            return bool(result)
+        except Exception as exc:
+            self.logger(
+                "plugin:{}:{}".format(plugin_id, job_id),
+                "失败",
+                str(exc),
+                None,
+            )
+            return False
 
     def _run_task_for_tenant(
         self, task: ScheduledTask, tenant: TenantContext
@@ -423,11 +600,21 @@ class SchedulerService:
     ) -> bool:
         plugin_id = task.action.plugin_id or ""
         tool_name = task.action.tool_name or ""
-        plugin = self._plugins.get(plugin_id)
-        if plugin is None:
-            raise ValueError("插件 {} 未加载或不存在".format(plugin_id))
         try:
-            result = plugin.execute(tool_name, task.action.parameters, tenant)
+            if self.plugin_manager is not None:
+                manifest = self.plugin_manager.manifest_for_tool(tool_name)
+                if manifest is None or manifest.id != plugin_id:
+                    raise ValueError("插件 {} 未加载或不存在".format(plugin_id))
+                result = self.plugin_manager.execute(
+                    tool_name,
+                    task.action.parameters,
+                    tenant,
+                )
+            else:
+                plugin = self._plugins.get(plugin_id)
+                if plugin is None:
+                    raise ValueError("插件 {} 未加载或不存在".format(plugin_id))
+                result = plugin.execute(tool_name, task.action.parameters, tenant)
         except PluginError as exc:
             raise ValueError("插件执行失败：{}".format(exc)) from exc
         summary = ""

@@ -2,23 +2,28 @@
 {% block title %}知识库 - BotPlatform{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/knowledge.css">{% endblock %}
 {% block content %}
-<div class="page-container">
+<div class="page-container" id="knowledge-page" data-resource-mode="{{ resource_mode|default('platform-public') }}">
     <div class="page-header">
         <h2>知识库</h2>
-        <p class="page-desc">管理公共与私有知识库、关联网盘原文件，并配置向量化服务</p>
+        <p class="page-desc">{% if resource_mode == 'organization' %}管理当前组织共享知识，并只读浏览平台公共知识{% else %}管理平台公共知识、关联网盘原文件，并查看向量化服务{% endif %}</p>
     </div>
 
     <div class="tab-bar knowledge-tabs" role="tablist" aria-label="知识库视图">
+        {% if resource_mode == 'organization' %}
+        <button class="tab-btn active" type="button" data-knowledge-tab="tenant"
+                role="tab" aria-selected="true">组织知识</button>
+        <button class="tab-btn" type="button" data-knowledge-tab="public"
+                role="tab" aria-selected="false">公共知识（只读）</button>
+        {% else %}
         <button class="tab-btn active" type="button" data-knowledge-tab="public"
                 role="tab" aria-selected="true">公共知识</button>
-        <button class="tab-btn" type="button" data-knowledge-tab="tenant"
-                role="tab" aria-selected="false">私有知识</button>
+        {% endif %}
         <button class="tab-btn" type="button" data-knowledge-tab="embedding"
                 role="tab" aria-selected="false">向量配置</button>
     </div>
 
     <div id="knowledge-library-panel">
-        <input type="hidden" id="knowledge-scope" value="public">
+        <input type="hidden" id="knowledge-scope" value="{% if resource_mode == 'organization' %}tenant{% else %}public{% endif %}">
         <div id="knowledge-status" class="status-card" style="display:none"></div>
         <div id="knowledge-embedding-notice" class="status-card" style="display:none">
             向量化服务当前未启用。新增知识将保持“等待向量化”，检索仅使用全文匹配；
@@ -28,7 +33,7 @@
         <div class="knowledge-context-bar">
             <div class="knowledge-toolbar-group">
                 <span class="knowledge-group-label">当前知识库</span>
-                <select id="knowledge-tenant" aria-label="租户"></select>
+                <select id="knowledge-tenant" class="tenant-select" aria-label="租户"></select>
                 <select id="knowledge-category" aria-label="知识库"></select>
             </div>
             <div class="knowledge-toolbar-group knowledge-library-actions" aria-label="知识库管理">
@@ -58,6 +63,7 @@
                     <button id="knowledge-refresh-selected" class="btn-secondary" disabled>刷新所选</button>
                     <select id="knowledge-move-target"><option value="">移动到…</option></select>
                     <button id="knowledge-move-selected" class="btn-secondary" disabled>移动</button>
+                    <button id="knowledge-delete-selected" class="btn-danger" disabled>删除所选</button>
                 </div>
                 <div class="knowledge-toolbar-group knowledge-create-actions">
                     <span class="knowledge-group-label">新增来源</span>
@@ -96,52 +102,40 @@
 
     <div id="knowledge-embedding-panel" style="display:none">
         <div class="knowledge-config-layout">
-            <form id="knowledge-embedding-form" class="knowledge-config-card">
+            <div class="knowledge-config-card">
                 <div class="knowledge-config-heading">
                     <div>
                         <h3>向量化服务</h3>
                         <p class="text-muted">用于生成知识分块向量，提升语义检索效果。</p>
                     </div>
-                    <label class="knowledge-switch">
-                        <input type="checkbox" id="knowledge-embedding-enabled">
-                        <span>启用</span>
-                    </label>
+                    <span id="knowledge-embedding-badge" class="badge badge-fallback">未绑定</span>
                 </div>
                 <div class="knowledge-form-grid">
                     <div class="form-group">
-                        <label for="knowledge-embedding-id">配置 ID</label>
-                        <input id="knowledge-embedding-id" required maxlength="64"
-                               placeholder="如 bge_m3_local">
+                        <label>绑定档案</label>
+                        <div id="knowledge-embedding-id" class="text-muted">—</div>
                     </div>
                     <div class="form-group">
-                        <label for="knowledge-embedding-model">模型名称</label>
-                        <input id="knowledge-embedding-model" required placeholder="如 bge-m3">
-                    </div>
-                    <div class="form-group knowledge-form-wide">
-                        <label for="knowledge-embedding-url">服务地址</label>
-                        <input type="url" id="knowledge-embedding-url" required
-                               placeholder="http://127.0.0.1:11434">
-                        <small>远程地址必须使用 HTTPS；仅本机回环地址可使用 HTTP。</small>
+                        <label>模型名称</label>
+                        <div id="knowledge-embedding-model" class="text-muted">—</div>
                     </div>
                     <div class="form-group">
-                        <label for="knowledge-embedding-dimensions">向量维度</label>
-                        <input type="number" id="knowledge-embedding-dimensions" min="1" required>
+                        <label>向量维度</label>
+                        <div id="knowledge-embedding-dimensions" class="text-muted">—</div>
                     </div>
                     <div class="form-group">
-                        <label for="knowledge-embedding-timeout">超时时间（秒）</label>
-                        <input type="number" id="knowledge-embedding-timeout"
-                               min="0.1" max="600" step="0.1" required>
+                        <label>运行状态</label>
+                        <div id="knowledge-embedding-runtime" class="text-muted">—</div>
                     </div>
                 </div>
                 <div class="knowledge-config-footer">
-                    <span id="knowledge-embedding-runtime" class="text-muted"></span>
-                    <button type="submit" class="btn-primary">保存配置</button>
+                    <a class="btn-primary" href="/models">前往模型管理</a>
                 </div>
-            </form>
+            </div>
             <aside class="knowledge-config-note">
-                <h4>生效说明</h4>
-                <p>配置写入 <code>config/embeddings.json</code>，不会热重载。</p>
-                <p>保存后请完整停止旧进程并重新启动服务。重启后回到知识库，使用“补齐当前库向量”处理存量知识。</p>
+                <h4>配置说明</h4>
+                <p>向量模型已统一在 <code>config/models.json</code> 管理，请在“模型管理 → 角色绑定”中选择向量模型。</p>
+                <p>变更绑定后不会热重载，请完整停止旧进程并重新启动服务。重启后回到知识库，使用“补齐当前库向量”处理存量知识。</p>
             </aside>
         </div>
     </div>
@@ -225,5 +219,5 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/js/knowledge.js"></script>
-<script>initKnowledge();</script>
+<script>runScopedModule("knowledge", initKnowledge);</script>
 {% endblock %}

@@ -8,13 +8,12 @@ import secrets
 import shutil
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.core.storage.database import Database, DatabaseError
-from src.core.storage.migration import LegacyDataMigrator, LegacyMigrationError
 from src.core.modeling import CanonicalMessage
 
 
@@ -30,6 +29,8 @@ class TenantContext:
     tenant_id: str
     bot_id: str
     user_id: str
+    member_user_id: Optional[int] = field(default=None, compare=False)
+    personal_tenant_id: Optional[str] = field(default=None, compare=False)
 
 
 def _utc_now() -> str:
@@ -55,12 +56,6 @@ class TenantRegistry:
         try:
             self.database = database or Database(self.system_root / "botplatform.sqlite3")
         except DatabaseError as exc:
-            raise TenantStoreError(str(exc)) from exc
-        try:
-            self.legacy_migrations = LegacyDataMigrator(
-                self.data_root, self.database
-            ).migrate()
-        except LegacyMigrationError as exc:
             raise TenantStoreError(str(exc)) from exc
         self._retry_cleanup_jobs()
 
@@ -108,7 +103,23 @@ class TenantRegistry:
         context = self._from_row(row)
         self._validate_context(context)
         self._initialize_tenant(context)
+        organizations = getattr(self, "organization_store", None)
+        if (
+            organizations is not None
+            and not bot_id.startswith("member-personal:")
+        ):
+            organizations.ensure_legacy_organization(context.tenant_id)
         return context
+
+    def member_personal_context(
+        self, organization_id: str, member_user_id: int
+    ) -> TenantContext:
+        """Return the private storage subject for one member in an organization."""
+        self.get(organization_id)
+        return self.resolve(
+            "member-personal:{}".format(organization_id),
+            str(member_user_id),
+        )
 
     def get(self, tenant_id: str) -> TenantContext:
         self._validate_tenant_id(tenant_id)
@@ -122,15 +133,27 @@ class TenantRegistry:
             raise TenantStoreError("未找到租户：{}".format(tenant_id))
         return self._from_row(row)
 
-    def list_contexts(self) -> List[TenantContext]:
+    def list_contexts(
+        self, include_internal: bool = False
+    ) -> List[TenantContext]:
+        internal_clause = (
+            "" if include_internal else "AND bot_id NOT LIKE 'member-personal:%' "
+        )
         with self.database.read() as connection:
             rows = connection.execute(
                 "SELECT tenant_id, bot_id, user_id FROM tenants "
-                "WHERE deleting=0 ORDER BY created_at"
+                "WHERE deleting=0 {}ORDER BY created_at".format(internal_clause)
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
-    def list_overviews(self) -> List[Dict[str, Any]]:
+    def list_overviews(
+        self, include_internal: bool = False
+    ) -> List[Dict[str, Any]]:
+        internal_clause = (
+            ""
+            if include_internal
+            else "AND t.bot_id NOT LIKE 'member-personal:%' "
+        )
         with self.database.read() as connection:
             rows = connection.execute(
                 "SELECT t.tenant_id, t.bot_id, t.user_id, t.created_at, "
@@ -141,7 +164,9 @@ class TenantRegistry:
                 "LEFT JOIN (SELECT tenant_id, COUNT(*) AS message_count, "
                 "MAX(created_at) AS last_active_at FROM conversation_events "
                 "GROUP BY tenant_id) e ON e.tenant_id = t.tenant_id "
-                "WHERE t.deleting=0 ORDER BY t.created_at"
+                "WHERE t.deleting=0 {}ORDER BY t.created_at".format(
+                    internal_clause
+                )
             ).fetchall()
         return [
             {
@@ -242,33 +267,82 @@ class ConversationStore:
         self._locks: Dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
 
-    def lock_for(self, tenant_id: str) -> threading.RLock:
-        """Share one tenant lock across chat turns and proactive deliveries."""
-        with self._locks_guard:
-            return self._locks.setdefault(tenant_id, threading.RLock())
+    @staticmethod
+    def _lock_key(tenant_id: str, session_key: str = "direct") -> str:
+        return "{}\x1f{}".format(tenant_id, session_key or "direct")
 
-    def load_context(self, tenant_id: str) -> List[CanonicalMessage]:
-        with self.lock_for(tenant_id):
+    def lock_for(
+        self,
+        tenant_id: str,
+        session_key: str = "direct",
+    ) -> threading.RLock:
+        """Share one tenant lock across chat turns and proactive deliveries."""
+        key = self._lock_key(tenant_id, session_key)
+        with self._locks_guard:
+            return self._locks.setdefault(key, threading.RLock())
+
+    def load_context(
+        self,
+        tenant_id: str,
+        session_key: str = "direct",
+        user_id: Optional[int] = None,
+    ) -> List[CanonicalMessage]:
+        with self.lock_for(tenant_id, session_key):
             with self.registry.database.read() as connection:
-                rows = connection.execute(
-                    "SELECT role, content FROM conversation_context_messages "
-                    "WHERE tenant_id=? ORDER BY message_id DESC LIMIT ?",
-                    (tenant_id, self.max_messages),
-                ).fetchall()
+                if user_id is None:
+                    rows = connection.execute(
+                        "SELECT role, content FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=? "
+                        "ORDER BY message_id DESC LIMIT ?",
+                        (tenant_id, session_key, self.max_messages),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        "SELECT role, content FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=? AND user_id=? "
+                        "ORDER BY message_id DESC LIMIT ?",
+                        (tenant_id, session_key, user_id, self.max_messages),
+                    ).fetchall()
         return [CanonicalMessage(str(row["role"]), str(row["content"])) for row in reversed(rows)]
 
-    def save_context(self, tenant_id: str, messages: Iterable[CanonicalMessage]) -> None:
+    def save_context(
+        self,
+        tenant_id: str,
+        messages: Iterable[CanonicalMessage],
+        session_key: str = "direct",
+        user_id: Optional[int] = None,
+    ) -> None:
         kept = list(messages)[-self.max_messages :]
         now = _utc_now()
-        with self.lock_for(tenant_id):
+        with self.lock_for(tenant_id, session_key):
             with self.registry.database.transaction(immediate=True) as connection:
-                connection.execute(
-                    "DELETE FROM conversation_context_messages WHERE tenant_id=?", (tenant_id,)
-                )
+                if user_id is None:
+                    connection.execute(
+                        "DELETE FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=?",
+                        (tenant_id, session_key),
+                    )
+                else:
+                    connection.execute(
+                        "DELETE FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=? AND user_id=?",
+                        (tenant_id, session_key, user_id),
+                    )
                 connection.executemany(
-                    "INSERT INTO conversation_context_messages(tenant_id, role, content, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    [(tenant_id, item.role, item.content, now) for item in kept],
+                    "INSERT INTO conversation_context_messages("
+                    "tenant_id, role, content, created_at, session_key, user_id"
+                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            tenant_id,
+                            item.role,
+                            item.content,
+                            now,
+                            session_key,
+                            user_id,
+                        )
+                        for item in kept
+                    ],
                 )
 
     def record_outbound_message(
@@ -295,48 +369,103 @@ class ConversationStore:
                         return False
                 connection.execute(
                     "INSERT INTO conversation_context_messages"
-                    "(tenant_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                    "(tenant_id, role, content, created_at, session_key) "
+                    "VALUES (?, 'assistant', ?, ?, 'direct')",
                     (tenant_id, content, now),
                 )
                 connection.execute(
                     "DELETE FROM conversation_context_messages "
-                    "WHERE tenant_id=? AND message_id NOT IN ("
+                    "WHERE tenant_id=? AND session_key='direct' "
+                    "AND message_id NOT IN ("
                     "SELECT message_id FROM conversation_context_messages "
-                    "WHERE tenant_id=? ORDER BY message_id DESC LIMIT ?"
+                    "WHERE tenant_id=? AND session_key='direct' "
+                    "ORDER BY message_id DESC LIMIT ?"
                     ")",
                     (tenant_id, tenant_id, self.max_messages),
                 )
                 connection.execute(
                     "INSERT INTO conversation_events"
-                    "(tenant_id, role, content, image, event_type, created_at) "
-                    "VALUES (?, 'assistant', ?, ?, 'notification', ?)",
+                    "(tenant_id, role, content, image, event_type, created_at, "
+                    "session_key) VALUES (?, 'assistant', ?, ?, 'notification', "
+                    "?, 'direct')",
                     (tenant_id, content, int(image), now),
                 )
         return True
 
-    def append_transcript(self, tenant_id: str, role: str, content: str, image: bool = False) -> None:
+    def append_transcript(
+        self,
+        tenant_id: str,
+        role: str,
+        content: str,
+        image: bool = False,
+        session_key: str = "direct",
+        user_id: Optional[int] = None,
+        actor_type: Optional[str] = None,
+        actor_account: str = "",
+    ) -> None:
         if role not in {"user", "assistant", "system"} or not isinstance(content, str):
             raise TenantStoreError("永久对话记录格式无效")
-        with self.lock_for(tenant_id):
+        with self.lock_for(tenant_id, session_key):
+            resolved_actor = actor_type or (
+                "member" if user_id is not None else (
+                    "agent" if role == "assistant" else "system"
+                )
+            )
+            if resolved_actor not in {
+                "member", "channel_user", "agent", "system_task", "system"
+            }:
+                raise TenantStoreError("消息操作者类型无效")
             with self.registry.database.transaction() as connection:
                 connection.execute(
                     "INSERT INTO conversation_events"
-                    "(tenant_id, role, content, image, event_type, created_at) "
-                    "VALUES (?, ?, ?, ?, 'message', ?)",
-                    (tenant_id, role, content, int(image), _utc_now()),
+                    "(tenant_id, role, content, image, event_type, created_at, "
+                    "session_key, user_id, actor_type, actor_account) "
+                    "VALUES (?, ?, ?, ?, 'message', ?, ?, ?, ?, ?)",
+                    (
+                        tenant_id,
+                        role,
+                        content,
+                        int(image),
+                        _utc_now(),
+                        session_key,
+                        user_id,
+                        resolved_actor,
+                        str(actor_account or ""),
+                    ),
                 )
 
-    def clear_context(self, tenant_id: str) -> None:
-        with self.lock_for(tenant_id):
+    def clear_context(
+        self,
+        tenant_id: str,
+        session_key: str = "direct",
+        user_id: Optional[int] = None,
+    ) -> None:
+        with self.lock_for(tenant_id, session_key):
             with self.registry.database.transaction(immediate=True) as connection:
-                connection.execute(
-                    "DELETE FROM conversation_context_messages WHERE tenant_id=?", (tenant_id,)
-                )
+                if user_id is None:
+                    connection.execute(
+                        "DELETE FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=?",
+                        (tenant_id, session_key),
+                    )
+                else:
+                    connection.execute(
+                        "DELETE FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=? AND user_id=?",
+                        (tenant_id, session_key, user_id),
+                    )
                 connection.execute(
                     "INSERT INTO conversation_events"
-                    "(tenant_id, role, content, image, event_type, created_at) "
-                    "VALUES (?, 'system', ?, 0, 'context_cleared', ?)",
-                    (tenant_id, "用户清除了当前对话上下文。", _utc_now()),
+                    "(tenant_id, role, content, image, event_type, created_at, "
+                    "session_key, user_id) VALUES (?, 'system', ?, 0, "
+                    "'context_cleared', ?, ?, ?)",
+                    (
+                        tenant_id,
+                        "用户清除了当前对话上下文。",
+                        _utc_now(),
+                        session_key,
+                        user_id,
+                    ),
                 )
 
     def clear_contexts_for_bots(self, bot_ids: Iterable[str]) -> int:

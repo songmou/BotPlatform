@@ -5,19 +5,19 @@ from __future__ import annotations
 import json
 import logging
 import re
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from typing import Generator, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.api.deps import (
     get_config,
     get_conversation_store,
     get_model_analytics_store,
-    get_registry,
+    get_organization_store,
+    get_resource_store,
     get_router,
+    require_permission,
 )
 from src.api.schemas import ChatHistoryItem, ChatHistoryResponse, ChatRequest
 from src.api.sse import (
@@ -41,8 +41,11 @@ from src.core.modeling.contracts import (
     ModelError,
     ModelRequest,
 )
+from src.core.config.loader import AgentPreset, Capability
 from src.core.paths import SYSTEM_DATA_DIR
 from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
+from src.core.services.resources import ResourceError
+from src.core.storage.organizations import OrganizationError
 from src.core.storage.tenants import TenantContext
 from src.core.tooling.models import ToolAuditContext
 
@@ -50,59 +53,76 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-logger = logging.getLogger(__name__)
-
-WEB_BOT_ID = "web"
-CONVERSATIONS_FILE = SYSTEM_DATA_DIR / "web_conversations.json"
 DEFAULT_TITLE = "新对话"
+# Kept as the source path for the one-time legacy migration. New writes use
+# the database-backed ``web_conversations`` table.
+CONVERSATIONS_FILE = SYSTEM_DATA_DIR / "web_conversations.json"
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _load_conversations() -> List[dict]:
-    if CONVERSATIONS_FILE.exists():
-        try:
-            data = json.loads(CONVERSATIONS_FILE.read_text(encoding="utf-8"))
-            convs = data.get("conversations", [])
-            if isinstance(convs, list):
-                return convs
-        except (json.JSONDecodeError, OSError):
-            pass
-    return []
-
-
-def _save_conversations(convs: List[dict]) -> None:
-    CONVERSATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONVERSATIONS_FILE.write_text(
-        json.dumps({"conversations": convs}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+def _agent_from_payload(resource_id: str, payload: dict) -> AgentPreset:
+    capabilities = []
+    for item in payload.get("capabilities", []):
+        if isinstance(item, dict):
+            capabilities.append(
+                Capability(
+                    name=str(item.get("name") or ""),
+                    description=str(item.get("description") or ""),
+                )
+            )
+    return AgentPreset(
+        id=str(payload.get("id") or resource_id),
+        name=str(payload.get("name") or resource_id),
+        role=str(payload.get("role") or "assistant"),
+        description=str(payload.get("description") or ""),
+        system_prompt=str(payload.get("system_prompt") or "你是一个有帮助的助手。"),
+        capabilities=capabilities,
+        enabled=bool(payload.get("enabled", True)),
+        image_prompt=payload.get("image_prompt"),
+        tools=list(payload.get("tools") or []),
+        plugin_tools=dict(payload.get("plugin_tools") or {}),
+        skills=list(payload.get("skills") or []),
+        mcp_servers=list(payload.get("mcp_servers") or []),
+        model=payload.get("model"),
+        greeting=payload.get("greeting"),
+        greeting_hints=list(payload.get("greeting_hints") or []),
+        temperature=payload.get("temperature"),
+        max_tokens=payload.get("max_tokens"),
     )
 
 
-def _find_conversation(conv_id: str) -> Optional[dict]:
-    for conv in _load_conversations():
-        if conv.get("id") == conv_id:
-            return conv
-    return None
+def _effective_agents(request: Request, organization_id: str) -> dict:
+    config = get_config(request)
+    try:
+        resources = get_resource_store(request).list_effective(
+            organization_id, "agents"
+        )
+        agents = {
+            item["resource_id"]: _agent_from_payload(
+                item["resource_id"], item["payload"]
+            )
+            for item in resources
+            if bool(item["payload"].get("enabled", True))
+        }
+        return agents or config.agents
+    except (ResourceError, TypeError, ValueError):
+        logger.warning("读取组织智能体配置失败，回退到平台配置", exc_info=True)
+        return config.agents
 
 
-def _touch_conversation(conv_id: str, user_text: Optional[str]) -> None:
-    convs = _load_conversations()
-    for conv in convs:
-        if conv.get("id") == conv_id:
-            conv["updated_at"] = _utc_now()
-            title = conv.get("title") or ""
-            if user_text and (not title or title == DEFAULT_TITLE):
-                conv["title"] = user_text.strip()[:20] or DEFAULT_TITLE
-            break
-    _save_conversations(convs)
-
-
-def _resolve_conv_tenant(request: Request, conv_id: str) -> TenantContext:
-    registry = get_registry(request)
-    return registry.resolve(WEB_BOT_ID, conv_id)
+def _effective_skills(request: Request, organization_id: str) -> list:
+    config = get_config(request)
+    try:
+        resources = get_resource_store(request).list_effective(
+            organization_id, "skills"
+        )
+        return [
+            item["payload"]
+            for item in resources
+            if bool(item["payload"].get("enabled", True))
+        ]
+    except (ResourceError, TypeError, ValueError):
+        logger.warning("读取组织 Skill 配置失败，回退到平台配置", exc_info=True)
+        return config.skills
 
 
 PLANNER_PROMPT = (
@@ -348,6 +368,10 @@ def _orchestrate(
     analytics_store,
     context: ModelCallContext,
     knowledge_service=None,
+    session_key: str = "default",
+    user_id: Optional[int] = None,
+    organization_store=None,
+    allow_delegation: bool = False,
 ) -> Generator[str, None, None]:
     agents_by_id = {a.id: a for a in agents}
     try:
@@ -490,10 +514,29 @@ def _orchestrate(
         updated = list(history)
         updated.append(CanonicalMessage("user", user_message))
         updated.append(CanonicalMessage("assistant", full_summary))
-        store.save_context(tenant_id, updated)
-        store.append_transcript(tenant_id, "user", user_message)
-        store.append_transcript(tenant_id, "assistant", full_summary)
-        _touch_conversation(conv_id, user_message)
+        store.save_context(
+            tenant_id, updated, session_key=session_key
+        )
+        store.append_transcript(
+            tenant_id, "user", user_message, session_key=session_key, user_id=user_id,
+            actor_type="member", actor_account=str(user_id or "")
+        )
+        store.append_transcript(
+            tenant_id,
+            "assistant",
+            full_summary,
+            session_key=session_key,
+            user_id=user_id,
+            actor_type="agent",
+            actor_account="multi_agent_summary",
+        )
+        if organization_store is not None and user_id is not None:
+            organization_store.touch_conversation(
+                user_id,
+                conv_id,
+                user_message,
+                allow_delegation=allow_delegation,
+            )
     except ModelError as exc:
         if analytics_store is not None:
             analytics_store.finish_run(
@@ -509,55 +552,83 @@ def _orchestrate(
 
 
 @router.get("/conversations")
-def list_conversations():
-    convs = _load_conversations()
-    convs.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-    return convs
+def list_conversations(
+    request: Request,
+    principal=Depends(require_permission("panel.read")),
+):
+    organizations = get_organization_store(request)
+    organization_id = organizations.ensure_debug_organization(
+        principal.user.user_id, principal.user.username
+    )
+    return organizations.list_conversations(
+        principal.user.user_id, organization_id
+    )
 
 
 @router.post("/conversations", status_code=201)
-def create_conversation():
-    conv = {
-        "id": str(uuid.uuid4()),
-        "title": DEFAULT_TITLE,
-        "created_at": _utc_now(),
-        "updated_at": _utc_now(),
-    }
-    convs = _load_conversations()
-    convs.append(conv)
-    _save_conversations(convs)
-    return conv
+def create_conversation(
+    request: Request,
+    principal=Depends(require_permission("panel.read")),
+):
+    organizations = get_organization_store(request)
+    organization_id = organizations.ensure_debug_organization(
+        principal.user.user_id, principal.user.username
+    )
+    return organizations.create_conversation(
+        principal.user.user_id, organization_id, DEFAULT_TITLE
+    )
 
 
 @router.delete("/conversations/{conv_id}")
-def delete_conversation(conv_id: str, request: Request):
-    convs = [c for c in _load_conversations() if c.get("id") != conv_id]
-    _save_conversations(convs)
-    registry = get_registry(request)
+def delete_conversation(
+    conv_id: str,
+    request: Request,
+    principal=Depends(require_permission("panel.read")),
+):
     try:
-        context = registry.resolve(WEB_BOT_ID, conv_id)
-        registry.delete(context)
-    except Exception:  # noqa: BLE001 - conversation entry is already removed
-        logger.warning("删除会话租户数据失败：%s", conv_id, exc_info=True)
+        get_organization_store(request).delete_conversation(
+            principal.user.user_id, conv_id
+        )
+    except OrganizationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "ok"}
 
 
 @router.post("")
-def chat(body: ChatRequest, request: Request):
+def chat(
+    body: ChatRequest,
+    request: Request,
+    principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     model_router = get_router(request)
     store = get_conversation_store(request)
 
     conv_id = body.conversation_id
-    if not conv_id or _find_conversation(conv_id) is None:
+    organizations = get_organization_store(request)
+    try:
+        conversation = organizations.get_conversation(
+            principal.user.user_id,
+            conv_id or "",
+            allow_delegation=principal.allows("admins.manage"),
+        )
+    except OrganizationError:
         raise HTTPException(status_code=400, detail="缺少有效的会话 ID")
-    tenant = _resolve_conv_tenant(request, conv_id)
+    organization_id = str(conversation["organization_id"])
+    if conversation.get("status") == "archived":
+        raise HTTPException(status_code=409, detail="会话已归档，请先恢复后再继续")
+    tenant = organizations.registry.get(organization_id)
     tenant_id = tenant.tenant_id
+    user_id = principal.user.user_id
+    session_key = "organization:{}".format(conv_id)
+    agents_by_id = _effective_agents(request, organization_id)
+    effective_skills = _effective_skills(request, organization_id)
     analytics_store = get_model_analytics_store(request)
     selected_agent_id = body.agent_id or config.app.default_agent
     run_id = (
         analytics_store.start_run(
             tenant_id=tenant_id,
+            user_id=user_id,
             source="web",
             agent_id=selected_agent_id,
             conversation_id=conv_id,
@@ -568,23 +639,27 @@ def chat(body: ChatRequest, request: Request):
     call_context = ModelCallContext(
         run_id=run_id,
         tenant_id=tenant_id,
+        user_id=user_id,
         source="web",
         operation="answer",
         agent_id=selected_agent_id,
         conversation_id=conv_id,
     )
 
-    history = store.load_context(tenant_id)
+    history = store.load_context(tenant_id, session_key=session_key)
 
     agent_ids = body.agent_ids or []
     if not body.regenerate and len(agent_ids) > 1:
         agents = []
         for aid in agent_ids:
-            agent = config.agents.get(aid)
+            agent = agents_by_id.get(aid)
             if agent is not None and agent.enabled:
                 agents.append(agent)
         if not agents:
-            agents = [config.active_agent]
+            agents = [
+                agents_by_id.get(config.app.default_agent)
+                or next(iter(agents_by_id.values()))
+            ]
         return streaming_response(
             _orchestrate(
                 body.message,
@@ -595,25 +670,40 @@ def chat(body: ChatRequest, request: Request):
                 tenant_id,
                 tenant,
                 conv_id,
-                config.skills,
+                effective_skills,
                 getattr(request.app.state, "tool_runtime", None),
                 analytics_store,
                 call_context,
                 getattr(request.app.state, "knowledge_service", None),
+                session_key,
+                user_id,
+                organizations,
+                principal.allows("admins.manage"),
             )
         )
 
-    agent = config.agents.get(body.agent_id or config.app.default_agent)
+    agent = agents_by_id.get(body.agent_id or config.app.default_agent)
     if agent is None or not agent.enabled:
-        agent = config.active_agent
+        agent = (
+            agents_by_id.get(config.app.default_agent)
+            or next(iter(agents_by_id.values()))
+        )
 
     if body.regenerate:
         if history and history[-1].role == "assistant":
             history = history[:-1]
-        messages = [CanonicalMessage(role="system", content=build_system_prompt(agent, config.skills))]
+        messages = [
+            CanonicalMessage(
+                role="system", content=build_system_prompt(agent, effective_skills)
+            )
+        ]
         messages.extend(history)
     else:
-        messages = [CanonicalMessage(role="system", content=build_system_prompt(agent, config.skills))]
+        messages = [
+            CanonicalMessage(
+                role="system", content=build_system_prompt(agent, effective_skills)
+            )
+        ]
         messages.extend(history)
         messages.append(CanonicalMessage(role="user", content=body.message))
 
@@ -775,11 +865,36 @@ def chat(body: ChatRequest, request: Request):
             if not body.regenerate:
                 updated.append(CanonicalMessage(role="user", content=body.message))
             updated.append(CanonicalMessage(role="assistant", content=full_text))
-            store.save_context(tenant_id, updated)
+            store.save_context(
+                tenant_id,
+                updated,
+                session_key=session_key,
+            )
             if not body.regenerate:
-                store.append_transcript(tenant_id, "user", body.message)
-            store.append_transcript(tenant_id, "assistant", full_text)
-            _touch_conversation(conv_id, body.message if not body.regenerate else None)
+                store.append_transcript(
+                    tenant_id,
+                    "user",
+                    body.message,
+                    session_key=session_key,
+                    user_id=user_id,
+                    actor_type="member",
+                    actor_account=str(user_id),
+                )
+            store.append_transcript(
+                tenant_id,
+                "assistant",
+                full_text,
+                session_key=session_key,
+                user_id=user_id,
+                actor_type="agent",
+                actor_account=agent.id,
+            )
+            organizations.touch_conversation(
+                user_id,
+                conv_id,
+                body.message if not body.regenerate else None,
+                allow_delegation=principal.allows("admins.manage"),
+            )
             if analytics_store is not None:
                 analytics_store.finish_run(run_id or "", "success")
         except GeneratorExit:
@@ -803,12 +918,26 @@ def chat(body: ChatRequest, request: Request):
 
 
 @router.get("/history", response_model=ChatHistoryResponse)
-def chat_history(request: Request, conversation_id: Optional[str] = None):
-    if not conversation_id or _find_conversation(conversation_id) is None:
+def chat_history(
+    request: Request,
+    conversation_id: Optional[str] = None,
+    principal=Depends(require_permission("panel.read")),
+):
+    organizations = get_organization_store(request)
+    try:
+        conversation = organizations.get_conversation(
+            principal.user.user_id,
+            conversation_id or "",
+            allow_delegation=principal.allows("admins.manage"),
+        )
+    except OrganizationError:
         return ChatHistoryResponse(messages=[])
     store = get_conversation_store(request)
-    tenant = _resolve_conv_tenant(request, conversation_id)
-    messages = store.load_context(tenant.tenant_id)
+    organization_id = str(conversation["organization_id"])
+    messages = store.load_context(
+        organization_id,
+        session_key="organization:{}".format(conversation_id),
+    )
     return ChatHistoryResponse(
         messages=[ChatHistoryItem(role=m.role, content=m.content) for m in messages]
     )

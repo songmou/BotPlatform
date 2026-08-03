@@ -39,16 +39,18 @@ class ToolAuditStore:
         output_bytes: int,
         args_hash: Optional[str],
         error: Optional[str],
+        user_id: Optional[int] = None,
     ) -> None:
         with self.registry.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO tool_audit_log"
-                " (ts, tenant_id, session_id, agent_id, tool_name, status,"
+                " (ts, tenant_id, user_id, session_id, agent_id, tool_name, status,"
                 "  duration_ms, output_bytes, args_hash, error)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _utc_now(),
                     tenant_id,
+                    user_id,
                     session_id or None,
                     agent_id or None,
                     tool_name,

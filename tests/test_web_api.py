@@ -5,7 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from unittest.mock import MagicMock, patch
 
 from bs4 import BeautifulSoup
@@ -93,7 +93,6 @@ def _make_config():
         AgentPreset,
         AppConfig,
         Capability,
-        EmbeddingProfile,
         ModelProfile,
         ProjectConfig,
         ToolConfig,
@@ -110,6 +109,8 @@ def _make_config():
         flash_model="",
         pro_model="",
         vision_model="",
+        embedding_model="",
+        rerank_model="",
         fallback_cooldown_seconds=60,
     )
     model_profile = ModelProfile(
@@ -150,9 +151,6 @@ def _make_config():
         max_command_timeout_seconds=60,
         enabled_command_profiles=[],
     )
-    embedding = EmbeddingProfile(
-        id="none", enabled=False, base_url="", model="", dimensions=0, timeout_seconds=5
-    )
     return ProjectConfig(
         app=app,
         models={"test_model": model_profile},
@@ -161,7 +159,6 @@ def _make_config():
         agents={"general": agent},
         scripts={},
         schedules=[],
-        embedding=embedding,
     )
 
 
@@ -177,6 +174,7 @@ class WebApiTest(unittest.TestCase):
             AdminUserStore,
         )
         from src.core.storage.database import Database
+        from src.core.storage.tenants import TenantContext
 
         self.config = _make_config()
         self.fake_client = FakeClient()
@@ -191,6 +189,10 @@ class WebApiTest(unittest.TestCase):
         self._db_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._db_dir.cleanup)
         database = Database(Path(self._db_dir.name) / "botplatform.sqlite3")
+        self.mock_registry.database = database
+        self.mock_registry.get.return_value = TenantContext(
+            "00000000-0000-0000-0000-000000000001", "web", "test-user"
+        )
         self.admin_users = AdminUserStore(database)
         self.admin_roles = AdminRoleStore(database)
         self.admin_sessions = AdminSessionStore(database, b"test-secret")
@@ -209,6 +211,7 @@ class WebApiTest(unittest.TestCase):
             admin_user_store=self.admin_users,
             admin_role_store=self.admin_roles,
         )
+        self.app.state.allow_legacy_config_writes = True
         self.client = TestClient(self.app)
         response = self.client.post(
             "/api/auth/login",
@@ -233,6 +236,11 @@ class WebApiTest(unittest.TestCase):
         response = self.client.post("/api/chat/conversations", params=self._auth_params())
         self.assertEqual(response.status_code, 201)
         return response.json()["id"]
+
+    def _publish_test_agent(self, agent):
+        self.app.state.resource_store.upsert_public(
+            "agents", agent.id, asdict(agent), 1
+        )
 
     def test_health_no_auth(self):
         response = self.client.get("/api/health")
@@ -303,8 +311,9 @@ class WebApiTest(unittest.TestCase):
         self.mock_store.save_context.assert_called_once()
 
     def test_chat_tools_use_conversation_workspace(self):
-        tenant = self.mock_registry.resolve.return_value
+        tenant = self.mock_registry.get.return_value
         self.config.agents["general"].tools.append("list_directory")
+        self._publish_test_agent(self.config.agents["general"])
         tool_runtime = MagicMock()
         tool_runtime.schemas.return_value = [
             {
@@ -367,6 +376,8 @@ class WebApiTest(unittest.TestCase):
         )
         self.config.agents["general"] = general
         self.config.agents["coder"] = coder
+        self._publish_test_agent(general)
+        self._publish_test_agent(coder)
 
         client = MultiAgentToolClient()
         self.model_router.clients["test_model"] = client
@@ -713,12 +724,12 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(len(response.json()), 0)
 
     def test_page_chat(self):
-        response = self.client.get("/", params=self._auth_params())
+        response = self.client.get("/chat", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertIn("chat-messages", response.text)
 
     def test_chat_uses_local_markdown_dependencies_under_csp(self):
-        response = self.client.get("/", params=self._auth_params())
+        response = self.client.get("/chat", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("cdn.jsdelivr.net", response.text)
         marked = response.text.index("/static/vendor/marked/marked.umd.js")
@@ -740,38 +751,26 @@ class WebApiTest(unittest.TestCase):
         self.assertIn('data-scripts-tab="catalog"', scripts.text)
         self.assertIn('data-scripts-tab="runs"', scripts.text)
         self.assertIn("script-settings-modal", scripts.text)
-        self.assertIn('href="/scripts" class="nav-sub-item active"', scripts.text)
-        self.assertIn('nav-item nav-group-toggle active', scripts.text)
 
         tools = self.client.get("/tools")
         self.assertEqual(tools.status_code, 200)
         self.assertIn("执行审计", tools.text)
         self.assertIn("audit-filter-status", tools.text)
-        tool_menu_labels = [
-            "内置工具",
-            "插件工具",
-            "Skill 技能",
-            "MCP 服务",
-            "运维脚本",
-            "执行审计",
-        ]
-        tool_menu_positions = [
-            tools.text.index(">{}<".format(label)) for label in tool_menu_labels
-        ]
-        self.assertEqual(tool_menu_positions, sorted(tool_menu_positions))
         section_positions = [
             tools.text.index(
                 '<div class="nav-section-label">{}</div>'.format(label)
             )
-            for label in ("工作台", "智能能力", "内容资源", "运营", "系统")
+            for label in ("平台管理", "平台治理", "组织工作台", "帮助")
         ]
         self.assertEqual(section_positions, sorted(section_positions))
 
-        users = self.client.get("/users")
+        users = self.client.get("/platform/organizations")
         self.assertEqual(users.status_code, 200)
         self.assertIn("用户与权限 - BotPlatform", users.text)
         self.assertIn("tenant-detail-modal", users.text)
         self.assertIn("tenant-detail-title", users.text)
+        self.assertIn('data-users-view="organizations"', users.text)
+        self.assertIn("organization-detail-modal", users.text)
 
     def test_management_layout_structure(self):
         tools = self.client.get("/tools")
@@ -789,16 +788,24 @@ class WebApiTest(unittest.TestCase):
         self.assertIsNotNone(sidebar_actions.select_one("#theme-toggle[aria-label='切换主题']"))
         self.assertIsNotNone(sidebar_actions.select_one("#logout-btn[aria-label='退出登录']"))
 
-        drive = self.client.get("/drive")
+        drive = self.client.get("/organization/drive")
         self.assertEqual(drive.status_code, 200)
         drive_dom = BeautifulSoup(drive.text, "html.parser")
-        files_panel = drive_dom.select_one("#drive-files-panel")
-        self.assertIsNotNone(files_panel.select_one(".drive-panel-toolbar .drive-toolbar"))
-        self.assertIsNotNone(files_panel.select_one("#drive-mkdir-btn"))
-        self.assertIsNotNone(files_panel.select_one("#drive-newfile-btn"))
-        self.assertIsNotNone(files_panel.select_one("#drive-upload-btn"))
-        self.assertIsNone(drive_dom.select_one(".page-header .drive-toolbar"))
-        self.assertIsNone(drive_dom.select_one("#drive-audit-panel .drive-toolbar"))
+        self.assertIsNotNone(drive_dom.select_one("#organization-page-switch"))
+        self.assertEqual(
+            drive_dom.select_one("#drive-page").get("data-resource-mode"),
+            "organization",
+        )
+        self.assertIsNone(drive_dom.select_one("#organization-switch"))
+
+    def test_unified_shell_versions_global_context_assets(self):
+        response = self.client.get("/agents")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('/static/js/common.js?v=20260801d', response.text)
+        self.assertIn('/static/js/platform-catalog-client.js?v=20260801e', response.text)
+        self.assertNotIn('/static/js/scoped-modules.js', response.text)
+        self.assertNotIn('id="organization-switch"', response.text)
+        self.assertNotIn('id="organization-page-switch"', response.text)
 
     def test_page_models(self):
         response = self.client.get("/models", params=self._auth_params())
@@ -809,6 +816,10 @@ class WebApiTest(unittest.TestCase):
         response = self.client.get("/agents", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertIn("agent-list", response.text)
+        self.assertNotIn('data-agent-tab="tools"', response.text)
+        self.assertNotIn("data-tool-tab", response.text)
+        for tab in ("builtin", "plugin", "skill", "mcp", "knowledge"):
+            self.assertIn('data-agent-tab="{}"'.format(tab), response.text)
 
     def test_login_sets_session_cookie(self):
         from fastapi.testclient import TestClient as _TestClient

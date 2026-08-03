@@ -34,6 +34,18 @@ from src.core.storage.schema import (  # noqa: F401
     SCHEMA_V18,
     SCHEMA_V19,
     SCHEMA_V20,
+    SCHEMA_V21,
+    SCHEMA_V22,
+    SCHEMA_V22_PERMISSIONS,
+    SCHEMA_V23,
+    SCHEMA_V23_PERMISSIONS,
+    SCHEMA_V24,
+    SCHEMA_V24_PERMISSIONS,
+    SCHEMA_V25,
+    SCHEMA_V26,
+    SCHEMA_V27,
+    SCHEMA_V28,
+    SCHEMA_V29,
 )
 
 
@@ -108,6 +120,20 @@ class Database:
                 current = int(row[0])
                 if current > LATEST_SCHEMA_VERSION:
                     raise DatabaseError("数据库 schema 版本高于当前程序支持版本")
+                if current and current < LATEST_SCHEMA_VERSION:
+                    backup_path = self.path.with_name(
+                        "{}.pre-v{}{}".format(
+                            self.path.stem, LATEST_SCHEMA_VERSION, self.path.suffix
+                        )
+                    )
+                    if not backup_path.exists():
+                        backup = sqlite3.connect(str(backup_path))
+                        try:
+                            connection.backup(backup)
+                        finally:
+                            backup.close()
+                        if os.name != "nt":
+                            os.chmod(str(backup_path), 0o600)
                 for version in range(current + 1, LATEST_SCHEMA_VERSION + 1):
                     if version == 12:
                         self._migrate_v12(connection)
@@ -115,6 +141,12 @@ class Database:
                         self._migrate_v13(connection)
                     elif version == 22:
                         self._migrate_v22(connection)
+                    elif version == 23:
+                        self._migrate_v23(connection)
+                    elif version == 24:
+                        self._migrate_v24(connection)
+                    elif version == 28:
+                        self._migrate_v28(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -143,6 +175,203 @@ class Database:
         connection.executescript(
             "BEGIN IMMEDIATE;\n" + script + "\n" + record + "\nCOMMIT;"
         )
+
+    @classmethod
+    def _migrate_v22(cls, connection: sqlite3.Connection) -> None:
+        """Remove retired plugin data while tolerating partial legacy schemas."""
+        has_outbox = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='notification_outbox'"
+        ).fetchone()
+        cleanup = (
+            "DELETE FROM notification_outbox WHERE source_type = 'codex';\n"
+            if has_outbox
+            else ""
+        )
+        has_roles = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='admin_roles'"
+        ).fetchone()
+        permissions = SCHEMA_V22_PERMISSIONS if has_roles else ""
+        cls._apply_schema_script(
+            connection, 22, cleanup + SCHEMA_SCRIPTS[22] + permissions
+        )
+
+    @classmethod
+    def _migrate_v23(cls, connection: sqlite3.Connection) -> None:
+        """Add conversation sessions and channel bindings idempotently."""
+        script = ""
+        for table in (
+            "conversation_context_messages",
+            "conversation_events",
+        ):
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info({})".format(table)
+                ).fetchall()
+            }
+            if "session_key" not in columns:
+                script += (
+                    "ALTER TABLE {} ADD COLUMN session_key TEXT "
+                    "NOT NULL DEFAULT 'direct';\n"
+                ).format(table)
+        has_roles = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='admin_roles'"
+        ).fetchone()
+        permissions = SCHEMA_V23_PERMISSIONS if has_roles else ""
+        cls._apply_schema_script(
+            connection, 23, script + SCHEMA_SCRIPTS[23] + permissions
+        )
+
+    @classmethod
+    def _migrate_v24(cls, connection: sqlite3.Connection) -> None:
+        """Add organization identity, scoped resources, and member attribution."""
+        script = ""
+        member_columns = {
+            "conversation_events": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "conversation_context_messages": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "memory_items": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "soul_profiles": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "todos": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "integrations": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "notification_outbox": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "script_runs": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "model_runs": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "tool_audit_log": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "drive_audit_log": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+            "channel_identities": "user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL",
+        }
+        for table, definition in member_columns.items():
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                continue
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info({})".format(table)
+                ).fetchall()
+            }
+            if "user_id" not in columns:
+                script += "ALTER TABLE {} ADD COLUMN {};\n".format(
+                    table, definition
+                )
+        channel_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='channel_identities'"
+        ).fetchone()
+        if channel_exists:
+            channel_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_identities)"
+                ).fetchall()
+            }
+            if "active_organization_id" not in channel_columns:
+                script += (
+                    "ALTER TABLE channel_identities ADD COLUMN "
+                    "active_organization_id TEXT "
+                    "REFERENCES tenants(tenant_id) ON DELETE SET NULL;\n"
+                )
+        has_roles = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='admin_roles'"
+        ).fetchone()
+        permissions = SCHEMA_V24_PERMISSIONS if has_roles else ""
+        cls._apply_schema_script(
+            connection, 24, script + SCHEMA_SCRIPTS[24] + permissions
+        )
+
+    @classmethod
+    def _migrate_v28(cls, connection: sqlite3.Connection) -> None:
+        """Add unified organization controls while tolerating partial fixtures."""
+        script = ""
+        preferences = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='user_organization_preferences'"
+        ).fetchone()
+        if preferences:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(user_organization_preferences)"
+                ).fetchall()
+            }
+            if "active_scope" not in columns:
+                script += (
+                    "ALTER TABLE user_organization_preferences ADD COLUMN "
+                    "active_scope TEXT NOT NULL DEFAULT 'organization' "
+                    "CHECK (active_scope IN ('platform', 'organization'));\n"
+                )
+        script += SCHEMA_SCRIPTS[28]
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "conversation_events" in tables:
+            event_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(conversation_events)"
+                ).fetchall()
+            }
+            if "actor_type" not in event_columns:
+                script += (
+                    "ALTER TABLE conversation_events ADD COLUMN actor_type TEXT "
+                    "NOT NULL DEFAULT 'system';\n"
+                )
+            if "actor_account" not in event_columns:
+                script += (
+                    "ALTER TABLE conversation_events ADD COLUMN actor_account "
+                    "TEXT NOT NULL DEFAULT '';\n"
+                )
+            script += (
+                "UPDATE conversation_events SET actor_type=CASE "
+                "WHEN user_id IS NOT NULL THEN 'member' "
+                "WHEN role='assistant' THEN 'agent' "
+                "WHEN role='user' THEN 'channel_user' ELSE 'system' END "
+                "WHERE actor_type='system';\n"
+            )
+        if "web_conversations" in tables:
+            script += r"""
+INSERT OR IGNORE INTO organization_conversations(
+    conversation_id, organization_id, creator_user_id, source, title,
+    legacy_tenant_id, created_at, updated_at
+)
+SELECT
+    conversation_id, organization_id, user_id, 'web', title,
+    legacy_tenant_id, created_at, updated_at
+FROM web_conversations;
+"""
+            for table in (
+                "conversation_context_messages",
+                "conversation_events",
+            ):
+                if table not in tables:
+                    continue
+                script += r"""
+UPDATE {table}
+SET session_key = 'organization:' || (
+    SELECT w.conversation_id FROM web_conversations w
+    WHERE w.organization_id={table}.tenant_id
+      AND {table}.session_key =
+          'web:' || w.user_id || ':' || w.conversation_id
+    LIMIT 1
+)
+WHERE EXISTS (
+    SELECT 1 FROM web_conversations w
+    WHERE w.organization_id={table}.tenant_id
+      AND {table}.session_key =
+          'web:' || w.user_id || ':' || w.conversation_id
+);
+""".format(table=table)
+        cls._apply_schema_script(connection, 28, script)
 
     @staticmethod
     def _migrate_v12(connection: sqlite3.Connection) -> None:
@@ -259,41 +488,6 @@ class Database:
                 "INSERT INTO schema_migrations(version, applied_at) "
                 "VALUES (13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-
-    @staticmethod
-    def _migrate_v22(connection: sqlite3.Connection) -> None:
-        """Backfill codex_task_runs.source_cwd on installs that passed V6.
-
-        The column was added to SCHEMA_V6 after that migration had already
-        shipped, so databases which recorded version 6 (or higher) before the
-        edit never gained the column. Add it idempotently here.
-        """
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            migrated_version = int(
-                connection.execute(
-                    "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
-                ).fetchone()[0]
-            )
-            if migrated_version < 22:
-                columns = {
-                    str(info[1])
-                    for info in connection.execute(
-                        "PRAGMA table_info(codex_task_runs)"
-                    ).fetchall()
-                }
-                if columns and "source_cwd" not in columns:
-                    connection.execute(
-                        "ALTER TABLE codex_task_runs ADD COLUMN source_cwd TEXT"
-                    )
-                connection.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) "
-                    "VALUES (22, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
-                )
             connection.commit()
         except Exception:
             connection.rollback()

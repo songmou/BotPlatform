@@ -277,7 +277,7 @@ function initScripts() {
         runningScript = script;
         document.getElementById("script-run-title").textContent = "执行 " + script.name;
         document.getElementById("script-run-fields").innerHTML =
-            '<div class="form-group"><label for="run-tenant">机器人用户</label><select id="run-tenant">' +
+            '<div class="form-group"><label for="run-tenant">机器人用户</label><select id="run-tenant" class="tenant-select">' +
             tenants.map(function (item) {
                 return '<option value="' + escapeHtml(item.tenant_id) + '">' +
                     escapeHtml(item.user_id + " / " + item.bot_id) + "</option>";

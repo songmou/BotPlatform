@@ -9,6 +9,7 @@
 
 .drive-toolbar button {
     min-height: 36px;
+    white-space: nowrap;
 }
 
 .drive-panel-toolbar {
@@ -139,6 +140,11 @@
     gap: 8px;
 }
 
+.drive-batch-actions button,
+.drive-actions button {
+    white-space: nowrap;
+}
+
 .drive-batch-actions button:disabled {
     opacity: .45;
     cursor: not-allowed;
@@ -187,6 +193,15 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    max-width: min(360px, 34vw);
+    vertical-align: middle;
+}
+
+.drive-entry-name > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .drive-entry-name svg {
@@ -217,8 +232,26 @@
     color: var(--accent);
 }
 
+.drive-actions {
+    white-space: nowrap;
+}
+
 .drive-actions button {
-    margin-right: 4px;
+    margin: 2px 4px 2px 0;
+}
+
+#drive-table {
+    min-width: 720px;
+}
+
+#drive-table th,
+#drive-table td {
+    white-space: nowrap;
+}
+
+#drive-table th:nth-child(2),
+#drive-table td:nth-child(2) {
+    width: 100%;
 }
 
 /* ---- audit panel ---- */
@@ -364,6 +397,134 @@
     border-color: var(--accent);
 }
 
+/* ---- folder upload confirmation and progress ---- */
+
+.drive-folder-upload-modal {
+    max-width: 820px;
+}
+
+.drive-folder-upload-summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.drive-folder-upload-list {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    max-height: 48vh;
+    overflow: auto;
+}
+
+.drive-folder-upload-row {
+    display: grid;
+    grid-template-columns: 34px minmax(220px, 1fr) 90px 150px 58px;
+    align-items: center;
+    min-width: 650px;
+    min-height: 42px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+
+.drive-folder-upload-row:last-child {
+    border-bottom: none;
+}
+
+.drive-folder-upload-row > span,
+.drive-folder-upload-row > label {
+    padding: 8px 10px;
+}
+
+.drive-folder-upload-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    min-height: 36px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.drive-folder-upload-check {
+    display: flex;
+    justify-content: center;
+}
+
+.drive-folder-upload-check input {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.drive-folder-upload-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.drive-folder-upload-status {
+    overflow: hidden;
+    color: var(--text-muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.drive-folder-upload-status.success {
+    color: var(--success, #2e7d32);
+}
+
+.drive-folder-upload-status.error {
+    color: var(--danger, #c62828);
+}
+
+.drive-folder-upload-remove {
+    border: none;
+    background: none;
+    color: var(--danger, #c62828);
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.drive-folder-upload-remove:disabled,
+.drive-folder-upload-check input:disabled {
+    cursor: not-allowed;
+    opacity: .5;
+}
+
+.drive-folder-upload-progress {
+    margin-top: 14px;
+}
+
+.drive-upload-progress-track {
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+}
+
+.drive-upload-progress-track span {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    transition: width .15s ease;
+}
+
+.drive-upload-progress-text {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: right;
+}
+
+#drive-folder-upload-result {
+    margin-top: 12px;
+}
+
 /* ---- drag & drop overlay ---- */
 
 #drive-drop-overlay {
@@ -439,7 +600,14 @@
     }
 
     .drive-toolbar {
-        justify-content: flex-end;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        justify-content: stretch;
+    }
+
+    .drive-toolbar button {
+        width: 100%;
+        padding-inline: 10px;
     }
 
     .drive-main-toolbar {
@@ -448,6 +616,19 @@
     }
 
     .drive-batch-actions {
-        flex-wrap: wrap;
+        width: 100%;
+        padding-bottom: 3px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+    }
+
+    .drive-entry-name {
+        max-width: 240px;
+    }
+
+    .drive-drop-box {
+        max-width: calc(100vw - 32px);
+        padding: 28px 24px;
+        text-align: center;
     }
 }

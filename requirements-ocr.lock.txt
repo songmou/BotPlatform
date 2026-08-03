@@ -1,0 +1,4 @@
+# Direct OCR dependencies pinned for the supported PaddleOCR runtime.
+# Install requirements.lock.txt first, then this file.
+paddleocr==3.7.0
+paddlepaddle==3.3.1

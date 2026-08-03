@@ -6,9 +6,9 @@ import json
 import logging
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.api.deps import get_config, get_scheduler
+from src.api.deps import get_config, get_scheduler, require_permission
 from src.api.schemas import (
     ScheduleTaskCreate,
     ScheduleTaskOut,
@@ -171,13 +171,20 @@ def _task_to_json(task, action, condition) -> dict:
 
 
 @router.get("", response_model=list[ScheduleTaskOut])
-def list_schedules(request: Request):
+def list_schedules(
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     return [_task_to_out(task) for task in config.schedules]
 
 
 @router.get("/{task_id}", response_model=ScheduleTaskOut)
-def get_schedule(task_id: str, request: Request):
+def get_schedule(
+    task_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.read")),
+):
     config = get_config(request)
     task = _find_task(config, task_id)
     if task is None:
@@ -186,7 +193,11 @@ def get_schedule(task_id: str, request: Request):
 
 
 @router.post("", response_model=ScheduleTaskOut, status_code=201)
-def create_schedule(body: ScheduleTaskCreate, request: Request):
+def create_schedule(
+    body: ScheduleTaskCreate,
+    request: Request,
+    _principal=Depends(require_permission("schedules.manage")),
+):
     config = get_config(request)
     task_id = body.id.strip()
     if not _TASK_ID_PATTERN.match(task_id):
@@ -252,7 +263,12 @@ def create_schedule(body: ScheduleTaskCreate, request: Request):
 
 
 @router.put("/{task_id}", response_model=ScheduleTaskOut)
-def update_schedule(task_id: str, body: ScheduleTaskUpdate, request: Request):
+def update_schedule(
+    task_id: str,
+    body: ScheduleTaskUpdate,
+    request: Request,
+    _principal=Depends(require_permission("schedules.manage")),
+):
     config = get_config(request)
     task = _find_task(config, task_id)
     if task is None:
@@ -330,7 +346,11 @@ def update_schedule(task_id: str, body: ScheduleTaskUpdate, request: Request):
 
 
 @router.delete("/{task_id}")
-def delete_schedule(task_id: str, request: Request):
+def delete_schedule(
+    task_id: str,
+    request: Request,
+    _principal=Depends(require_permission("schedules.manage")),
+):
     config = get_config(request)
     task = _find_task(config, task_id)
     if task is None:

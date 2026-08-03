@@ -1,9 +1,12 @@
 /* Network drive page: tabbed scopes, lazy folder tree, uploads and audit log. */
 
 function initDrive() {
+    var page = document.getElementById("drive-page");
+    var resourceMode = page ? page.getAttribute("data-resource-mode") : "platform-public";
+    var organizationMode = resourceMode === "organization";
     var state = {
-        scope: "public",
-        tenantId: "",
+        scope: organizationMode ? "tenant" : "public",
+        tenantId: organizationMode ? selectedOrganizationId() : "",
         path: "",
         auditOffset: 0,
         auditLimit: 20,
@@ -14,11 +17,42 @@ function initDrive() {
     var breadcrumbsEl = document.getElementById("drive-breadcrumbs");
     var tableBody = document.getElementById("drive-table-body");
     var fileInput = document.getElementById("drive-file-input");
+    var folderInput = document.getElementById("drive-folder-input");
     var filesPanel = document.getElementById("drive-files-panel");
     var auditPanel = document.getElementById("drive-audit-panel");
     var selectAllBox = document.getElementById("drive-select-all");
     var selection = {};
     var currentEntries = [];
+
+    function driveUrl(path) {
+        return organizationMode
+            ? organizationApi("/drive" + path)
+            : "/api/v2/platform/drive" + path;
+    }
+    function knowledgeUrl(path) {
+        return organizationMode
+            ? organizationApi("/knowledge" + path)
+            : "/api/v2/platform/knowledge" + path;
+    }
+    function readOnlyScope() {
+        return organizationMode && state.scope === "public";
+    }
+    function canManageDrive() {
+        return !readOnlyScope() && (
+            organizationMode ? canWriteOrganization() : hasPermission("drive.manage")
+        );
+    }
+    function canManageKnowledge() {
+        return !readOnlyScope() && (
+            organizationMode ? canWriteOrganization() : hasPermission("knowledge.manage")
+        );
+    }
+    function updateWritableState() {
+        document.querySelectorAll("[data-manage='1']").forEach(function (element) {
+            element.style.display = canManageDrive() ? "" : "none";
+        });
+        updateBatchBar();
+    }
 
     function query(params) {
         var pairs = [];
@@ -31,7 +65,12 @@ function initDrive() {
     }
 
     function scopeParams() {
-        return { scope: state.scope, tenant_id: state.scope === "tenant" ? state.tenantId : "" };
+        return {
+            scope: organizationMode
+                ? (state.scope === "public" ? "public" : "organization")
+                : "public",
+            tenant_id: state.scope === "tenant" ? state.tenantId : ""
+        };
     }
 
     function handleError(response) {
@@ -40,18 +79,36 @@ function initDrive() {
         });
     }
 
-    function formatSize(entry) {
-        if (entry.type === "folder") return "—";
-        var size = entry.size;
+    function formatBytes(size) {
         if (size < 1024) return size + " B";
         if (size < 1024 * 1024) return (size / 1024).toFixed(1) + " KB";
         if (size < 1024 * 1024 * 1024) return (size / 1024 / 1024).toFixed(1) + " MB";
         return (size / 1024 / 1024 / 1024).toFixed(2) + " GB";
     }
 
+    function formatSize(entry) {
+        if (entry.type === "folder") return "—";
+        return formatBytes(entry.size);
+    }
+
     function formatTime(seconds) {
         if (!seconds) return "—";
         return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function loadUsage() {
+        return fetch(driveUrl("/usage") + query(scopeParams()))
+            .then(function (response) {
+                return response.ok ? response.json() : handleError(response);
+            })
+            .then(function (usage) {
+                document.getElementById("drive-usage").textContent =
+                    Number(usage.file_count || 0) + " 个文件 · " +
+                    formatBytes(Number(usage.total_bytes || 0));
+            })
+            .catch(function () {
+                document.getElementById("drive-usage").textContent = "";
+            });
     }
 
     function parentPath(path) {
@@ -100,7 +157,7 @@ function initDrive() {
     function fetchFolders(path) {
         var params = scopeParams();
         params.path = path;
-        return fetch("/api/drive/entries" + query(params))
+        return fetch(driveUrl("/entries") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (listing) {
                 return listing.entries.filter(function (entry) { return entry.type === "folder"; });
@@ -258,18 +315,9 @@ function initDrive() {
     /* ---- tenants ---- */
 
     function loadTenants() {
-        return fetch("/api/drive/tenants")
-            .then(function (r) { return r.ok ? r.json() : handleError(r); })
-            .then(function (items) {
-                tenantSelect.innerHTML = "";
-                items.forEach(function (item) {
-                    var option = document.createElement("option");
-                    option.value = item.tenant_id;
-                    option.textContent = item.user_id + "（" + item.bot_id + "）";
-                    tenantSelect.appendChild(option);
-                });
-                if (items.length) state.tenantId = items[0].tenant_id;
-            });
+        tenantSelect.innerHTML = '<option value="' + escapeHtml(state.tenantId) + '">当前组织</option>';
+        tenantSelect.style.display = "none";
+        return Promise.resolve();
     }
 
     /* ---- file browsing ---- */
@@ -277,7 +325,7 @@ function initDrive() {
     function renderBreadcrumbs(breadcrumbs) {
         breadcrumbsEl.innerHTML = "";
         var rootLink = document.createElement("a");
-        rootLink.textContent = state.scope === "public" ? "公共文件区" : "租户文件区";
+        rootLink.textContent = state.scope === "public" ? "公共文件区" : "组织文件";
         rootLink.addEventListener("click", function () { navigate(""); });
         breadcrumbsEl.appendChild(rootLink);
         breadcrumbs.forEach(function (crumb) {
@@ -303,7 +351,7 @@ function initDrive() {
             downloadBtn.addEventListener("click", function () { downloadEntry(entry); });
             cell.appendChild(downloadBtn);
         }
-        if (hasPermission("drive.manage")) {
+        if (canManageDrive()) {
             if (entry.type === "file" && isTextFile(entry.name)) {
                 var editBtn = document.createElement("button");
                 editBtn.className = "btn-secondary";
@@ -395,11 +443,11 @@ function initDrive() {
     function loadEntries() {
         var params = scopeParams();
         params.path = state.path;
-        return fetch("/api/drive/entries" + query(params))
+        return fetch(driveUrl("/entries") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (listing) {
-                if (!hasPermission("knowledge.read")) return listing;
-                return fetch("/api/knowledge/drive-links" + query(params))
+                if ((!organizationMode && !hasPermission("knowledge.read")) || readOnlyScope()) return listing;
+                return fetch(knowledgeUrl("/drive-links") + query({ path: state.path }))
                     .then(function (r) { return r.ok ? r.json() : { links: [] }; })
                     .then(function (data) {
                         var links = {};
@@ -413,7 +461,10 @@ function initDrive() {
                         return listing;
                     });
             })
-            .then(renderEntries)
+            .then(function (listing) {
+                renderEntries(listing);
+                return loadUsage();
+            })
             .catch(function (err) { showToast(err.message, "error"); });
     }
 
@@ -439,9 +490,9 @@ function initDrive() {
         document.getElementById("drive-batch-knowledge").disabled =
             !files.some(function (entry) {
                 return /\.(txt|md|markdown|pdf|docx|xlsx|pptx)$/i.test(entry.name);
-            }) || !hasPermission("knowledge.manage");
-        document.getElementById("drive-batch-move").disabled = !picked.length;
-        document.getElementById("drive-batch-delete").disabled = !picked.length;
+            }) || !canManageKnowledge();
+        document.getElementById("drive-batch-move").disabled = !picked.length || !canManageDrive();
+        document.getElementById("drive-batch-delete").disabled = !picked.length || !canManageDrive();
         selectAllBox.checked = currentEntries.length > 0 && picked.length === currentEntries.length;
     }
 
@@ -582,7 +633,7 @@ function initDrive() {
     function createFolder() {
         openInputModal("新建文件夹", "文件夹名称", "").then(function (name) {
             if (!name) return;
-            fetch("/api/drive/folders", {
+            fetch(driveUrl("/folders"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -609,7 +660,7 @@ function initDrive() {
         form.append("path", state.path);
         form.append("overwrite", overwrite ? "true" : "false");
         form.append("file", file);
-        return fetch("/api/drive/upload", { method: "POST", body: form })
+        return fetch(driveUrl("/upload"), { method: "POST", body: form })
             .then(function (r) {
                 if (r.ok) return r.json();
                 return r.json().catch(function () { return {}; }).then(function (body) {
@@ -639,6 +690,441 @@ function initDrive() {
         }, Promise.resolve());
     }
 
+    /* ---- folder upload confirmation, directory creation and progress ---- */
+
+    var folderUploadModal = document.getElementById("drive-folder-upload-modal");
+    var folderUploadTitle = document.getElementById("drive-folder-upload-title");
+    var folderUploadTarget = document.getElementById("drive-folder-upload-target");
+    var folderUploadSelection = document.getElementById("drive-folder-upload-selection");
+    var folderUploadItems = document.getElementById("drive-folder-upload-items");
+    var folderUploadSelectAll = document.getElementById("drive-folder-upload-select-all");
+    var folderUploadProgress = document.getElementById("drive-folder-upload-progress");
+    var folderUploadProgressBar = document.getElementById("drive-folder-upload-progress-bar");
+    var folderUploadProgressText = document.getElementById("drive-folder-upload-progress-text");
+    var folderUploadResult = document.getElementById("drive-folder-upload-result");
+    var folderUploadClose = document.getElementById("drive-folder-upload-close");
+    var folderUploadCancel = document.getElementById("drive-folder-upload-cancel");
+    var folderUploadConfirm = document.getElementById("drive-folder-upload-confirm");
+    var folderUploadTask = null;
+    var folderUploadRunning = false;
+    var folderUploadCompleted = false;
+
+    function joinDrivePath(left, right) {
+        return [left, right].filter(function (part) { return Boolean(part); }).join("/");
+    }
+
+    function normalizeRelativePath(path, fallback) {
+        var normalized = String(path || fallback || "").replace(/\\/g, "/");
+        return normalized.replace(/^\/+|\/+$/g, "").replace(/\/{2,}/g, "/");
+    }
+
+    function uploadDirectoryOf(relativePath) {
+        var index = relativePath.lastIndexOf("/");
+        return index === -1 ? "" : relativePath.slice(0, index);
+    }
+
+    function uploadFilenameOf(relativePath) {
+        var index = relativePath.lastIndexOf("/");
+        return index === -1 ? relativePath : relativePath.slice(index + 1);
+    }
+
+    function selectedFolderUploadItems() {
+        if (!folderUploadTask) return [];
+        return folderUploadTask.items.filter(function (item) { return item.selected; });
+    }
+
+    function updateFolderUploadSelection() {
+        if (!folderUploadTask) return;
+        var selected = selectedFolderUploadItems();
+        var totalBytes = selected.reduce(function (total, item) {
+            return total + item.file.size;
+        }, 0);
+        folderUploadSelection.textContent = "已选 " + selected.length + " / " +
+            folderUploadTask.items.length + " 个文件，共 " + formatBytes(totalBytes);
+        folderUploadSelectAll.checked = Boolean(folderUploadTask.items.length) &&
+            selected.length === folderUploadTask.items.length;
+        folderUploadSelectAll.indeterminate = selected.length > 0 &&
+            selected.length < folderUploadTask.items.length;
+        folderUploadConfirm.disabled = folderUploadRunning || !selected.length;
+    }
+
+    function setFolderUploadItemStatus(item, text, kind) {
+        item.status = text;
+        item.statusKind = kind || "";
+        if (!item.statusEl) return;
+        item.statusEl.textContent = text;
+        item.statusEl.className = "drive-folder-upload-status" +
+            (item.statusKind ? " " + item.statusKind : "");
+        item.statusEl.title = text;
+    }
+
+    function renderFolderUploadItems() {
+        folderUploadItems.innerHTML = "";
+        if (!folderUploadTask) return;
+        folderUploadTask.items.forEach(function (item) {
+            var row = document.createElement("div");
+            row.className = "drive-folder-upload-row";
+            row.setAttribute("role", "row");
+
+            var checkLabel = document.createElement("label");
+            checkLabel.className = "drive-folder-upload-check";
+            var checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = item.selected;
+            checkbox.disabled = folderUploadRunning || folderUploadCompleted;
+            checkbox.setAttribute("aria-label", "选择 " + item.relativePath);
+            checkbox.addEventListener("change", function () {
+                item.selected = checkbox.checked;
+                setFolderUploadItemStatus(item, item.selected ? "等待" : "未选择", "");
+                updateFolderUploadSelection();
+            });
+            checkLabel.appendChild(checkbox);
+
+            var pathEl = document.createElement("span");
+            pathEl.className = "drive-folder-upload-path";
+            pathEl.textContent = item.relativePath;
+            pathEl.title = item.relativePath;
+
+            var sizeEl = document.createElement("span");
+            sizeEl.textContent = formatBytes(item.file.size);
+
+            var statusEl = document.createElement("span");
+            statusEl.className = "drive-folder-upload-status" +
+                (item.statusKind ? " " + item.statusKind : "");
+            statusEl.textContent = item.status;
+            statusEl.title = item.status;
+
+            var remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "drive-folder-upload-remove";
+            remove.textContent = "移除";
+            remove.disabled = folderUploadRunning || folderUploadCompleted;
+            remove.addEventListener("click", function () {
+                folderUploadTask.items = folderUploadTask.items.filter(function (candidate) {
+                    return candidate !== item;
+                });
+                renderFolderUploadItems();
+                updateFolderUploadSelection();
+            });
+
+            item.statusEl = statusEl;
+            row.appendChild(checkLabel);
+            row.appendChild(pathEl);
+            row.appendChild(sizeEl);
+            row.appendChild(statusEl);
+            row.appendChild(remove);
+            folderUploadItems.appendChild(row);
+        });
+    }
+
+    function closeFolderUploadModal() {
+        if (folderUploadRunning) return;
+        folderUploadModal.style.display = "none";
+        folderUploadTask = null;
+        folderUploadCompleted = false;
+    }
+
+    function openFolderUploadModal(candidates) {
+        var seen = {};
+        var items = [];
+        candidates.forEach(function (candidate) {
+            var relativePath = normalizeRelativePath(candidate.relativePath, candidate.file.name);
+            if (!relativePath || seen[relativePath]) return;
+            seen[relativePath] = true;
+            items.push({
+                file: candidate.file,
+                relativePath: relativePath,
+                selected: true,
+                status: "等待",
+                statusKind: "",
+                statusEl: null
+            });
+        });
+        if (!items.length) {
+            showToast("文件夹中没有可上传的文件", "error");
+            return;
+        }
+        folderUploadTask = {
+            scope: state.scope,
+            tenantId: state.scope === "tenant" ? state.tenantId : "",
+            basePath: state.path,
+            items: items
+        };
+        folderUploadRunning = false;
+        folderUploadCompleted = false;
+        folderUploadTitle.textContent = "确认上传文件夹";
+        folderUploadTarget.textContent = "上传到：" +
+            (state.scope === "public" ? "公共文件区" : "租户文件区") +
+            (state.path ? " / " + state.path : " / 根目录");
+        folderUploadProgress.style.display = "none";
+        folderUploadProgressBar.style.width = "0%";
+        folderUploadProgressText.textContent = "";
+        folderUploadResult.style.display = "none";
+        folderUploadResult.textContent = "";
+        folderUploadSelectAll.disabled = false;
+        folderUploadClose.disabled = false;
+        folderUploadCancel.disabled = false;
+        folderUploadCancel.style.display = "";
+        folderUploadConfirm.disabled = false;
+        folderUploadConfirm.textContent = "开始上传";
+        renderFolderUploadItems();
+        updateFolderUploadSelection();
+        folderUploadModal.style.display = "";
+    }
+
+    function folderUploadDirectories(items) {
+        var directories = {};
+        items.forEach(function (item) {
+            var directory = uploadDirectoryOf(item.relativePath);
+            if (!directory) return;
+            var parts = directory.split("/");
+            var current = [];
+            parts.forEach(function (part) {
+                current.push(part);
+                directories[current.join("/")] = true;
+            });
+        });
+        return Object.keys(directories).sort(function (left, right) {
+            var depth = left.split("/").length - right.split("/").length;
+            return depth || left.localeCompare(right, "zh-CN");
+        });
+    }
+
+    function ensureFolderUploadDirectory(task, relativeDirectory) {
+        var fullPath = joinDrivePath(task.basePath, relativeDirectory);
+        var parent = parentPath(fullPath);
+        var name = uploadFilenameOf(fullPath);
+        return fetch(driveUrl("/folders"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                scope: task.scope,
+                tenant_id: task.scope === "tenant" ? task.tenantId : null,
+                path: parent,
+                name: name,
+                exist_ok: true
+            })
+        }).then(function (response) {
+            return response.ok ? response.json() : handleError(response);
+        });
+    }
+
+    function folderUploadItemBlocked(item, failedDirectories) {
+        var directory = uploadDirectoryOf(item.relativePath);
+        var failed = Object.keys(failedDirectories).find(function (candidate) {
+            return directory === candidate || directory.indexOf(candidate + "/") === 0;
+        });
+        return failed ? failedDirectories[failed] : "";
+    }
+
+    function uploadFolderItem(task, item, onProgress) {
+        return new Promise(function (resolve, reject) {
+            var form = new FormData();
+            form.append("scope", task.scope);
+            if (task.scope === "tenant") form.append("tenant_id", task.tenantId);
+            form.append("path", joinDrivePath(task.basePath, uploadDirectoryOf(item.relativePath)));
+            form.append("overwrite", "true");
+            form.append("file", item.file, uploadFilenameOf(item.relativePath));
+
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", driveUrl("/upload"));
+            xhr.upload.addEventListener("progress", function (event) {
+                if (event.lengthComputable) onProgress(Math.min(event.loaded, item.file.size));
+            });
+            xhr.addEventListener("load", function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve();
+                    return;
+                }
+                var detail = "上传失败（" + xhr.status + "）";
+                try {
+                    detail = JSON.parse(xhr.responseText).detail || detail;
+                } catch (error) {
+                    // Keep the status-based fallback for non-JSON responses.
+                }
+                reject(new Error(detail));
+            });
+            xhr.addEventListener("error", function () {
+                reject(new Error("网络错误，上传失败"));
+            });
+            xhr.send(form);
+        });
+    }
+
+    function runFolderUpload() {
+        if (!folderUploadTask || folderUploadRunning || folderUploadCompleted) return;
+        var task = folderUploadTask;
+        var selected = selectedFolderUploadItems();
+        if (!selected.length) return;
+        var directories = folderUploadDirectories(selected);
+        var failedDirectories = {};
+        var totalBytes = selected.reduce(function (total, item) {
+            return total + item.file.size;
+        }, 0);
+        var settledBytes = 0;
+        var completedCount = 0;
+        var successCount = 0;
+        var failureCount = 0;
+
+        folderUploadRunning = true;
+        folderUploadTitle.textContent = "正在上传文件夹";
+        folderUploadProgress.style.display = "";
+        folderUploadResult.style.display = "none";
+        folderUploadSelectAll.disabled = true;
+        folderUploadClose.disabled = true;
+        folderUploadCancel.disabled = true;
+        folderUploadConfirm.disabled = true;
+        folderUploadConfirm.textContent = "上传中";
+        task.items.forEach(function (item) {
+            if (item.selected) setFolderUploadItemStatus(item, "创建目录", "");
+            else setFolderUploadItemStatus(item, "未选择", "");
+        });
+        renderFolderUploadItems();
+
+        function updateProgress(currentLoaded) {
+            var loaded = Math.min(totalBytes, settledBytes + (currentLoaded || 0));
+            var percent = totalBytes ? Math.round(loaded / totalBytes * 100) : 100;
+            folderUploadProgressBar.style.width = percent + "%";
+            folderUploadProgressText.textContent = "已处理 " + completedCount + " / " +
+                selected.length + " 个文件，" + percent + "%";
+        }
+
+        updateProgress(0);
+        var directoryChain = directories.reduce(function (chain, directory) {
+            return chain.then(function () {
+                return ensureFolderUploadDirectory(task, directory).catch(function (error) {
+                    failedDirectories[directory] = error.message;
+                });
+            });
+        }, Promise.resolve());
+
+        directoryChain.then(function () {
+            selected.forEach(function (item) {
+                if (!folderUploadItemBlocked(item, failedDirectories)) {
+                    setFolderUploadItemStatus(item, "等待上传", "");
+                }
+            });
+            return selected.reduce(function (chain, item) {
+                return chain.then(function () {
+                    var blocked = folderUploadItemBlocked(item, failedDirectories);
+                    if (blocked) {
+                        failureCount += 1;
+                        completedCount += 1;
+                        settledBytes += item.file.size;
+                        setFolderUploadItemStatus(item, "失败：" + blocked, "error");
+                        updateProgress(0);
+                        return null;
+                    }
+                    setFolderUploadItemStatus(item, "上传中 0%", "");
+                    return uploadFolderItem(task, item, function (loaded) {
+                        var filePercent = item.file.size ?
+                            Math.round(loaded / item.file.size * 100) : 0;
+                        setFolderUploadItemStatus(item, "上传中 " + filePercent + "%", "");
+                        updateProgress(loaded);
+                    }).then(function () {
+                        successCount += 1;
+                        setFolderUploadItemStatus(item, "成功", "success");
+                    }).catch(function (error) {
+                        failureCount += 1;
+                        setFolderUploadItemStatus(item, "失败：" + error.message, "error");
+                    }).then(function () {
+                        completedCount += 1;
+                        settledBytes += item.file.size;
+                        updateProgress(0);
+                    });
+                });
+            }, Promise.resolve());
+        }).then(function () {
+            folderUploadRunning = false;
+            folderUploadCompleted = true;
+            folderUploadTitle.textContent = "上传完成";
+            folderUploadProgressBar.style.width = "100%";
+            folderUploadProgressText.textContent = "已处理 " + completedCount + " / " +
+                selected.length + " 个文件，100%";
+            folderUploadResult.style.display = "";
+            folderUploadResult.textContent = "上传完成：成功 " + successCount + " 个，失败 " +
+                failureCount + " 个，未选择 " + (task.items.length - selected.length) + " 个。";
+            folderUploadClose.disabled = false;
+            folderUploadCancel.style.display = "none";
+            folderUploadConfirm.disabled = false;
+            folderUploadConfirm.textContent = "完成";
+            renderFolderUploadItems();
+            loadEntries();
+            refreshTree([task.basePath]);
+        }).catch(function (error) {
+            folderUploadRunning = false;
+            folderUploadCompleted = true;
+            folderUploadTitle.textContent = "上传失败";
+            folderUploadResult.style.display = "";
+            folderUploadResult.textContent = "上传任务异常：" + error.message;
+            folderUploadClose.disabled = false;
+            folderUploadCancel.style.display = "none";
+            folderUploadConfirm.disabled = false;
+            folderUploadConfirm.textContent = "完成";
+            renderFolderUploadItems();
+        });
+    }
+
+    function readAllDirectoryEntries(reader) {
+        var entries = [];
+        return new Promise(function (resolve, reject) {
+            function readNext() {
+                reader.readEntries(function (batch) {
+                    if (!batch.length) {
+                        resolve(entries);
+                        return;
+                    }
+                    entries = entries.concat(Array.prototype.slice.call(batch));
+                    readNext();
+                }, reject);
+            }
+            readNext();
+        });
+    }
+
+    function walkDroppedEntry(entry, parent) {
+        var relativePath = joinDrivePath(parent, entry.name);
+        if (entry.isFile) {
+            return new Promise(function (resolve, reject) {
+                entry.file(function (file) {
+                    resolve([{ file: file, relativePath: relativePath }]);
+                }, reject);
+            });
+        }
+        if (!entry.isDirectory) return Promise.resolve([]);
+        return readAllDirectoryEntries(entry.createReader()).then(function (children) {
+            return Promise.all(children.map(function (child) {
+                return walkDroppedEntry(child, relativePath);
+            }));
+        }).then(function (groups) {
+            return groups.reduce(function (all, group) { return all.concat(group); }, []);
+        });
+    }
+
+    function collectDroppedItems(dataTransfer) {
+        var transferItems = dataTransfer.items ? Array.prototype.slice.call(dataTransfer.items) : [];
+        var entryItems = transferItems.map(function (item) {
+            return item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+        }).filter(function (entry) { return Boolean(entry); });
+        var hasDirectory = entryItems.some(function (entry) { return entry.isDirectory; });
+        if (entryItems.length) {
+            return Promise.all(entryItems.map(function (entry) {
+                return walkDroppedEntry(entry, "");
+            })).then(function (groups) {
+                return {
+                    hasDirectory: hasDirectory,
+                    items: groups.reduce(function (all, group) { return all.concat(group); }, [])
+                };
+            });
+        }
+        return Promise.resolve({
+            hasDirectory: false,
+            items: Array.prototype.slice.call(dataTransfer.files || []).map(function (file) {
+                return { file: file, relativePath: file.name };
+            })
+        });
+    }
+
     /* ---- text editor (create / edit) ---- */
 
     var editorModal = document.getElementById("drive-editor-modal");
@@ -655,7 +1141,7 @@ function initDrive() {
         form.append("path", dir);
         form.append("overwrite", overwrite ? "true" : "false");
         form.append("file", new File([content], filename, { type: "text/plain" }));
-        return fetch("/api/drive/upload", { method: "POST", body: form })
+        return fetch(driveUrl("/upload"), { method: "POST", body: form })
             .then(function (r) { return r.ok ? r.json() : handleError(r); });
     }
 
@@ -663,7 +1149,7 @@ function initDrive() {
         var params = scopeParams();
         params.path = entry.path;
         params.max_bytes = EDIT_MAX_BYTES;
-        fetch("/api/drive/preview" + query(params))
+        fetch(driveUrl("/preview") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (result) {
                 if (result.truncated) {
@@ -727,7 +1213,7 @@ function initDrive() {
     }
 
     function entryAction(action, entry, target) {
-        return fetch("/api/drive/entries", {
+        return fetch(driveUrl("/entries"), {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -791,7 +1277,7 @@ function initDrive() {
                 var params = scopeParams();
                 params.path = entry.path;
                 if (entry.type === "folder") params.recursive = "true";
-                return fetch("/api/drive/entries" + query(params), { method: "DELETE" })
+                return fetch(driveUrl("/entries") + query(params), { method: "DELETE" })
                     .then(function (r) { return r.ok ? r.json() : handleError(r); });
             }).then(function (failures) {
                 if (failures.length) {
@@ -809,7 +1295,7 @@ function initDrive() {
         var params = scopeParams();
         params.path = entry.path;
         var anchor = document.createElement("a");
-        anchor.href = "/api/drive/download" + query(params);
+        anchor.href = driveUrl("/download") + query(params);
         anchor.download = entry.name;
         document.body.appendChild(anchor);
         anchor.click();
@@ -881,7 +1367,7 @@ function initDrive() {
     function previewFile(entry) {
         var params = scopeParams();
         params.path = entry.path;
-        return fetch("/api/drive/preview" + query(params))
+        return fetch(driveUrl("/preview") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (result) {
                 var suffix = result.truncated ? "（内容过长，仅显示开头部分）" : "";
@@ -904,7 +1390,7 @@ function initDrive() {
     function previewImageFile(entry) {
         var params = scopeParams();
         params.path = entry.path;
-        return fetch("/api/drive/download" + query(params))
+        return fetch(driveUrl("/download") + query(params))
             .then(function (r) { return r.ok ? r.blob() : handleError(r); })
             .then(function (blob) {
                 // Render via data URL: page CSP allows img-src data: but not blob:.
@@ -935,7 +1421,7 @@ function initDrive() {
             var win = window.open("", "_blank");
             var params = scopeParams();
             params.path = entry.path;
-            fetch("/api/drive/download" + query(params))
+            fetch(driveUrl("/download") + query(params))
                 .then(function (r) { return r.ok ? r.blob() : handleError(r); })
                 .then(function (blob) {
                     win.location = URL.createObjectURL(
@@ -963,7 +1449,7 @@ function initDrive() {
             limit: state.auditLimit,
             offset: state.auditOffset
         };
-        fetch("/api/drive/audit" + query(params))
+        fetch(driveUrl("/audit") + query(params))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (result) {
                 state.auditTotal = result.total;
@@ -1007,7 +1493,8 @@ function initDrive() {
     function switchScope(scope) {
         state.scope = scope;
         state.path = "";
-        tenantSelect.style.display = scope === "tenant" ? "" : "none";
+        tenantSelect.style.display = "none";
+        updateWritableState();
         mainTree.reset().then(function () { mainTree.setSelected(""); });
         loadEntries();
     }
@@ -1049,9 +1536,38 @@ function initDrive() {
     document.getElementById("drive-upload-btn").addEventListener("click", function () {
         fileInput.click();
     });
+    document.getElementById("drive-upload-folder-btn").addEventListener("click", function () {
+        folderInput.click();
+    });
     fileInput.addEventListener("change", function () {
         if (fileInput.files.length) uploadFiles(fileInput.files);
         fileInput.value = "";
+    });
+    folderInput.addEventListener("change", function () {
+        if (folderInput.files.length) {
+            openFolderUploadModal(Array.prototype.slice.call(folderInput.files).map(function (file) {
+                return { file: file, relativePath: file.webkitRelativePath || file.name };
+            }));
+        }
+        folderInput.value = "";
+    });
+    folderUploadSelectAll.addEventListener("change", function () {
+        if (!folderUploadTask || folderUploadRunning || folderUploadCompleted) return;
+        folderUploadTask.items.forEach(function (item) {
+            item.selected = folderUploadSelectAll.checked;
+            setFolderUploadItemStatus(item, item.selected ? "等待" : "未选择", "");
+        });
+        renderFolderUploadItems();
+        updateFolderUploadSelection();
+    });
+    folderUploadClose.addEventListener("click", closeFolderUploadModal);
+    folderUploadCancel.addEventListener("click", closeFolderUploadModal);
+    folderUploadConfirm.addEventListener("click", function () {
+        if (folderUploadCompleted) closeFolderUploadModal();
+        else runFolderUpload();
+    });
+    folderUploadModal.addEventListener("keydown", function (event) {
+        if (event.key === "Escape") closeFolderUploadModal();
     });
     document.getElementById("drive-editor-close").addEventListener("click", closeEditor);
     document.getElementById("drive-editor-cancel").addEventListener("click", closeEditor);
@@ -1073,7 +1589,7 @@ function initDrive() {
     }
 
     function dropUploadEnabled() {
-        return hasPermission("drive.manage") &&
+        return canManageDrive() &&
             filesPanel.style.display !== "none" &&
             !(state.scope === "tenant" && !state.tenantId);
     }
@@ -1098,21 +1614,19 @@ function initDrive() {
         dropOverlay.style.display = "none";
         if (!dragHasFiles(event) || !dropUploadEnabled()) return;
         event.preventDefault();
-        var files = Array.prototype.slice.call(event.dataTransfer.files);
-        var items = event.dataTransfer.items;
-        // Skip dropped directories: they cannot be uploaded as plain files.
-        if (items && items.length === files.length) {
-            files = files.filter(function (file, index) {
-                var item = items[index];
-                var fsEntry = item && item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-                return !(fsEntry && fsEntry.isDirectory);
-            });
-        }
-        if (!files.length) {
-            showToast("仅支持拖拽上传文件，不支持文件夹", "error");
-            return;
-        }
-        uploadFiles(files);
+        collectDroppedItems(event.dataTransfer).then(function (result) {
+            if (!result.items.length) {
+                showToast("未读取到文件，请使用“上传文件夹”按钮重试", "error");
+                return;
+            }
+            if (result.hasDirectory) {
+                openFolderUploadModal(result.items);
+                return;
+            }
+            uploadFiles(result.items.map(function (item) { return item.file; }));
+        }).catch(function () {
+            showToast("无法读取拖拽的文件夹，请使用“上传文件夹”按钮重试", "error");
+        });
     });
     document.getElementById("drive-preview-close").addEventListener("click", closePreviewModal);
     document.getElementById("drive-batch-download").addEventListener("click", downloadSelected);
@@ -1126,10 +1640,10 @@ function initDrive() {
         if (!files.length) { showToast("请选择支持的文档文件", "error"); return; }
         var params = { scope: state.scope };
         if (state.scope === "tenant") params.tenant_id = state.tenantId;
-        fetch("/api/knowledge/categories" + query(params))
+        fetch(knowledgeUrl("/categories"))
             .then(function (r) { return r.ok ? r.json() : handleError(r); })
             .then(function (data) {
-                var categories = (data.categories || []).filter(function (item) {
+                var categories = (data.categories || data.items || []).filter(function (item) {
                     return item.scope === state.scope &&
                         (state.scope === "public" || item.tenant_id === state.tenantId);
                 });
@@ -1151,7 +1665,7 @@ function initDrive() {
             return entry.type === "file" &&
                 /\.(txt|md|markdown|pdf|docx|xlsx|pptx)$/i.test(entry.name);
         });
-        fetch("/api/knowledge/from-drive", {
+        fetch(knowledgeUrl("/from-drive"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1194,13 +1708,9 @@ function initDrive() {
         }
     });
 
-    loadMe()
+    (window.BP_CONTEXT_READY || loadMe())
         .then(function () {
-            if (!hasPermission("drive.manage")) {
-                document.querySelectorAll("[data-manage='1']").forEach(function (el) {
-                    el.style.display = "none";
-                });
-            }
+            updateWritableState();
             return loadTenants();
         })
         .then(function () {

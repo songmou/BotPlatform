@@ -15,6 +15,24 @@ function initAgents() {
     loadAgents();
     loadModelOptions();
 
+    /* ===== Modal sub-tabs ===== */
+    function activateModalTab(target) {
+        document.querySelectorAll(".agent-modal-tabs .tab-btn").forEach(function (tab) {
+            var active = tab.getAttribute("data-agent-tab") === target;
+            tab.classList.toggle("active", active);
+            tab.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        document.querySelectorAll(".agent-tab-panel").forEach(function (panel) {
+            panel.hidden = panel.getAttribute("data-agent-panel") !== target;
+        });
+        updateBulkSelectionControl(target);
+    }
+    document.querySelectorAll(".agent-modal-tabs .tab-btn").forEach(function (tab) {
+        tab.addEventListener("click", function () {
+            activateModalTab(tab.getAttribute("data-agent-tab"));
+        });
+    });
+
     function loadModelOptions() {
         return fetch("/api/models")
             .then(function (r) { return r.json(); })
@@ -47,7 +65,46 @@ function initAgents() {
         mcp: document.getElementById("tools-mcp")
     };
     var toolKinds = ["builtin", "plugin", "skill", "mcp"];
+    var capabilityKinds = toolKinds.concat(["knowledge"]);
     var knowledgeContainer = document.getElementById("tools-knowledge");
+    var bulkSelectionButtons = document.querySelectorAll(".agent-tool-toggle-selection");
+
+    function toolContainer(kind) {
+        return kind === "knowledge"
+            ? knowledgeContainer
+            : toolContainers[kind];
+    }
+
+    function updateBulkSelectionControl(kind) {
+        if (capabilityKinds.indexOf(kind) === -1) return;
+        var bulkSelectionButton = document.querySelector(
+            '.agent-tool-toggle-selection[data-tool-kind="' + kind + '"]'
+        );
+        if (!bulkSelectionButton) return;
+        var container = toolContainer(kind);
+        var boxes = container ? container.querySelectorAll("input[type=checkbox]") : [];
+        var allSelected = boxes.length && Array.prototype.every.call(boxes, function (box) {
+            return box.checked;
+        });
+        bulkSelectionButton.disabled = !boxes.length;
+        bulkSelectionButton.textContent = allSelected ? "取消全选" : "全选";
+    }
+
+    bulkSelectionButtons.forEach(function (bulkSelectionButton) {
+        bulkSelectionButton.addEventListener("click", function () {
+            var kind = bulkSelectionButton.getAttribute("data-tool-kind");
+            var container = toolContainer(kind);
+            if (!container) return;
+            var boxes = container.querySelectorAll("input[type=checkbox]");
+            var selectAll = !boxes.length || !Array.prototype.every.call(boxes, function (box) {
+                return box.checked;
+            });
+            boxes.forEach(function (box) { box.checked = selectAll; });
+            if (kind === "knowledge") updateKnowledgeCount();
+            else updateCount(kind);
+            updateBulkSelectionControl(kind);
+        });
+    });
 
     function toolCardHtml(value, label, description, kind) {
         var desc = description
@@ -81,7 +138,8 @@ function initAgents() {
         }
         container.innerHTML = enabled.map(function (p) {
             var cards = p.tools.map(function (t) {
-                return toolCardHtml(t.name, t.name, t.description, "plugin");
+                return toolCardHtml(t.name, t.name, t.description, "plugin")
+                    .replace("<input ", '<input data-plugin-id="' + escapeHtml(p.id) + '" ');
             }).join("");
             return '<div class="tool-plugin-group">' +
                 '<div class="tool-plugin-name">' + escapeHtml(p.id) + "</div>" +
@@ -150,6 +208,7 @@ function initAgents() {
 
             toolKinds.forEach(updateCount);
             updateKnowledgeCount();
+            capabilityKinds.forEach(updateBulkSelectionControl);
         });
     }
 
@@ -159,35 +218,98 @@ function initAgents() {
             checked ? "（已选 " + checked + "）" : "";
     }
 
-    knowledgeContainer.addEventListener("change", updateKnowledgeCount);
+    knowledgeContainer.addEventListener("change", function () {
+        updateKnowledgeCount();
+        updateBulkSelectionControl("knowledge");
+    });
+    toolKinds.forEach(function (kind) {
+        toolContainers[kind].addEventListener("change", function () {
+            updateCount(kind);
+            updateBulkSelectionControl(kind);
+        });
+    });
 
     function setToolSelection(agent, categoryIds) {
-        var toolSet = {}, skillSet = {}, mcpSet = {};
+        var toolSet = {}, pluginToolSet = {}, skillSet = {}, mcpSet = {};
         (agent.tools || []).forEach(function (n) { toolSet[n] = true; });
+        Object.keys(agent.plugin_tools || {}).forEach(function (pluginId) {
+            (agent.plugin_tools[pluginId] || []).forEach(function (n) {
+                pluginToolSet[pluginId + ":" + n] = true;
+            });
+        });
         (agent.skills || []).forEach(function (n) { skillSet[n] = true; });
         (agent.mcp_servers || []).forEach(function (n) { mcpSet[n] = true; });
         toolKinds.forEach(function (kind) {
             toolContainers[kind].querySelectorAll("input").forEach(function (box) {
                 if (kind === "skill") box.checked = !!skillSet[box.value];
                 else if (kind === "mcp") box.checked = !!mcpSet[box.value];
-                else box.checked = !!toolSet[box.value];
+                else if (kind === "plugin") {
+                    box.checked = !!pluginToolSet[
+                        box.getAttribute("data-plugin-id") + ":" + box.value
+                    ];
+                } else box.checked = !!toolSet[box.value];
             });
             updateCount(kind);
         });
+        var unresolved = [];
+        Object.keys(agent.plugin_tools || {}).forEach(function (pluginId) {
+            (agent.plugin_tools[pluginId] || []).forEach(function (toolName) {
+                var found = Array.prototype.some.call(
+                    toolContainers.plugin.querySelectorAll("input"),
+                    function (box) {
+                        return box.getAttribute("data-plugin-id") === pluginId &&
+                            box.value === toolName;
+                    }
+                );
+                if (!found) {
+                    unresolved.push({
+                        plugin_id: pluginId,
+                        tool_name: toolName
+                    });
+                }
+            });
+        });
+        if (unresolved.length) {
+            toolContainers.plugin.insertAdjacentHTML(
+                "beforeend",
+                '<div class="tool-plugin-group unresolved-plugin-binding">' +
+                '<div class="tool-plugin-name">未解析的插件绑定</div>' +
+                '<div class="tool-checkboxes tool-checkboxes-nested">' +
+                unresolved.map(function (item) {
+                    return toolCardHtml(
+                        item.tool_name,
+                        item.tool_name + "（插件缺失）",
+                        "插件 " + item.plugin_id +
+                            " 当前未安装；保留绑定但不会阻止核心启动。",
+                        "plugin"
+                    ).replace(
+                        "<input ",
+                        '<input checked data-plugin-id="' +
+                            escapeHtml(item.plugin_id) + '" '
+                    );
+                }).join("") + "</div></div>"
+            );
+            updateCount("plugin");
+        }
         var categorySet = {};
         (categoryIds || []).forEach(function (id) { categorySet[id] = true; });
         knowledgeContainer.querySelectorAll("input").forEach(function (box) {
             box.checked = !!categorySet[box.value];
         });
         updateKnowledgeCount();
+        capabilityKinds.forEach(updateBulkSelectionControl);
     }
 
     function collectSelection() {
         var tools = [];
-        ["builtin", "plugin"].forEach(function (kind) {
-            toolContainers[kind].querySelectorAll("input:checked").forEach(function (b) {
-                tools.push(b.value);
-            });
+        toolContainers.builtin.querySelectorAll("input:checked").forEach(function (b) {
+            tools.push(b.value);
+        });
+        var pluginTools = {};
+        toolContainers.plugin.querySelectorAll("input:checked").forEach(function (b) {
+            var pluginId = b.getAttribute("data-plugin-id");
+            if (!pluginTools[pluginId]) pluginTools[pluginId] = [];
+            pluginTools[pluginId].push(b.value);
         });
         var skills = [];
         toolContainers.skill.querySelectorAll("input:checked").forEach(function (b) { skills.push(b.value); });
@@ -198,7 +320,8 @@ function initAgents() {
             knowledgeCategories.push(b.value);
         });
         return {
-            tools: tools, skills: skills, mcp_servers: mcpServers,
+            tools: tools, plugin_tools: pluginTools,
+            skills: skills, mcp_servers: mcpServers,
             knowledge_category_ids: knowledgeCategories
         };
     }
@@ -226,7 +349,10 @@ function initAgents() {
         if (e.target === modal) closeModal();
     });
 
-    function openModal() { modal.style.display = ""; }
+    function openModal() {
+        activateModalTab("basic");
+        modal.style.display = "";
+    }
     function closeModal() { modal.style.display = "none"; }
 
     function loadAgents() {
@@ -257,7 +383,10 @@ function initAgents() {
         }
 
         var modelInfo = a.model ? a.model : "跟随默认模型";
-        var counts = "工具 " + (a.tools || []).length +
+        var pluginToolCount = Object.keys(a.plugin_tools || {}).reduce(function (total, id) {
+            return total + (a.plugin_tools[id] || []).length;
+        }, 0);
+        var counts = "工具 " + ((a.tools || []).length + pluginToolCount) +
             " · 技能 " + (a.skills || []).length +
             " · MCP " + (a.mcp_servers || []).length;
 
@@ -377,6 +506,14 @@ function initAgents() {
     form.addEventListener("submit", function (e) {
         e.preventDefault();
 
+        if (!form.checkValidity()) {
+            var invalid = form.querySelector(":invalid");
+            var panel = invalid && invalid.closest(".agent-tab-panel");
+            if (panel) activateModalTab(panel.getAttribute("data-agent-panel"));
+            form.reportValidity();
+            return;
+        }
+
         var hintsRaw = document.getElementById("agent-hints").value.trim();
         var hints = hintsRaw ? hintsRaw.split(/[;；]/).map(function (s) { return s.trim(); }).filter(Boolean) : [];
         var tempVal = document.getElementById("agent-temperature").value;
@@ -395,6 +532,7 @@ function initAgents() {
             max_tokens: maxTokVal ? parseInt(maxTokVal, 10) : null,
             enabled: document.getElementById("agent-enabled").checked,
             tools: selection.tools,
+            plugin_tools: selection.plugin_tools,
             skills: selection.skills,
             mcp_servers: selection.mcp_servers,
             capabilities: []

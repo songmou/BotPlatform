@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -17,10 +17,13 @@ from apscheduler.triggers.cron import CronTrigger
 from src.core.config.mcp_headers import merge_headers
 from src.core.modeling import ModelCapabilities
 from src.core.plugins.registry import (
+    default_catalog,
     known_plugin_ids,
+    normalize_plugin_settings,
     plugin_tool_names,
     validate_plugin_settings,
 )
+from src.core.plugins.manifest import PLUGIN_ID_PATTERN
 
 
 class ConfigError(RuntimeError):
@@ -52,16 +55,10 @@ class ModelProfile:
     assistant_passthrough_fields: List[str] = field(default_factory=list)
     billing_currency: str = "CNY"
     pricing: Optional[ModelPricing] = None
-
-
-@dataclass(frozen=True)
-class EmbeddingProfile:
-    id: str
-    enabled: bool
-    base_url: str
-    model: str
-    dimensions: int
-    timeout_seconds: float
+    # Model modality: "chat" (default), "embedding", or "rerank".
+    modality: str = "chat"
+    # Output vector size, required only for embedding profiles.
+    dimensions: Optional[int] = None
 
 
 BUILTIN_TOOL_NAMES = {
@@ -137,6 +134,7 @@ class ChannelConfig:
     id: str
     type: str
     enabled: bool
+    agent_id: str = ""
     settings: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -153,6 +151,8 @@ class AppConfig:
     pro_model: str
     vision_model: str
     fallback_cooldown_seconds: int
+    embedding_model: str = ""
+    rerank_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,6 +172,7 @@ class AgentPreset:
     enabled: bool = True
     image_prompt: Optional[str] = None
     tools: List[str] = field(default_factory=list)
+    plugin_tools: Dict[str, List[str]] = field(default_factory=dict)
     skills: List[str] = field(default_factory=list)
     mcp_servers: List[str] = field(default_factory=list)
     model: Optional[str] = None
@@ -294,7 +295,6 @@ class ProjectConfig:
     agents: Dict[str, AgentPreset]
     scripts: Dict[str, ScriptDefinition]
     schedules: List[ScheduledTask]
-    embedding: EmbeddingProfile
     skills: List[Dict[str, Any]] = field(default_factory=list)
     mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
     channels: Dict[str, ChannelConfig] = field(default_factory=dict)
@@ -367,6 +367,16 @@ def _optional_string(data: Dict[str, Any], field: str, path: Path) -> Optional[s
         return None
     if not isinstance(value, str) or not value.strip():
         raise _error(path, field, "必须是非空字符串或省略")
+    return value.strip()
+
+
+def _optional_binding(data: Dict[str, Any], field: str, path: Path) -> str:
+    # Role bindings accept an empty string as "unbound/disabled".
+    value = data.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _error(path, field, "必须是字符串")
     return value.strip()
 
 
@@ -498,6 +508,7 @@ def _load_app(path: Path) -> AppConfig:
         "default_agent", "timezone", "history_rounds", "image_prompt",
         "active_model", "fallback_model", "local_model", "flash_model",
         "pro_model", "vision_model", "fallback_cooldown_seconds",
+        "embedding_model", "rerank_model",
     }, path)
     default_agent = _required_string(data, "default_agent", path)
     timezone = _required_string(data, "timezone", path)
@@ -521,6 +532,8 @@ def _load_app(path: Path) -> AppConfig:
     fallback_cooldown_seconds = _positive_int(
         data, "fallback_cooldown_seconds", path
     )
+    embedding_model = _optional_binding(data, "embedding_model", path)
+    rerank_model = _optional_binding(data, "rerank_model", path)
 
     return AppConfig(
         default_agent=default_agent,
@@ -534,10 +547,13 @@ def _load_app(path: Path) -> AppConfig:
         pro_model=pro_model,
         vision_model=vision_model,
         fallback_cooldown_seconds=fallback_cooldown_seconds,
+        embedding_model=embedding_model,
+        rerank_model=rerank_model,
     )
 
 
 _MODEL_TYPES = {"ollama", "openai_compatible"}
+_MODEL_MODALITIES = {"chat", "embedding", "rerank"}
 _RESERVED_REQUEST_FIELDS = {
     "model",
     "messages",
@@ -595,17 +611,40 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
             raise _error(path, "profiles", "档案名必须是非空字符串")
         if not isinstance(raw, dict):
             raise _error(path, field_base, "必须是 JSON 对象")
-        _reject_unknown(raw, {
-            "enabled", "type", "provider", "base_url", "api_key_env", "model",
-            "temperature", "max_tokens", "timeout_seconds", "capabilities",
-            "request_extra", "assistant_passthrough_fields", "pricing",
-        }, path, field_base)
+        modality = raw.get("modality", "chat")
+        if not isinstance(modality, str) or modality not in _MODEL_MODALITIES:
+            raise _error(
+                path,
+                field_base + ".modality",
+                "必须是以下之一：{}".format("、".join(sorted(_MODEL_MODALITIES))),
+            )
+        if modality == "chat":
+            allowed_keys = {
+                "enabled", "type", "provider", "base_url", "api_key_env", "model",
+                "temperature", "max_tokens", "timeout_seconds", "capabilities",
+                "request_extra", "assistant_passthrough_fields", "pricing", "modality",
+            }
+        elif modality == "embedding":
+            allowed_keys = {
+                "enabled", "type", "provider", "base_url", "api_key_env", "model",
+                "dimensions", "timeout_seconds", "modality",
+            }
+        else:  # rerank
+            allowed_keys = {
+                "enabled", "type", "provider", "base_url", "api_key_env", "model",
+                "timeout_seconds", "modality",
+            }
+        _reject_unknown(raw, allowed_keys, path, field_base)
         enabled = raw.get("enabled")
         if not isinstance(enabled, bool):
             raise _error(path, field_base + ".enabled", "必须是布尔值")
         adapter_type = _required_nested_string(raw, "type", field_base + ".type", path)
         if adapter_type not in _MODEL_TYPES:
             raise _error(path, field_base + ".type", "是不支持的适配器类型")
+        if modality == "rerank" and adapter_type != "openai_compatible":
+            raise _error(
+                path, field_base + ".type", "重排模型仅支持 openai_compatible 适配器"
+            )
         provider = _required_nested_string(
             raw, "provider", field_base + ".provider", path
         )
@@ -615,6 +654,66 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
             path,
         )
         model = _required_nested_string(raw, "model", field_base + ".model", path)
+        timeout_seconds = _model_number(
+            raw, "timeout_seconds", field_base + ".timeout_seconds", path
+        )
+        if timeout_seconds <= 0 or timeout_seconds > 600:
+            raise _error(path, field_base + ".timeout_seconds", "必须在 0 到 600 之间")
+        api_key_env = raw.get("api_key_env")
+        if adapter_type == "openai_compatible":
+            if not isinstance(api_key_env, str) or not api_key_env.strip():
+                raise _error(
+                    path, field_base + ".api_key_env", "必须是非空环境变量名"
+                )
+            api_key_env = api_key_env.strip()
+        elif api_key_env is not None:
+            raise _error(path, field_base + ".api_key_env", "仅云端兼容档案可配置")
+        if adapter_type == "ollama":
+            override_url = os.getenv("OLLAMA_BASE_URL")
+            if override_url:
+                base_url = _validate_model_url(
+                    override_url,
+                    field_base + ".base_url（OLLAMA_BASE_URL）",
+                    path,
+                )
+            # OLLAMA_MODEL only overrides the chat model, never embedding/rerank.
+            if modality == "chat":
+                model = os.getenv("OLLAMA_MODEL") or model
+
+        if modality != "chat":
+            dimensions: Optional[int] = None
+            if modality == "embedding":
+                raw_dimensions = raw.get("dimensions")
+                if (
+                    not isinstance(raw_dimensions, int)
+                    or isinstance(raw_dimensions, bool)
+                    or raw_dimensions < 1
+                ):
+                    raise _error(
+                        path, field_base + ".dimensions", "必须是大于 0 的整数"
+                    )
+                dimensions = raw_dimensions
+            profiles[profile_id] = ModelProfile(
+                id=profile_id,
+                enabled=enabled,
+                type=adapter_type,
+                provider=provider,
+                base_url=base_url,
+                model=model,
+                temperature=0.0,
+                max_tokens=1,
+                timeout_seconds=timeout_seconds,
+                capabilities=ModelCapabilities(),
+                api_key_env=api_key_env,
+                request_extra={},
+                assistant_passthrough_fields=[],
+                billing_currency=currency,
+                pricing=None,
+                modality=modality,
+                dimensions=dimensions,
+            )
+            continue
+
         temperature = _model_number(
             raw, "temperature", field_base + ".temperature", path
         )
@@ -623,11 +722,6 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
         max_tokens = raw.get("max_tokens")
         if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
             raise _error(path, field_base + ".max_tokens", "必须是大于 0 的整数")
-        timeout_seconds = _model_number(
-            raw, "timeout_seconds", field_base + ".timeout_seconds", path
-        )
-        if timeout_seconds <= 0 or timeout_seconds > 600:
-            raise _error(path, field_base + ".timeout_seconds", "必须在 0 到 600 之间")
         raw_capabilities = raw.get("capabilities")
         if not isinstance(raw_capabilities, dict):
             raise _error(path, field_base + ".capabilities", "必须是 JSON 对象")
@@ -647,15 +741,6 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
                     field_base + ".capabilities." + capability,
                     "必须是布尔值",
                 )
-        api_key_env = raw.get("api_key_env")
-        if adapter_type == "openai_compatible":
-            if not isinstance(api_key_env, str) or not api_key_env.strip():
-                raise _error(
-                    path, field_base + ".api_key_env", "必须是非空环境变量名"
-                )
-            api_key_env = api_key_env.strip()
-        elif api_key_env is not None:
-            raise _error(path, field_base + ".api_key_env", "仅云端兼容档案可配置")
 
         request_extra = raw.get("request_extra", {})
         if not isinstance(request_extra, dict):
@@ -736,15 +821,6 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
                 normalized_pricing[key] = format(decimal_value, "f")
             pricing = ModelPricing(**normalized_pricing)
 
-        if adapter_type == "ollama":
-            override_url = os.getenv("OLLAMA_BASE_URL")
-            if override_url:
-                base_url = _validate_model_url(
-                    override_url,
-                    field_base + ".base_url（OLLAMA_BASE_URL）",
-                    path,
-                )
-            model = os.getenv("OLLAMA_MODEL") or model
         profiles[profile_id] = ModelProfile(
             id=profile_id,
             enabled=enabled,
@@ -761,47 +837,17 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
             assistant_passthrough_fields=normalized_fields,
             billing_currency=currency,
             pricing=pricing,
+            modality="chat",
+            dimensions=None,
         )
     return profiles
-
-
-def validate_embedding_profile(
-    data: Dict[str, Any], source: Path
-) -> EmbeddingProfile:
-    """Validate one embedding profile using the project config rules."""
-    path = Path(source)
-    _reject_unknown(data, {"id", "enabled", "base_url", "model", "dimensions", "timeout_seconds"}, path)
-    profile_id = _required_string(data, "id", path)
-    enabled = data.get("enabled")
-    if not isinstance(enabled, bool):
-        raise _error(path, "enabled", "必须是布尔值")
-    base_url = _validate_model_url(_required_string(data, "base_url", path), "base_url", path)
-    model = _required_string(data, "model", path)
-    dimensions = _positive_int(data, "dimensions", path)
-    timeout_seconds = _model_number(data, "timeout_seconds", "timeout_seconds", path)
-    if timeout_seconds <= 0 or timeout_seconds > 600:
-        raise _error(path, "timeout_seconds", "必须在 0 到 600 之间")
-    return EmbeddingProfile(profile_id, enabled, base_url, model, dimensions, timeout_seconds)
-
-
-def _load_embedding(path: Path) -> EmbeddingProfile:
-    profile = validate_embedding_profile(_load_json(path), path)
-    override_url = os.getenv("OLLAMA_BASE_URL")
-    if override_url:
-        return replace(
-            profile,
-            base_url=_validate_model_url(
-                override_url, "base_url（OLLAMA_BASE_URL）", path
-            ),
-        )
-    return profile
 
 
 def _load_agent(path: Path) -> AgentPreset:
     data = _load_json(path)
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
-        "capabilities", "tools", "skills", "mcp_servers", "model", "greeting",
+        "capabilities", "tools", "plugin_tools", "skills", "mcp_servers", "model", "greeting",
         "greeting_hints", "temperature", "max_tokens", "enabled",
     }, path)
     enabled = data.get("enabled", True)
@@ -832,15 +878,52 @@ def _load_agent(path: Path) -> AgentPreset:
     if not isinstance(raw_tools, list):
         raise _error(path, "tools", "必须是数组")
     tools: List[str] = []
+    catalog = default_catalog()
     for index, name in enumerate(raw_tools):
         if not isinstance(name, str) or not name.strip():
             raise _error(path, "tools[{}]".format(index), "必须是非空字符串")
         name = name.strip()
         if name not in KNOWN_TOOL_NAMES:
             raise _error(path, "tools[{}]".format(index), "是未知工具：{}".format(name))
+        owner = next(
+            (
+                manifest.id
+                for manifest in catalog.manifests.values()
+                if name in manifest.tools
+            ),
+            None,
+        )
+        if owner is not None:
+            raise _error(
+                path,
+                "tools[{}]".format(index),
+                "是插件 {} 的工具，请写入 plugin_tools".format(owner),
+            )
         if name in tools:
             raise _error(path, "tools", "不能包含重复工具：{}".format(name))
         tools.append(name)
+
+    raw_plugin_tools = data.get("plugin_tools", {})
+    if not isinstance(raw_plugin_tools, dict):
+        raise _error(path, "plugin_tools", "必须是对象")
+    plugin_tools: Dict[str, List[str]] = {}
+    for plugin_id, raw_names in raw_plugin_tools.items():
+        if not isinstance(plugin_id, str) or not plugin_id.strip():
+            raise _error(path, "plugin_tools", "插件 ID 必须是非空字符串")
+        if not isinstance(raw_names, list):
+            raise _error(path, "plugin_tools.{}".format(plugin_id), "必须是数组")
+        names = plugin_tools.setdefault(plugin_id, [])
+        manifest = catalog.get(plugin_id)
+        for index, name in enumerate(raw_names):
+            field_name = "plugin_tools.{}[{}]".format(plugin_id, index)
+            if not isinstance(name, str) or not name.strip():
+                raise _error(path, field_name, "必须是非空字符串")
+            name = name.strip()
+            if manifest is not None and name not in manifest.tools:
+                raise _error(path, field_name, "是插件中不存在的工具：{}".format(name))
+            if name in names:
+                raise _error(path, "plugin_tools.{}".format(plugin_id), "不能包含重复工具")
+            names.append(name)
 
     raw_skills = data.get("skills", [])
     if not isinstance(raw_skills, list):
@@ -898,6 +981,7 @@ def _load_agent(path: Path) -> AgentPreset:
         image_prompt=_optional_string(data, "image_prompt", path),
         capabilities=capabilities,
         tools=tools,
+        plugin_tools=plugin_tools,
         skills=skills,
         mcp_servers=mcp_servers,
         model=_optional_string(data, "model", path),
@@ -943,8 +1027,8 @@ def _load_plugins(path: Path) -> Dict[str, PluginConfig]:
             raise _error(path, prefix, "必须是 JSON 对象")
         _reject_unknown(item, {"id", "enabled", "settings"}, path, prefix)
         plugin_id = _required_nested_string(item, "id", prefix + ".id", path)
-        if plugin_id not in known_ids:
-            raise _error(path, prefix + ".id", "是未知平台插件：{}".format(plugin_id))
+        if not PLUGIN_ID_PATTERN.fullmatch(plugin_id):
+            raise _error(path, prefix + ".id", "插件 ID 格式无效")
         if plugin_id in plugins:
             raise _error(path, prefix + ".id", "不能重复：{}".format(plugin_id))
         enabled = item.get("enabled", True)
@@ -953,10 +1037,12 @@ def _load_plugins(path: Path) -> Dict[str, PluginConfig]:
         settings = item.get("settings", {})
         if not isinstance(settings, dict):
             raise _error(path, prefix + ".settings", "必须是 JSON 对象")
-        try:
-            validate_plugin_settings(plugin_id, settings)
-        except ValueError as exc:
-            raise _error(path, prefix + ".settings", str(exc)) from exc
+        if plugin_id in known_ids:
+            settings = normalize_plugin_settings(plugin_id, settings)
+            try:
+                validate_plugin_settings(plugin_id, settings)
+            except ValueError as exc:
+                raise _error(path, prefix + ".settings", str(exc)) from exc
         plugins[plugin_id] = PluginConfig(plugin_id, enabled, dict(settings))
     return plugins
 
@@ -980,7 +1066,12 @@ def _load_channels(path: Path) -> Dict[str, ChannelConfig]:
         prefix = "channels[{}]".format(index)
         if not isinstance(raw, dict):
             raise _error(path, prefix, "必须是 JSON 对象")
-        _reject_unknown(raw, {"id", "type", "enabled", "settings"}, path, prefix)
+        _reject_unknown(
+            raw,
+            {"id", "type", "enabled", "agent_id", "settings"},
+            path,
+            prefix,
+        )
         channel_id = _required_nested_string(raw, "id", prefix + ".id", path)
         if not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", channel_id):
             raise _error(path, prefix + ".id", "格式无效")
@@ -989,11 +1080,21 @@ def _load_channels(path: Path) -> Dict[str, ChannelConfig]:
         channel_type = _required_nested_string(
             raw, "type", prefix + ".type", path
         )
-        if channel_type != "wechat_ilink":
-            raise _error(path, prefix + ".type", "首期仅支持 wechat_ilink")
+        if channel_type not in {"wechat_ilink", "wecom_aibot", "feishu"}:
+            raise _error(
+                path,
+                prefix + ".type",
+                "仅支持 wechat_ilink、wecom_aibot 或 feishu",
+            )
         enabled = raw.get("enabled")
         if not isinstance(enabled, bool):
             raise _error(path, prefix + ".enabled", "必须是布尔值")
+        agent_id = raw.get("agent_id", "")
+        if not isinstance(agent_id, str):
+            raise _error(path, prefix + ".agent_id", "必须是字符串")
+        agent_id = agent_id.strip()
+        if agent_id and not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", agent_id):
+            raise _error(path, prefix + ".agent_id", "格式无效")
         settings = raw.get("settings", {})
         if not isinstance(settings, dict):
             raise _error(path, prefix + ".settings", "必须是 JSON 对象")
@@ -1008,60 +1109,82 @@ def _load_channels(path: Path) -> Dict[str, ChannelConfig]:
                 prefix + ".settings",
                 "不得包含凭证字段：{}".format("、".join(sorted(forbidden))),
             )
+        allowed_settings = {"group_policy"}
+        unknown_settings = sorted(set(settings) - allowed_settings)
+        if unknown_settings:
+            raise _error(
+                path,
+                prefix + ".settings",
+                "包含未知字段：{}".format("、".join(unknown_settings)),
+            )
+        group_policy = settings.get(
+            "group_policy",
+            "private_only" if channel_type == "wechat_ilink" else "mention_only",
+        )
+        if group_policy not in {"private_only", "mention_only"}:
+            raise _error(
+                path,
+                prefix + ".settings.group_policy",
+                "必须是 private_only 或 mention_only",
+            )
+        settings = {**settings, "group_policy": group_policy}
         channels[channel_id] = ChannelConfig(
             id=channel_id,
             type=channel_type,
             enabled=enabled,
+            agent_id=agent_id,
             settings=dict(settings),
         )
-    if not any(channel.enabled for channel in channels.values()):
-        raise _error(path, "channels", "至少需要启用一个消息渠道")
     return channels
 
 
-def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]:
-    data = _load_json(path)
-    _reject_unknown(data, {"scripts"}, path)
-    items = data.get("scripts")
-    if not isinstance(items, list):
-        raise _error(path, "scripts", "必须是数组")
+def _discover_scripts(jobs_root: Path) -> Dict[str, ScriptDefinition]:
+    """Discover built-in scripts by scanning per-script manifest folders.
+
+    Each script lives in a self-contained folder under ``src/core/jobs``
+    holding a ``script.json`` manifest next to its code and private config.
+    Folders without a manifest are ignored (shared helper packages).
+    """
     scripts: Dict[str, ScriptDefinition] = {}
-    jobs_root = (project_root / "src" / "core" / "jobs").resolve()
-    for index, item in enumerate(items):
-        prefix = "scripts[{}]".format(index)
-        if not isinstance(item, dict):
-            raise _error(path, prefix, "必须是 JSON 对象")
+    if not jobs_root.is_dir():
+        return scripts
+    for script_dir in sorted(jobs_root.iterdir(), key=lambda entry: entry.name):
+        if not script_dir.is_dir():
+            continue
+        path = script_dir / "script.json"
+        if not path.is_file():
+            continue
+        item = _load_json(path)
         _reject_unknown(item, {
             "id", "name", "description", "entrypoint", "timeout_seconds",
             "requires_approval", "data_directory", "parameters", "artifact_types",
-        }, path, prefix)
-        script_id = _required_nested_string(item, "id", prefix + ".id", path)
+        }, path)
+        script_id = _required_nested_string(item, "id", "id", path)
         if script_id in scripts:
             raise ConfigError("{}: 脚本 id 重复：{}".format(path, script_id))
-        name = _required_nested_string(item, "name", prefix + ".name", path)
+        name = _required_nested_string(item, "name", "name", path)
         description = _required_nested_string(
-            item, "description", prefix + ".description", path
+            item, "description", "description", path
         )
         raw_entrypoint = _required_nested_string(
-            item, "entrypoint", prefix + ".entrypoint", path
+            item, "entrypoint", "entrypoint", path
         )
         candidate = Path(raw_entrypoint).expanduser()
         if not candidate.is_absolute():
-            candidate = project_root / candidate
+            candidate = script_dir / candidate
         try:
             entrypoint = candidate.resolve(strict=True)
         except OSError as exc:
-            raise _error(path, prefix + ".entrypoint", "不存在") from exc
-        if not entrypoint.is_file() or not (
-            entrypoint == jobs_root or jobs_root in entrypoint.parents
-        ):
-            raise _error(path, prefix + ".entrypoint", "必须是 src/core/jobs 目录内的文件")
+            raise _error(path, "entrypoint", "不存在") from exc
+        script_root = script_dir.resolve()
+        if not entrypoint.is_file() or script_root not in entrypoint.parents:
+            raise _error(path, "entrypoint", "必须是脚本目录内的文件")
         timeout = item.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 3600:
-            raise _error(path, prefix + ".timeout_seconds", "必须是 1 到 3600 的整数")
+            raise _error(path, "timeout_seconds", "必须是 1 到 3600 的整数")
         requires_approval = item.get("requires_approval", True)
         if not isinstance(requires_approval, bool):
-            raise _error(path, prefix + ".requires_approval", "必须是布尔值")
+            raise _error(path, "requires_approval", "必须是布尔值")
         data_directory = item.get("data_directory", script_id)
         if (
             not isinstance(data_directory, str)
@@ -1069,15 +1192,15 @@ def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]
         ):
             raise _error(
                 path,
-                prefix + ".data_directory",
+                "data_directory",
                 "必须是小写字母、数字、下划线或连字符组成的单层目录名",
             )
         raw_parameters = item.get("parameters", {})
         if not isinstance(raw_parameters, dict):
-            raise _error(path, prefix + ".parameters", "必须是 JSON 对象")
+            raise _error(path, "parameters", "必须是 JSON 对象")
         parameters: Dict[str, ScriptParameter] = {}
         for parameter_name, parameter_data in raw_parameters.items():
-            field_name = prefix + ".parameters." + str(parameter_name)
+            field_name = "parameters." + str(parameter_name)
             if (
                 not isinstance(parameter_name, str)
                 or not parameter_name
@@ -1120,7 +1243,7 @@ def _load_scripts(path: Path, project_root: Path) -> Dict[str, ScriptDefinition]
         if not isinstance(artifact_types, list) or any(
             value != "image" for value in artifact_types
         ):
-            raise _error(path, prefix + ".artifact_types", "首版仅支持 image")
+            raise _error(path, "artifact_types", "首版仅支持 image")
         scripts[script_id] = ScriptDefinition(
             id=script_id,
             name=name,
@@ -1546,26 +1669,33 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
     config_dir = config_dir.resolve()
     app = _load_app(config_dir / "app.json")
     models = _load_models(config_dir / "models.json")
-    embedding = _load_embedding(config_dir / "embeddings.json")
     tools = _load_tools(config_dir / "tools.json")
     plugins = _load_plugins(config_dir / "plugins.json")
-    channels = _load_channels(config_dir / "channels.json")
     agents = _load_agents(config_dir / "agents")
+    channels = _load_channels(config_dir / "channels.json")
     skills = _load_skills(config_dir / "skills.json")
     mcp_servers = _load_mcp_servers(config_dir / "mcp_servers.json")
-    configured_plugin_tools = plugin_tool_names(plugins)
     skill_ids = {s.get("id") for s in skills if isinstance(s, dict)}
     server_ids = {s.get("id") for s in mcp_servers if isinstance(s, dict)}
     for agent in agents.values():
-        unknown = sorted(
-            set(agent.tools) - BUILTIN_TOOL_NAMES - configured_plugin_tools
-        )
+        unknown = sorted(set(agent.tools) - BUILTIN_TOOL_NAMES)
         if unknown:
             raise ConfigError(
                 "Agent {} 引用了未知工具：{}".format(
                     agent.id, "、".join(unknown)
                 )
             )
+        for plugin_id, names in agent.plugin_tools.items():
+            manifest = default_catalog().get(plugin_id)
+            if manifest is None:
+                continue
+            invalid = sorted(set(names) - set(manifest.tools))
+            if invalid:
+                raise ConfigError(
+                    "Agent {} 引用了插件 {} 中不存在的工具：{}".format(
+                        agent.id, plugin_id, "、".join(invalid)
+                    )
+                )
         unknown_skills = sorted(set(agent.skills) - skill_ids)
         if unknown_skills:
             raise ConfigError(
@@ -1592,6 +1722,22 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
                 config_dir / "app.json", app.default_agent
             )
         )
+    for channel in channels.values():
+        agent_id = channel.agent_id or app.default_agent
+        if agent_id not in agents:
+            raise ConfigError(
+                "消息渠道 {} 引用了未知 Agent：{}".format(
+                    channel.id,
+                    agent_id,
+                )
+            )
+        if not agents[agent_id].enabled:
+            raise ConfigError(
+                "消息渠道 {} 引用了已停用 Agent：{}".format(
+                    channel.id,
+                    agent_id,
+                )
+            )
     if app.active_model not in models:
         raise ConfigError(
             "{}: active_model 引用了不存在的模型档案：{}".format(
@@ -1608,6 +1754,50 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
                     config_dir / "app.json", field_name, profile_id
                 )
             )
+    # Chat roles must bind to a chat-modality profile.
+    for field_name in (
+        "active_model", "fallback_model", "local_model", "flash_model",
+        "pro_model", "vision_model",
+    ):
+        profile_id = getattr(app, field_name)
+        if models[profile_id].modality != "chat":
+            raise ConfigError(
+                "{}: {} 必须引用对话（chat）类型的模型档案：{}".format(
+                    config_dir / "app.json", field_name, profile_id
+                )
+            )
+    if not models[app.vision_model].capabilities.vision:
+        raise ConfigError(
+            "{}: vision_model {} 必须是具备图片能力的模型档案".format(
+                config_dir / "app.json", app.vision_model
+            )
+        )
+    if app.embedding_model:
+        if app.embedding_model not in models:
+            raise ConfigError(
+                "{}: embedding_model 引用了不存在的模型档案：{}".format(
+                    config_dir / "app.json", app.embedding_model
+                )
+            )
+        if models[app.embedding_model].modality != "embedding":
+            raise ConfigError(
+                "{}: embedding_model 必须引用向量（embedding）类型的模型档案：{}".format(
+                    config_dir / "app.json", app.embedding_model
+                )
+            )
+    if app.rerank_model:
+        if app.rerank_model not in models:
+            raise ConfigError(
+                "{}: rerank_model 引用了不存在的模型档案：{}".format(
+                    config_dir / "app.json", app.rerank_model
+                )
+            )
+        if models[app.rerank_model].modality != "rerank":
+            raise ConfigError(
+                "{}: rerank_model 必须引用重排（rerank）类型的模型档案：{}".format(
+                    config_dir / "app.json", app.rerank_model
+                )
+            )
     active_model = models[app.active_model]
     if not active_model.enabled:
         raise ConfigError(
@@ -1622,7 +1812,7 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
                 config_dir / "models.json", app.fallback_model
             )
         )
-    scripts = _load_scripts(config_dir / "scripts.json", config_dir.parent)
+    scripts = _discover_scripts(config_dir.parent / "src" / "core" / "jobs")
     schedules = _load_schedules(
         config_dir / "schedules.json", app.timezone, agents, scripts
     )
@@ -1634,7 +1824,6 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
         agents=agents,
         scripts=scripts,
         schedules=schedules,
-        embedding=embedding,
         skills=skills,
         mcp_servers=mcp_servers,
         channels=channels,

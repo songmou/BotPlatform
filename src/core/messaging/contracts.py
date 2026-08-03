@@ -91,6 +91,11 @@ class DeliveryEndpoint:
             "endpoint_id": self.endpoint_id,
         }
 
+    @property
+    def target_id(self) -> str:
+        """Return the platform conversation target used for delivery."""
+        return self.conversation_id or self.recipient_id
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "DeliveryEndpoint":
         route = value.get("route_context")
@@ -122,6 +127,7 @@ class InboundMessage:
     attachments: Tuple[AttachmentRef, ...] = ()
     thread_id: str = ""
     mentions: Tuple[str, ...] = ()
+    addressed_to_bot: bool = False
     reply_context: Mapping[str, Any] = field(default_factory=dict)
     occurred_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -150,7 +156,11 @@ class InboundMessage:
             account_id=self.account_id,
             conversation_type=self.conversation_type,
             conversation_id=self.conversation_id,
-            recipient_id=self.sender_id,
+            recipient_id=(
+                self.conversation_id
+                if self.conversation_type in {GROUP, CHANNEL, THREAD}
+                else self.sender_id
+            ),
             thread_id=self.thread_id,
             route_context=self.reply_context,
         )
@@ -175,6 +185,7 @@ class InboundMessage:
             "attachments": [item.to_dict() for item in self.attachments],
             "thread_id": self.thread_id,
             "mentions": list(self.mentions),
+            "addressed_to_bot": self.addressed_to_bot,
             "reply_context": _mapping(self.reply_context),
             "occurred_at": self.occurred_at,
         }
@@ -206,6 +217,12 @@ class InboundMessage:
             ),
             thread_id=str(value.get("thread_id") or ""),
             mentions=tuple(str(item) for item in mentions),
+            addressed_to_bot=bool(
+                value.get(
+                    "addressed_to_bot",
+                    str(value.get("conversation_type") or DIRECT) == DIRECT,
+                )
+            ),
             reply_context=_mapping(raw_context),
             occurred_at=str(value.get("occurred_at") or ""),
         )
@@ -245,6 +262,8 @@ class ChannelCapabilities:
     proactive: bool = False
     direct: bool = True
     group: bool = False
+    group_mentions: bool = False
+    reply: bool = False
     max_image_bytes: Optional[int] = None
     max_text_chars: Optional[int] = None
 

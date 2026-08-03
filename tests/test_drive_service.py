@@ -120,8 +120,26 @@ class DriveServiceTest(unittest.TestCase):
     def test_create_folder_and_duplicate_rejected(self):
         result = self.service.create_folder("public", None, "", "docs")
         self.assertEqual(result["path"], "docs")
+        self.assertTrue(result["created"])
         with self.assertRaises(ValueError):
             self.service.create_folder("public", None, "", "docs")
+
+    def test_create_folder_exist_ok_reuses_only_directories(self):
+        created = self.service.create_folder(
+            "public", None, "", "docs", exist_ok=True
+        )
+        reused = self.service.create_folder(
+            "public", None, "", "docs", exist_ok=True
+        )
+        self.assertTrue(created["created"])
+        self.assertFalse(reused["created"])
+        self.assertEqual(reused["path"], "docs")
+
+        self.service.save_file("public", None, "", "file.txt", b"data")
+        with self.assertRaises(ValueError):
+            self.service.create_folder(
+                "public", None, "", "file.txt", exist_ok=True
+            )
 
     def test_invalid_folder_names_rejected(self):
         for bad in ("", ".", "..", ".hidden", "a/b", "a\\b"):

@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
     from src.core.services.knowledge import KnowledgeService
     from src.core.services.drive import DriveService
     from src.core.tooling.mcp_client import McpClientManager
+    from src.core.plugins.manager import PluginManager
+    from src.core.services.resources import ScopedResourceStore
 
 
 class ToolRuntime:
@@ -54,34 +57,47 @@ class ToolRuntime:
         tenant_registry: Optional[TenantRegistry] = None,
         knowledge_service: Optional["KnowledgeService"] = None,
         plugins: Optional[Iterable[PlatformPlugin]] = None,
+        plugin_manager: Optional["PluginManager"] = None,
         tool_audit_store: Optional[Any] = None,
         tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
         mcp_manager: Optional["McpClientManager"] = None,
         script_schedule_service: Optional["ScriptScheduleService"] = None,
         drive_service: Optional["DriveService"] = None,
         drive_audit_store: Optional[Any] = None,
+        resource_store: Optional["ScopedResourceStore"] = None,
     ) -> None:
         self.base_config = config
-        self.config = config
         self.timezone = ZoneInfo(timezone_name)
-        self.roots = [Path(item).resolve() for item in config.allowed_roots]
-        self.default_directory = Path(config.default_working_directory).resolve()
-        self.trash_directory = trash_directory or (Path.home() / ".Trash" / "iLinkBot")
+        self._default_roots = [
+            Path(item).resolve() for item in config.allowed_roots
+        ]
+        self._default_directory = Path(
+            config.default_working_directory
+        ).resolve()
+        self._default_trash_directory = trash_directory or (
+            Path.home() / ".Trash" / "iLinkBot"
+        )
+        self._binding = threading.local()
         self.audit_logger = audit_logger
         self.script_service = script_service
         self.script_schedule_service = script_schedule_service
         self.tenant_registry = tenant_registry
         self.knowledge_service = knowledge_service
-        self.tenant: Optional[TenantContext] = None
-        self.plugins = list(plugins or [])
+        self.plugin_manager = plugin_manager
+        self.plugins = list(plugins or []) if plugin_manager is None else []
         self._plugin_tools: Dict[str, PlatformPlugin] = {}
-        for plugin in self.plugins:
-            for tool_name in plugin.tool_definitions:
-                if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+        if plugin_manager is not None:
+            for tool_name in plugin_manager.tool_names:
+                if tool_name in TOOL_DEFINITIONS:
                     raise ValueError("平台插件工具名称重复：{}".format(tool_name))
-                self._plugin_tools[tool_name] = plugin
+        else:
+            for plugin in self.plugins:
+                for tool_name in plugin.tool_definitions:
+                    if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+                        raise ValueError("平台插件工具名称重复：{}".format(tool_name))
+                    self._plugin_tools[tool_name] = plugin
         self._sandbox_available = sandbox_available
-        self.command_runner = CommandRunner(
+        self._default_command_runner = CommandRunner(
             config, self.resolve_path, sandbox_available=sandbox_available
         )
         self.tool_audit_store = tool_audit_store
@@ -89,15 +105,70 @@ class ToolRuntime:
         self.mcp_manager = mcp_manager
         self.drive_service = drive_service
         self.drive_audit_store = drive_audit_store
-        # Audit context of the tool call currently being executed; used by
-        # drive tools to attribute the operator (agent:{agent_id}).
-        self._audit_context = ToolAuditContext()
+        self.resource_store = resource_store
+    @property
+    def tenant(self) -> Optional[TenantContext]:
+        return getattr(self._binding, "tenant", None)
+
+    @property
+    def config(self) -> ToolConfig:
+        return getattr(self._binding, "config", self.base_config)
+
+    @property
+    def roots(self) -> List[Path]:
+        return getattr(self._binding, "roots", self._default_roots)
+
+    @property
+    def default_directory(self) -> Path:
+        return getattr(
+            self._binding, "default_directory", self._default_directory
+        )
+
+    @property
+    def trash_directory(self) -> Path:
+        return getattr(
+            self._binding,
+            "trash_directory",
+            self._default_trash_directory,
+        )
+
+    @property
+    def command_runner(self) -> CommandRunner:
+        return getattr(
+            self._binding, "command_runner", self._default_command_runner
+        )
+
+    @property
+    def _audit_context(self) -> ToolAuditContext:
+        return getattr(self._binding, "audit_context", ToolAuditContext())
+
+    @_audit_context.setter
+    def _audit_context(self, value: ToolAuditContext) -> None:
+        self._binding.audit_context = value
 
     def is_tool_enabled(self, name: str) -> bool:
         state = self._tool_states.get(name)
-        if state is not None:
-            return state.get("enabled", True)
+        if state is not None and not state.get("enabled", True):
+            return False
+        policy = self._organization_tool_policy()
+        if name in set(policy.get("disabled_tools") or []):
+            return False
+        allowed = policy.get("allowed_tools")
+        if isinstance(allowed, list) and allowed and name not in allowed:
+            return False
         return True
+
+    def _organization_tool_policy(self) -> Dict[str, Any]:
+        if self.resource_store is None or self.tenant is None:
+            return {}
+        try:
+            item = self.resource_store.get_effective(
+                self.tenant.tenant_id, "tools", "platform"
+            )
+            payload = item.get("payload")
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
 
     def get_tool_state(self, name: str) -> Dict[str, Any]:
         state = self._tool_states.get(name, {})
@@ -110,6 +181,20 @@ class ToolRuntime:
 
     def reload_tool_states(self, states: Dict[str, Dict[str, Any]]) -> None:
         self._tool_states = states
+
+    def reload_config(self, config: ToolConfig) -> None:
+        """Atomically replace the platform tool policy for new bindings."""
+        roots = [Path(item).resolve() for item in config.allowed_roots]
+        default_directory = Path(config.default_working_directory).resolve()
+        runner = CommandRunner(
+            config,
+            self.resolve_path,
+            sandbox_available=self._sandbox_available,
+        )
+        self.base_config = config
+        self._default_roots = roots
+        self._default_directory = default_directory
+        self._default_command_runner = runner
 
     def bind_tenant(self, tenant: TenantContext) -> None:
         """Fail-closed binding of all filesystem and script tools to one tenant."""
@@ -124,20 +209,38 @@ class ToolRuntime:
         # chmod there can even raise WinError 5; only enforce on POSIX.
         if os.name != "nt":
             os.chmod(str(workspace), 0o700)
-        self.tenant = tenant
-        self.roots = [workspace.resolve()]
-        self.default_directory = workspace.resolve()
-        self.trash_directory = self.tenant_registry.tenant_root(tenant.tenant_id) / ".trash"
-        self.config = replace(
+        default_directory = workspace.resolve()
+        config = replace(
             self.base_config,
-            allowed_roots=[str(self.default_directory)],
-            default_working_directory=str(self.default_directory),
+            allowed_roots=[str(default_directory)],
+            default_working_directory=str(default_directory),
         )
-        self.command_runner = CommandRunner(
-            self.config,
+        self._binding.tenant = tenant
+        self._binding.roots = [default_directory]
+        self._binding.default_directory = default_directory
+        self._binding.trash_directory = (
+            self.tenant_registry.tenant_root(tenant.tenant_id) / ".trash"
+        )
+        self._binding.config = config
+        self._binding.command_runner = CommandRunner(
+            config,
             self.resolve_path,
             sandbox_available=self._sandbox_available,
         )
+
+    def clear_tenant(self) -> None:
+        """Clear the current thread's tenant binding after a request."""
+        for name in (
+            "tenant",
+            "roots",
+            "default_directory",
+            "trash_directory",
+            "config",
+            "command_runner",
+            "audit_context",
+        ):
+            if hasattr(self._binding, name):
+                delattr(self._binding, name)
 
     def _require_tenant(self) -> Optional[TenantContext]:
         if self.tenant_registry is not None and self.tenant is None:
@@ -147,6 +250,11 @@ class ToolRuntime:
     def is_available(self, name: str) -> bool:
         if not self.is_tool_enabled(name):
             return False
+        if (
+            self.plugin_manager is not None
+            and self.plugin_manager.manifest_for_tool(name) is not None
+        ):
+            return self.plugin_manager.is_available(name, self.tenant)
         plugin = self._plugin_tools.get(name)
         if plugin is not None:
             return plugin.is_available(name)
@@ -170,6 +278,13 @@ class ToolRuntime:
         definition = TOOL_DEFINITIONS.get(name)
         if definition is not None:
             return definition
+        if self.plugin_manager is not None:
+            managed_definition = self.plugin_manager.definition(name)
+            if managed_definition is not None:
+                return {
+                    "description": managed_definition.description,
+                    "parameters": managed_definition.parameters,
+                }
         plugin = self._plugin_tools.get(name)
         if plugin is None:
             if self.mcp_manager is not None:
@@ -228,9 +343,24 @@ class ToolRuntime:
     def requires_approval(
         self, name: str, arguments: Optional[Dict[str, Any]] = None
     ) -> bool:
+        if name in set(
+            self._organization_tool_policy().get("require_approval_tools") or []
+        ):
+            return True
+        definition = (
+            self.plugin_manager.definition(name)
+            if self.plugin_manager is not None
+            else None
+        )
         plugin = self._plugin_tools.get(name)
-        if plugin is not None:
-            definition = plugin.tool_definitions.get(name)
+        if definition is not None or plugin is not None:
+            if definition is None and plugin is not None:
+                definition = plugin.tool_definitions.get(name)
+            if definition and definition.approval_policy == "required":
+                return True
+            state = self._tool_states.get(name)
+            if state is not None and "require_approval" in state:
+                return bool(state["require_approval"])
             return bool(definition and definition.requires_approval)
         if name == "run_script" and self.script_service is not None:
             if arguments is None:
@@ -250,8 +380,14 @@ class ToolRuntime:
     ) -> Optional[str]:
         """Return a trusted plugin summary that should bypass model rewriting."""
 
+        definition = (
+            self.plugin_manager.definition(name)
+            if self.plugin_manager is not None
+            else None
+        )
         plugin = self._plugin_tools.get(name)
-        definition = plugin.tool_definitions.get(name) if plugin is not None else None
+        if definition is None and plugin is not None:
+            definition = plugin.tool_definitions.get(name)
         if not definition or not definition.direct_response or not result or not result.ok:
             return None
         if not isinstance(result.data, dict):
@@ -372,11 +508,19 @@ class ToolRuntime:
         self._require_tenant()
         self._validate_arguments(name, arguments)
         if name not in APPROVAL_TOOLS:
+            plugin_definition = (
+                self.plugin_manager.definition(name)
+                if self.plugin_manager is not None
+                else None
+            )
             plugin = self._plugin_tools.get(name)
-            plugin_definition = plugin.tool_definitions.get(name) if plugin else None
+            if plugin_definition is None and plugin is not None:
+                plugin_definition = plugin.tool_definitions.get(name)
             if not plugin_definition or not plugin_definition.requires_approval:
                 raise ToolError("该工具不需要审批：{}".format(name))
             try:
+                if self.plugin_manager is not None:
+                    return self.plugin_manager.preview(name, arguments, self.tenant)
                 return plugin.preview(name, arguments, self.tenant)
             except PluginError as exc:
                 raise ToolError(str(exc)) from exc
@@ -464,8 +608,12 @@ class ToolRuntime:
         self._audit_context = audit_context or ToolAuditContext()
         try:
             self._validate_arguments(name, arguments)
-            plugin = self._plugin_tools.get(name)
-            if plugin is not None:
+            if (
+                self.plugin_manager is not None
+                and self.plugin_manager.manifest_for_tool(name) is not None
+            ):
+                data = self.plugin_manager.execute(name, arguments, self.tenant)
+            elif (plugin := self._plugin_tools.get(name)) is not None:
                 data = plugin.execute(name, arguments, self.tenant)
             elif self.mcp_manager is not None and self.mcp_manager.has_tool(name):
                 data = self.mcp_manager.call_tool(name, arguments)
@@ -507,20 +655,35 @@ class ToolRuntime:
                         output_bytes=output_size,
                         args_hash=args_hash,
                         error=error_msg or None,
+                        user_id=(
+                            ctx.member_user_id
+                            if ctx.member_user_id is not None
+                            else (
+                                self.tenant.member_user_id
+                                if self.tenant is not None
+                                else None
+                            )
+                        ),
                     )
                 except Exception:  # noqa: BLE001 - audit must never break tool calls
                     logger.warning("写入工具审计记录失败：工具=%s", name, exc_info=True)
 
     def close_tenant(self, tenant_id: str) -> None:
+        if self.plugin_manager is not None:
+            self.plugin_manager.close_tenant(tenant_id)
+            return
         for plugin in self.plugins:
             plugin.close_tenant(tenant_id)
 
     def close(self) -> None:
-        for plugin in reversed(self.plugins):
-            try:
-                plugin.close()
-            except Exception:  # noqa: BLE001 - best effort on shutdown
-                logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
+        if self.plugin_manager is not None:
+            self.plugin_manager.close()
+        else:
+            for plugin in reversed(self.plugins):
+                try:
+                    plugin.close()
+                except Exception:  # noqa: BLE001 - best effort on shutdown
+                    logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
         if self.mcp_manager is not None:
             try:
                 self.mcp_manager.close()
@@ -528,6 +691,8 @@ class ToolRuntime:
                 logger.warning("关闭 MCP 管理器失败", exc_info=True)
 
     def reload_plugins(self, plugins: Iterable[PlatformPlugin]) -> None:
+        if self.plugin_manager is not None:
+            raise ValueError("插件配置需要重启后生效")
         for plugin in reversed(self.plugins):
             try:
                 plugin.close()

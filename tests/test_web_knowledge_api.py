@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from unittest.mock import patch
-
 from tests._web_api_base import WebApiTestBase
 
 
@@ -68,51 +65,20 @@ class KnowledgeApiTest(WebApiTestBase):
         names = {item["name"] for item in data["categories"]}
         self.assertIn("默认知识库", names)
 
-    def test_embedding_config_can_be_read_and_saved_for_restart(self):
-        path = self.data_root / "embeddings.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "id": "bge_m3_local",
-                    "enabled": False,
-                    "base_url": "http://127.0.0.1:11434",
-                    "model": "bge-m3",
-                    "dimensions": 1024,
-                    "timeout_seconds": 60,
-                }
-            ),
-            encoding="utf-8",
+    def test_embedding_config_is_read_only_status(self):
+        response = self.client.get("/api/knowledge/embedding-config")
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        # The base test config binds no embedding model.
+        self.assertFalse(data["bound"])
+        self.assertFalse(data["runtime_enabled"])
+        # The write endpoint has been removed; models are managed on the models page.
+        self.assertEqual(
+            self.client.put(
+                "/api/knowledge/embedding-config", json={}
+            ).status_code,
+            405,
         )
-        with patch("src.api.routers.knowledge.EMBEDDINGS_FILE", path):
-            response = self.client.get("/api/knowledge/embedding-config")
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertFalse(response.json()["runtime_enabled"])
-
-            response = self.client.put(
-                "/api/knowledge/embedding-config",
-                json={
-                    "id": "text_embedding",
-                    "enabled": True,
-                    "base_url": "https://embedding.example.com",
-                    "model": "text-embedding-v1",
-                    "dimensions": 1536,
-                    "timeout_seconds": 45,
-                },
-            )
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertTrue(response.json()["restart_required"])
-            saved = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(saved["id"], "text_embedding")
-            self.assertEqual(saved["dimensions"], 1536)
-
-            invalid = self.client.put(
-                "/api/knowledge/embedding-config",
-                json={
-                    **saved,
-                    "base_url": "http://embedding.example.com",
-                },
-            )
-            self.assertEqual(invalid.status_code, 400, invalid.text)
 
     def test_unknown_tenant_404(self):
         response = self.client.get(

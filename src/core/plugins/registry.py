@@ -1,57 +1,109 @@
-"""Registry for trusted, in-tree platform plugins."""
+"""Manifest-backed plugin discovery and construction helpers."""
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Mapping, Set
 
+from src.core.paths import PROJECT_ROOT, SYSTEM_DATA_DIR
+
 from .base import PlatformPlugin, PluginContext
-from .browser_automation import BrowserAutomationPlugin
-from .codex_tasks import CodexTasksPlugin
-from .todo import TodoPlugin
-from .web_research import WebResearchPlugin
+from .catalog import PluginCatalog
+from .manager import PluginManager
 
 
-PLUGIN_TYPES = {
-    BrowserAutomationPlugin.id: BrowserAutomationPlugin,
-    CodexTasksPlugin.id: CodexTasksPlugin,
-    TodoPlugin.id: TodoPlugin,
-    WebResearchPlugin.id: WebResearchPlugin,
-}
+@lru_cache(maxsize=1)
+def default_catalog() -> PluginCatalog:
+    return PluginCatalog.discover(
+        PROJECT_ROOT,
+        external_root=SYSTEM_DATA_DIR / "plugins",
+    )
 
 
-def known_plugin_ids() -> Set[str]:
-    return set(PLUGIN_TYPES)
+def refresh_catalog() -> PluginCatalog:
+    default_catalog.cache_clear()
+    return default_catalog()
 
 
-def plugin_tool_names(plugin_ids: Iterable[str] | None = None) -> Set[str]:
-    selected = set(plugin_ids) if plugin_ids is not None else set(PLUGIN_TYPES)
+def known_plugin_ids(catalog: PluginCatalog | None = None) -> Set[str]:
+    return set((catalog or default_catalog()).manifests)
+
+
+def plugin_tool_names(
+    plugin_ids: Iterable[str] | Mapping[str, Any] | None = None,
+    catalog: PluginCatalog | None = None,
+) -> Set[str]:
+    selected = (
+        set(plugin_ids)
+        if plugin_ids is not None
+        else set((catalog or default_catalog()).manifests)
+    )
     names: Set[str] = set()
     for plugin_id in selected:
-        plugin_type = PLUGIN_TYPES.get(plugin_id)
-        if plugin_type:
-            names.update(plugin_type.TOOL_DEFINITIONS)
+        manifest = (catalog or default_catalog()).get(plugin_id)
+        if manifest:
+            names.update(manifest.tools)
     return names
 
 
-def validate_plugin_settings(plugin_id: str, settings: Mapping[str, Any]) -> None:
-    plugin_type = PLUGIN_TYPES.get(plugin_id)
-    if plugin_type is None:
+def validate_plugin_settings(
+    plugin_id: str,
+    settings: Mapping[str, Any],
+    catalog: PluginCatalog | None = None,
+) -> None:
+    manifest = (catalog or default_catalog()).get(plugin_id)
+    if manifest is None:
         raise ValueError("未知平台插件：{}".format(plugin_id))
-    plugin_type.validate_settings(settings)
+    manifest.validate_settings(settings)
+
+
+def normalize_plugin_settings(
+    plugin_id: str,
+    settings: Mapping[str, Any],
+    catalog: PluginCatalog | None = None,
+) -> Dict[str, Any]:
+    manifest = (catalog or default_catalog()).get(plugin_id)
+    if manifest is None:
+        raise ValueError("未知平台插件：{}".format(plugin_id))
+    return manifest.normalize_settings(settings)
+
+
+def validate_plugin_settings_full(
+    plugin_id: str,
+    settings: Mapping[str, Any],
+    catalog: PluginCatalog | None = None,
+) -> None:
+    selected = catalog or default_catalog()
+    manifest = selected.get(plugin_id)
+    if manifest is None:
+        raise ValueError("未知平台插件：{}".format(plugin_id))
+    manifest.validate_settings(settings)
+    if manifest.missing_dependencies:
+        return
+    plugin_type = PluginManager._load_entrypoint(manifest)
+    validator = getattr(plugin_type, "validate_settings", None)
+    if callable(validator):
+        validator(settings)
+
+
+def build_plugin_manager(
+    configs: Mapping[str, Any],
+    context: PluginContext | None = None,
+    catalog: PluginCatalog | None = None,
+) -> PluginManager:
+    from src.core.tooling.definitions import TOOL_DEFINITIONS
+
+    return PluginManager(
+        catalog or default_catalog(),
+        configs,
+        context,
+        reserved_tools=TOOL_DEFINITIONS,
+    )
 
 
 def build_plugins(
     configs: Mapping[str, Any],
     context: PluginContext | None = None,
 ) -> List[PlatformPlugin]:
-    plugins: List[PlatformPlugin] = []
-    for plugin_id, config in configs.items():
-        enabled = bool(getattr(config, "enabled", False))
-        if not enabled:
-            continue
-        settings: Dict[str, Any] = dict(getattr(config, "settings", {}) or {})
-        plugin_type = PLUGIN_TYPES.get(plugin_id)
-        if plugin_type is None:
-            continue
-        plugins.append(plugin_type(settings, context=context))
-    return plugins
+    """Compatibility helper for callers that still consume an instance list."""
+    return build_plugin_manager(configs, context=context).plugins

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}治理 - BotPlatform{% endblock %}
+{% block content %}
+<div class="page-container control-governance-page" id="governance-page" data-module="{{ module }}">
+    <div class="control-page-heading governance-page-header">
+        <div>
+            <span class="control-kicker" id="governance-eyebrow">GOVERNANCE</span>
+            <h2 id="governance-title">加载中…</h2>
+            <p class="page-desc" id="governance-description"></p>
+        </div>
+        <div class="control-heading-actions"><button id="governance-refresh" class="btn-secondary" type="button">刷新数据</button></div>
+    </div>
+    <form id="governance-filters" class="governance-filterbar" hidden>
+        <label>开始日期<input id="governance-from" type="date"></label><label>结束日期<input id="governance-to" type="date"></label><label>模型<input id="governance-profile" type="search" placeholder="模型 ID"></label><label>智能体<input id="governance-agent" type="search" placeholder="智能体 ID"></label><label>来源<input id="governance-source" type="search" placeholder="来源"></label><label>状态<input id="governance-status" type="search" placeholder="状态"></label><button class="btn-primary" type="submit">筛选</button><button id="governance-clear" class="btn-secondary" type="button">清除</button>
+    </form>
+    <div id="governance-summary" class="stats-grid governance-summary"></div>
+    <div id="governance-list" aria-live="polite"></div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/governance.js?v=20260801d"></script>{% endblock %}

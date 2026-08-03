@@ -1,4 +1,53 @@
 /* ===== Schedules page ===== */
+function initScheduleTabs() {
+    var validTabs = ["tasks", "automation"];
+
+    function tabFromHash() {
+        var value = (window.location.hash || "").replace(/^#/, "");
+        return validTabs.indexOf(value) >= 0 ? value : "tasks";
+    }
+
+    function activateTab(name, updateHash) {
+        var activeTab = validTabs.indexOf(name) >= 0 ? name : "tasks";
+        document.querySelectorAll("[data-schedule-tab]").forEach(function (button) {
+            var active = button.getAttribute("data-schedule-tab") === activeTab;
+            button.classList.toggle("active", active);
+            button.setAttribute("aria-selected", active ? "true" : "false");
+            button.tabIndex = active ? 0 : -1;
+        });
+        document.querySelectorAll("[data-schedule-pane]").forEach(function (pane) {
+            var active = pane.getAttribute("data-schedule-pane") === activeTab;
+            pane.classList.toggle("active", active);
+            pane.hidden = !active;
+        });
+        if (updateHash && window.location.hash !== "#" + activeTab) {
+            window.history.replaceState(null, "", "#" + activeTab);
+        }
+    }
+
+    var buttons = Array.prototype.slice.call(document.querySelectorAll("[data-schedule-tab]"));
+    buttons.forEach(function (button, index) {
+        button.addEventListener("click", function () {
+            activateTab(button.getAttribute("data-schedule-tab"), true);
+        });
+        button.addEventListener("keydown", function (event) {
+            var nextIndex = null;
+            if (event.key === "ArrowRight") nextIndex = (index + 1) % buttons.length;
+            if (event.key === "ArrowLeft") nextIndex = (index - 1 + buttons.length) % buttons.length;
+            if (event.key === "Home") nextIndex = 0;
+            if (event.key === "End") nextIndex = buttons.length - 1;
+            if (nextIndex === null) return;
+            event.preventDefault();
+            buttons[nextIndex].focus();
+            activateTab(buttons[nextIndex].getAttribute("data-schedule-tab"), true);
+        });
+    });
+    window.addEventListener("hashchange", function () {
+        activateTab(tabFromHash(), false);
+    });
+    activateTab(tabFromHash(), false);
+}
+
 function initSchedules() {
     var listEl = document.getElementById("schedule-list");
     var statusEl = document.getElementById("schedule-status");
@@ -284,14 +333,20 @@ function initScriptAutomation() {
         return Promise.all([request("/api/tenants"), request("/api/scripts")]).then(function (results) {
             tenants = results[0];
             scripts = results[1].scripts || [];
-            tenantSelect.innerHTML = tenants.map(function (item) {
-                return '<option value="' + escapeHtml(item.tenant_id) + '">' +
-                    escapeHtml(item.user_id + " / " + item.bot_id) + "</option>";
-            }).join("");
-            scriptSelect.innerHTML = scripts.map(function (item) {
-                return '<option value="' + escapeHtml(item.id) + '">' +
-                    escapeHtml(item.name + " (" + item.id + ")") + "</option>";
-            }).join("");
+            tenantSelect.innerHTML = tenants.length
+                ? tenants.map(function (item) {
+                    return '<option value="' + escapeHtml(item.tenant_id) + '">' +
+                        escapeHtml(item.user_id + " / " + item.bot_id) + "</option>";
+                }).join("")
+                : '<option value="">暂无机器人用户</option>';
+            tenantSelect.disabled = !tenants.length;
+            scriptSelect.innerHTML = scripts.length
+                ? scripts.map(function (item) {
+                    return '<option value="' + escapeHtml(item.id) + '">' +
+                        escapeHtml(item.name + " (" + item.id + ")") + "</option>";
+                }).join("")
+                : '<option value="">暂无可用脚本</option>';
+            scriptSelect.disabled = !scripts.length;
             renderParameters();
             loadSchedules();
         }).catch(function (error) {

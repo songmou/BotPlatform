@@ -18,11 +18,13 @@ from src.core.modeling import (
     ModelIdentity,
     ModelResponse,
     ModelRouter,
+    RerankError,
 )
 
 
 class FakeEmbedding:
-    profile = SimpleNamespace(id="fake-embedding", dimensions=4)
+    model_id = "fake-embedding"
+    dimensions = 4
 
     def embed(self, texts):
         vectors = []
@@ -32,6 +34,28 @@ class FakeEmbedding:
             else:
                 vectors.append([0.0, 1.0, 0.0, 0.0])
         return vectors
+
+    def close(self):
+        pass
+
+
+class FakeRerank:
+    model_id = "fake-rerank"
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls = []
+
+    def rerank(self, query, documents, top_n=None):
+        self.calls.append((query, list(documents), top_n))
+        if self.fail:
+            raise RerankError("rerank 服务不可用")
+        # Reverse the candidate order with descending scores.
+        indices = list(reversed(range(len(documents))))
+        return [(index, float(len(indices) - rank)) for rank, index in enumerate(indices)]
+
+    def close(self):
+        pass
 
 
 class FakeExtractor:
@@ -205,6 +229,40 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
         result = service.add_text(self.tenant.tenant_id, "离线", "中文全文检索仍然可用。")
         self.assertEqual(result["status"], "pending_embedding")
         self.assertEqual(len(service.search(self.tenant.tenant_id, "全文检索")), 1)
+
+    def test_rerank_reorders_candidates_and_degrades_silently(self):
+        docs = [
+            ("苹果", "苹果是一种常见水果，可以直接食用。"),
+            ("香蕉", "香蕉也是常见水果，富含钾元素。"),
+            ("橙子", "橙子是水果，含有丰富维生素 C。"),
+        ]
+        plain = KnowledgeService(self.registry, FakeEmbedding())
+        for name, text in docs:
+            plain.add_text(self.tenant.tenant_id, name, text)
+        baseline = [
+            hit["content"]
+            for hit in plain.search(self.tenant.tenant_id, "水果", limit=3)
+        ]
+        self.assertEqual(len(baseline), 3)
+
+        reranker = FakeRerank()
+        reranked_service = KnowledgeService(self.registry, FakeEmbedding(), reranker)
+        reranked = [
+            hit["content"]
+            for hit in reranked_service.search(self.tenant.tenant_id, "水果", limit=3)
+        ]
+        self.assertEqual(reranked, list(reversed(baseline)))
+        self.assertTrue(reranker.calls)
+        self.assertEqual(reranker.calls[0][2], 3)
+
+        degraded_service = KnowledgeService(
+            self.registry, FakeEmbedding(), FakeRerank(fail=True)
+        )
+        degraded = [
+            hit["content"]
+            for hit in degraded_service.search(self.tenant.tenant_id, "水果", limit=3)
+        ]
+        self.assertEqual(degraded, baseline)
 
     def test_memory_review_conflict_secret_and_forget(self):
         extractor = FakeExtractor([

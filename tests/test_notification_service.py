@@ -14,7 +14,6 @@ from src.core.integrations.ilink import (
 )
 from src.core.integrations.images import ImageSource, ImageSourceError
 from src.core.modeling import CanonicalMessage
-from src.core.plugins.codex_tasks import CodexTaskStore
 from src.core.services.notification import (
     NotificationCredentialsError,
     NotificationDeliveryError,
@@ -392,69 +391,6 @@ class NotificationServiceTests(unittest.TestCase):
         self.assertEqual(
             reclaimed[0]["notification_id"], first.notification_ids[0]
         )
-
-    def test_existing_codex_event_is_adopted_and_status_is_mirrored(self) -> None:
-        self.store.update(self.tenant, "context")
-        with self.registry.database.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO codex_task_runs("
-                "thread_id, tenant_id, project_id, title, status, created_at, "
-                "notification_status, origin, phase, updated_at, last_seen_at"
-                ") VALUES ('thread-outbox', ?, 'project', '可靠通知', 'completed', "
-                "'2026-01-01T00:00:00+00:00', 'pending', 'external', 'completed', "
-                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
-                (self.tenant.tenant_id,),
-            )
-            connection.execute(
-                "INSERT INTO codex_task_events("
-                "event_key, thread_id, tenant_id, event_type, message, "
-                "delivery_status, created_at"
-                ") VALUES ('codex-outbox-key', 'thread-outbox', ?, 'completed', "
-                "'Codex 已完成', 'pending', '2026-01-01T00:00:00+00:00')",
-                (self.tenant.tenant_id,),
-            )
-
-        service = self.service()
-        self.assertEqual(service.dispatch_due(), 1)
-        with self.registry.database.read() as connection:
-            event = connection.execute(
-                "SELECT delivery_status, sent_at FROM codex_task_events "
-                "WHERE event_key='codex-outbox-key'"
-            ).fetchone()
-            task = connection.execute(
-                "SELECT notification_status FROM codex_task_runs "
-                "WHERE thread_id='thread-outbox'"
-            ).fetchone()
-        self.assertEqual(event["delivery_status"], "sent")
-        self.assertIsNotNone(event["sent_at"])
-        self.assertEqual(task["notification_status"], "sent")
-
-    def test_new_codex_event_and_outbox_row_are_created_together(self) -> None:
-        store = CodexTaskStore(self.registry, durable_outbox=True)
-        store.create(
-            "thread-atomic",
-            self.tenant.tenant_id,
-            "project",
-            "原子通知",
-            notify=True,
-        )
-        event = store.enqueue_event(
-            "codex-atomic-key",
-            "thread-atomic",
-            self.tenant.tenant_id,
-            "completed",
-            "Codex 原子入队",
-        )
-
-        self.assertEqual(event["delivery_status"], "sending")
-        with self.registry.database.read() as connection:
-            outbox = connection.execute(
-                "SELECT source_ref, delivery_status, text_payload "
-                "FROM notification_outbox WHERE source_key='codex-atomic-key'"
-            ).fetchone()
-        self.assertEqual(outbox["source_ref"], str(event["event_id"]))
-        self.assertEqual(outbox["delivery_status"], "pending")
-        self.assertEqual(outbox["text_payload"], "Codex 原子入队")
 
     def test_permanently_missing_image_fails_and_unblocks_later_text(self) -> None:
         self.store.update(self.tenant, "context")

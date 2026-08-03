@@ -8,9 +8,9 @@ import re
 import sys
 import traceback
 
-from fastapi import APIRouter, Body, HTTPException, Request, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
-from src.api.deps import get_config, get_tool_runtime
+from src.api.deps import get_config, get_tool_runtime, require_permission
 from src.api.schemas import McpServerCreate, McpServerOut, McpServerUpdate
 from src.core.config.loader import ConfigError
 from src.core.config.mcp_headers import (
@@ -146,13 +146,20 @@ def _to_out(item: dict) -> McpServerOut:
 
 
 @router.get("", response_model=list[McpServerOut])
-def list_servers(response: Response):
+def list_servers(
+    response: Response,
+    _principal=Depends(require_permission("panel.read")),
+):
     response.headers["Cache-Control"] = "no-store"
     return [_to_out(s) for s in _load()]
 
 
 @router.post("", response_model=McpServerOut, status_code=201)
-def create_server(body: McpServerCreate, request: Request):
+def create_server(
+    body: McpServerCreate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     if not _ID_PATTERN.match(body.id):
         raise HTTPException(status_code=400, detail="ID 只能包含小写字母、数字和下划线，且以字母开头")
     if body.transport not in _TRANSPORTS:
@@ -182,7 +189,12 @@ def create_server(body: McpServerCreate, request: Request):
 
 
 @router.put("/{server_id}", response_model=McpServerOut)
-def update_server(server_id: str, body: McpServerUpdate, request: Request):
+def update_server(
+    server_id: str,
+    body: McpServerUpdate,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     servers = _load()
     for s in servers:
         if s["id"] == server_id:
@@ -211,7 +223,11 @@ def update_server(server_id: str, body: McpServerUpdate, request: Request):
 
 
 @router.delete("/{server_id}")
-def delete_server(server_id: str, request: Request):
+def delete_server(
+    server_id: str,
+    request: Request,
+    _principal=Depends(require_permission("panel.write")),
+):
     servers = _load()
     filtered = [s for s in servers if s["id"] != server_id]
     if len(filtered) == len(servers):
@@ -229,7 +245,12 @@ def _find_server(server_id: str) -> dict:
 
 
 @router.get("/{server_id}/tools")
-def list_server_tools(server_id: str, request: Request, response: Response):
+def list_server_tools(
+    server_id: str,
+    request: Request,
+    response: Response,
+    _principal=Depends(require_permission("panel.read")),
+):
     response.headers["Cache-Control"] = "no-store"
     cfg = _find_server(server_id)
     manager = _ensure_manager(request)
@@ -251,6 +272,7 @@ def invoke_server_tool(
     tool_name: str,
     request: Request,
     body: dict = Body(default={}),
+    _principal=Depends(require_permission("panel.write")),
 ):
     cfg = _find_server(server_id)
     manager = _ensure_manager(request)

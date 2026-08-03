@@ -997,7 +997,7 @@ class MemoryService:
 
     def run_daily_maintenance(self) -> Dict[str, int]:
         result = {"tenants": 0, "created": 0, "failed": 0}
-        for tenant in self.registry.list_contexts():
+        for tenant in self.registry.list_contexts(include_internal=True):
             try:
                 result["created"] += self.scan_tenant(tenant.tenant_id)
                 result["tenants"] += 1
@@ -1007,7 +1007,7 @@ class MemoryService:
 
     def run_weekly_compaction(self) -> Dict[str, int]:
         result = {"tenants": 0, "failed": 0}
-        for tenant in self.registry.list_contexts():
+        for tenant in self.registry.list_contexts(include_internal=True):
             try:
                 self.rebuild_soul(tenant.tenant_id, force_compact=True)
                 result["tenants"] += 1
@@ -1017,7 +1017,7 @@ class MemoryService:
 
     def recover_dirty(self) -> Dict[str, int]:
         result = {"rebuilt": 0, "failed": 0}
-        for tenant in self.registry.list_contexts():
+        for tenant in self.registry.list_contexts(include_internal=True):
             try:
                 self.get_soul(tenant.tenant_id)
                 result["rebuilt"] += 1

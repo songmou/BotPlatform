@@ -22,86 +22,113 @@
             <h3 id="modal-title">新建智能体</h3>
             <button id="modal-close" class="modal-close-btn">&times;</button>
         </div>
+        <div class="tab-bar agent-modal-tabs" role="tablist" aria-label="智能体配置">
+            <button class="tab-btn active" type="button" data-agent-tab="basic" role="tab" aria-selected="true" aria-controls="agent-basic-panel">基础信息</button>
+            <button class="tab-btn" type="button" data-agent-tab="model" role="tab" aria-selected="false" aria-controls="agent-model-panel">模型与提示词</button>
+            <button class="tab-btn" type="button" data-agent-tab="builtin" role="tab" aria-selected="false" aria-controls="agent-builtin-panel">内置工具 <span id="tools-builtin-count" class="tool-count"></span></button>
+            <button class="tab-btn" type="button" data-agent-tab="plugin" role="tab" aria-selected="false" aria-controls="agent-plugin-panel">插件工具 <span id="tools-plugin-count" class="tool-count"></span></button>
+            <button class="tab-btn" type="button" data-agent-tab="skill" role="tab" aria-selected="false" aria-controls="agent-skill-panel">Skill 技能 <span id="tools-skill-count" class="tool-count"></span></button>
+            <button class="tab-btn" type="button" data-agent-tab="mcp" role="tab" aria-selected="false" aria-controls="agent-mcp-panel">MCP 服务 <span id="tools-mcp-count" class="tool-count"></span></button>
+            <button class="tab-btn" type="button" data-agent-tab="knowledge" role="tab" aria-selected="false" aria-controls="agent-knowledge-panel">知识库授权 <span id="tools-knowledge-count" class="tool-count"></span></button>
+        </div>
         <form id="agent-form" class="modal-body">
-            <div class="form-group" id="form-id-group">
-                <label for="agent-id">ID（唯一标识）</label>
-                <input type="text" id="agent-id" placeholder="如 my_agent" required pattern="^[a-z][a-z0-9_]{0,63}$">
-                <small>小写字母开头，可含数字和下划线</small>
-            </div>
-            <div class="form-group">
-                <label for="agent-name">名称</label>
-                <input type="text" id="agent-name" placeholder="如 写作助手" required>
-            </div>
-            <div class="form-group">
-                <label for="agent-role">角色定位</label>
-                <input type="text" id="agent-role" placeholder="如 专注学术写作的编辑">
-            </div>
-            <div class="form-group">
-                <label for="agent-desc">描述</label>
-                <input type="text" id="agent-desc" placeholder="简短描述该智能体的用途">
-            </div>
-            <div class="form-group">
-                <label class="checkbox-label"><input type="checkbox" id="agent-enabled" checked> 启用</label>
-                <small>禁用后不会出现在对话的智能体选择中</small>
-            </div>
-            <div class="form-group">
-                <label for="agent-model">使用模型</label>
-                <select id="agent-model">
-                    <option value="">跟随默认模型</option>
-                </select>
-                <small>可为该智能体指定专用模型，留空则使用当前主模型</small>
-            </div>
-            <div class="form-group">
-                <label for="agent-greeting">开场白</label>
-                <input type="text" id="agent-greeting" placeholder="如 你好！我是写作助手，有什么可以帮你？">
-                <small>新对话时自动展示的欢迎语，留空使用默认</small>
-            </div>
-            <div class="form-group">
-                <label for="agent-hints">引导问题</label>
-                <input type="text" id="agent-hints" placeholder="用分号分隔，如 帮我写总结;翻译这段话;润色文章">
-                <small>新对话时展示的快捷提问按钮，多个用分号隔开</small>
-            </div>
-            <div class="form-row">
-                <div class="form-group form-group-half">
-                    <label for="agent-temperature">温度 <span id="temp-value">默认</span></label>
-                    <input type="range" id="agent-temperature" min="0" max="2" step="0.1" value="">
-                    <small>越高越有创造力，越低越精确</small>
+            <div id="agent-basic-panel" class="agent-tab-panel" data-agent-panel="basic" role="tabpanel">
+                <div class="form-group" id="form-id-group">
+                    <label for="agent-id">ID（唯一标识）</label>
+                    <input type="text" id="agent-id" placeholder="如 my_agent" required pattern="^[a-z][a-z0-9_]{0,63}$">
+                    <small>小写字母开头，可含数字和下划线</small>
                 </div>
-                <div class="form-group form-group-half">
-                    <label for="agent-max-tokens">最大 Token</label>
-                    <input type="number" id="agent-max-tokens" min="1" max="128000" placeholder="留空使用默认">
-                    <small>限制回复长度</small>
+                <div class="form-group">
+                    <label for="agent-name">名称</label>
+                    <input type="text" id="agent-name" placeholder="如 写作助手" required>
+                </div>
+                <div class="form-group">
+                    <label for="agent-role">角色定位</label>
+                    <input type="text" id="agent-role" placeholder="如 专注学术写作的编辑">
+                </div>
+                <div class="form-group">
+                    <label for="agent-desc">描述</label>
+                    <input type="text" id="agent-desc" placeholder="简短描述该智能体的用途">
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="agent-enabled" checked> 启用</label>
+                    <small>禁用后不会出现在对话的智能体选择中</small>
                 </div>
             </div>
-            <div class="form-group">
-                <label for="agent-prompt">系统提示词</label>
-                <textarea id="agent-prompt" rows="6" placeholder="定义智能体的行为和规则..."></textarea>
-            </div>
-            <div class="form-group">
-                <label>工具与能力</label>
-                <div class="tool-picker">
-                    <details class="tool-group" open>
-                        <summary>内置工具 <span id="tools-builtin-count" class="tool-count"></span></summary>
-                        <div id="tools-builtin" class="tool-checkboxes"></div>
-                    </details>
-                    <details class="tool-group">
-                        <summary>插件工具 <span id="tools-plugin-count" class="tool-count"></span></summary>
-                        <div id="tools-plugin" class="tool-plugin-groups"></div>
-                    </details>
-                    <details class="tool-group">
-                        <summary>Skill 技能 <span id="tools-skill-count" class="tool-count"></span></summary>
-                        <div id="tools-skill" class="tool-checkboxes"></div>
-                    </details>
-                    <details class="tool-group">
-                        <summary>MCP 服务 <span id="tools-mcp-count" class="tool-count"></span></summary>
-                        <div id="tools-mcp" class="tool-checkboxes"></div>
-                    </details>
-                    <details class="tool-group" open>
-                        <summary>知识库授权 <span id="tools-knowledge-count" class="tool-count"></span></summary>
-                        <div id="tools-knowledge" class="tool-plugin-groups"></div>
-                    </details>
+            <div id="agent-model-panel" class="agent-tab-panel" data-agent-panel="model" role="tabpanel" hidden>
+                <div class="form-group">
+                    <label for="agent-model">使用模型</label>
+                    <select id="agent-model">
+                        <option value="">跟随默认模型</option>
+                    </select>
+                    <small>可为该智能体指定专用模型，留空则使用当前主模型</small>
                 </div>
-                <small>知识库采用严格授权；未勾选的公共或私有知识库不会参与该智能体检索</small>
+                <div class="form-group">
+                    <label for="agent-greeting">开场白</label>
+                    <input type="text" id="agent-greeting" placeholder="如 你好！我是写作助手，有什么可以帮你？">
+                    <small>新对话时自动展示的欢迎语，留空使用默认</small>
+                </div>
+                <div class="form-group">
+                    <label for="agent-hints">引导问题</label>
+                    <input type="text" id="agent-hints" placeholder="用分号分隔，如 帮我写总结;翻译这段话;润色文章">
+                    <small>新对话时展示的快捷提问按钮，多个用分号隔开</small>
+                </div>
+                <div class="form-row">
+                    <div class="form-group form-group-half">
+                        <label for="agent-temperature">温度 <span id="temp-value">默认</span></label>
+                        <input type="range" id="agent-temperature" min="0" max="2" step="0.1" value="">
+                        <small>越高越有创造力，越低越精确</small>
+                    </div>
+                    <div class="form-group form-group-half">
+                        <label for="agent-max-tokens">最大 Token</label>
+                        <input type="number" id="agent-max-tokens" min="1" max="128000" placeholder="留空使用默认">
+                        <small>限制回复长度</small>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="agent-prompt">系统提示词</label>
+                    <textarea id="agent-prompt" rows="6" placeholder="定义智能体的行为和规则..."></textarea>
+                </div>
+            </div>
+            <div id="agent-builtin-panel" class="agent-tab-panel" data-agent-panel="builtin" role="tabpanel" hidden>
+                <div class="agent-tools-section">
+                    <div class="agent-tool-bulk-actions">
+                        <button class="btn-secondary btn-sm agent-tool-toggle-selection" type="button" data-tool-kind="builtin">全选</button>
+                    </div>
+                    <div id="tools-builtin" class="tool-checkboxes"></div>
+                </div>
+            </div>
+            <div id="agent-plugin-panel" class="agent-tab-panel" data-agent-panel="plugin" role="tabpanel" hidden>
+                <div class="agent-tools-section">
+                    <div class="agent-tool-bulk-actions">
+                        <button class="btn-secondary btn-sm agent-tool-toggle-selection" type="button" data-tool-kind="plugin">全选</button>
+                    </div>
+                    <div id="tools-plugin" class="tool-plugin-groups"></div>
+                </div>
+            </div>
+            <div id="agent-skill-panel" class="agent-tab-panel" data-agent-panel="skill" role="tabpanel" hidden>
+                <div class="agent-tools-section">
+                    <div class="agent-tool-bulk-actions">
+                        <button class="btn-secondary btn-sm agent-tool-toggle-selection" type="button" data-tool-kind="skill">全选</button>
+                    </div>
+                    <div id="tools-skill" class="tool-checkboxes"></div>
+                </div>
+            </div>
+            <div id="agent-mcp-panel" class="agent-tab-panel" data-agent-panel="mcp" role="tabpanel" hidden>
+                <div class="agent-tools-section">
+                    <div class="agent-tool-bulk-actions">
+                        <button class="btn-secondary btn-sm agent-tool-toggle-selection" type="button" data-tool-kind="mcp">全选</button>
+                    </div>
+                    <div id="tools-mcp" class="tool-checkboxes"></div>
+                </div>
+            </div>
+            <div id="agent-knowledge-panel" class="agent-tab-panel" data-agent-panel="knowledge" role="tabpanel" hidden>
+                <div class="agent-tools-section">
+                    <div class="agent-tool-bulk-actions">
+                        <button class="btn-secondary btn-sm agent-tool-toggle-selection" type="button" data-tool-kind="knowledge">全选</button>
+                    </div>
+                    <div id="tools-knowledge" class="tool-plugin-groups"></div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button type="button" id="modal-cancel" class="btn-secondary">取消</button>
