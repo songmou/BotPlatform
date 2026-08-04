@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import os
 import re
-import shutil
 import threading
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
@@ -27,7 +24,6 @@ from src.core.config.loader import (
 )
 from src.core.config.mcp_headers import merge_headers
 from src.core.modeling import ModelCapabilities
-from src.core.paths import CONFIG_DIR
 from src.core.storage.organizations import OrganizationStore
 from src.core.tooling.definitions import TOOL_DEFINITIONS
 
@@ -205,65 +201,9 @@ class ScopedResourceStore:
             Callable[[str, str, Optional[Dict[str, Any]], Optional[Dict[str, Any]]], None]
         ] = None
         if config is not None:
-            self._ensure_upgrade_snapshot()
             self.bootstrap_public(config)
-            self._migrate_legacy_resources(config)
             self._activate_pending_on_startup()
             self.ensure_all_organization_agents(config.app.default_agent)
-
-    def _ensure_upgrade_snapshot(self) -> None:
-        """Capture the pre-v29 database, tenant directories and config manifest."""
-        database_path = self.database.path
-        pre_migration_database = database_path.with_name(
-            "{}.pre-v29{}".format(database_path.stem, database_path.suffix)
-        )
-        if not pre_migration_database.is_file():
-            return
-        backup_root = (
-            self.organizations.registry.system_root
-            / "platform_catalog_migration_backup_v29"
-        )
-        if backup_root.exists():
-            return
-        temporary_root = backup_root.with_name(backup_root.name + ".pending")
-        if temporary_root.exists():
-            shutil.rmtree(temporary_root)
-        temporary_root.mkdir(parents=True, mode=0o700)
-        try:
-            database_target = temporary_root / "botplatform.pre-v29.sqlite3"
-            shutil.copy2(pre_migration_database, database_target)
-            users_root = self.organizations.registry.users_root
-            if users_root.is_dir():
-                shutil.copytree(users_root, temporary_root / "organizations")
-            manifest = {
-                "schema_version": 29,
-                "database": database_target.name,
-                "organization_directories": "organizations",
-                "config": [],
-            }
-            config_target = temporary_root / "config"
-            config_target.mkdir(mode=0o700)
-            for source in sorted(CONFIG_DIR.glob("*.json")):
-                raw = source.read_bytes()
-                shutil.copy2(source, config_target / source.name)
-                manifest["config"].append(
-                    {
-                        "name": source.name,
-                        "size": len(raw),
-                        "sha256": hashlib.sha256(raw).hexdigest(),
-                    }
-                )
-            (temporary_root / "manifest.json").write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            if os.name != "nt":
-                for path in temporary_root.rglob("*"):
-                    os.chmod(path, 0o700 if path.is_dir() else 0o600)
-            temporary_root.rename(backup_root)
-        except Exception:
-            shutil.rmtree(temporary_root, ignore_errors=True)
-            raise
 
     @staticmethod
     def _validate_type(resource_type: str) -> str:
@@ -338,139 +278,6 @@ class ScopedResourceStore:
                         (cursor.lastrowid, serialized, timestamp, timestamp),
                     )
 
-    def _migrate_legacy_resources(self, config: ProjectConfig) -> None:
-        with self.database.read() as connection:
-            done = connection.execute(
-                "SELECT 1 FROM platform_catalog_migrations "
-                "WHERE migration_key='scoped-resources-v1'"
-            ).fetchone()
-            tables = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-        if done is not None or "scoped_resources" not in tables:
-            self._archive_unsupported_credentials()
-            return
-        timestamp = _now()
-        with self.database.transaction(immediate=True) as connection:
-            legacy_public = connection.execute(
-                "SELECT * FROM scoped_resources WHERE scope='public'"
-            ).fetchall()
-            for row in legacy_public:
-                resource_type = str(row["resource_type"])
-                resource_id = str(row["resource_id"])
-                if resource_type not in RESOURCE_TYPES:
-                    continue
-                target = connection.execute(
-                    "SELECT resource_pk, active_revision FROM platform_resources "
-                    "WHERE resource_type=? AND resource_id=?",
-                    (resource_type, resource_id),
-                ).fetchone()
-                if target is None:
-                    continue
-                current = connection.execute(
-                    "SELECT payload_json FROM platform_resource_versions "
-                    "WHERE resource_pk=? AND revision=?",
-                    (target["resource_pk"], target["active_revision"]),
-                ).fetchone()
-                try:
-                    legacy_payload = _strip_secret_values(
-                        json.loads(str(row["payload_json"]))
-                    )
-                    current_payload = json.loads(str(current["payload_json"]))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                if legacy_payload == current_payload:
-                    continue
-                revision = int(
-                    connection.execute(
-                        "SELECT COALESCE(MAX(revision), 0) + 1 "
-                        "FROM platform_resource_versions WHERE resource_pk=?",
-                        (target["resource_pk"],),
-                    ).fetchone()[0]
-                )
-                connection.execute(
-                    "INSERT INTO platform_resource_versions("
-                    "resource_pk, revision, lifecycle, payload_json, source, "
-                    "created_at) VALUES (?, ?, 'draft', ?, 'migration', ?)",
-                    (
-                        target["resource_pk"],
-                        revision,
-                        json.dumps(
-                            legacy_payload,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        timestamp,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE platform_resources SET draft_revision=?, updated_at=? "
-                    "WHERE resource_pk=?",
-                    (revision, timestamp, target["resource_pk"]),
-                )
-
-            owned_agents = connection.execute(
-                "SELECT * FROM scoped_resources WHERE scope='organization' "
-                "AND resource_type='agents'"
-            ).fetchall()
-            for row in owned_agents:
-                payload = json.loads(str(row["payload_json"]))
-                self._insert_agent_row(
-                    connection,
-                    str(row["organization_id"]),
-                    str(row["resource_id"]),
-                    payload,
-                    template_resource_id=row["base_resource_id"],
-                    template_revision=None,
-                    actor_user_id=row["updated_by"],
-                    timestamp=timestamp,
-                )
-            connection.execute(
-                "INSERT INTO platform_catalog_migrations("
-                "migration_key, detail, applied_at) VALUES ("
-                "'scoped-resources-v1', '已迁移平台目录与组织智能体', ?) ",
-                (timestamp,),
-            )
-            connection.execute("DROP TABLE organization_resource_overrides")
-            connection.execute("DROP TABLE scoped_resources")
-        self._archive_unsupported_credentials()
-
-    def _archive_unsupported_credentials(self) -> None:
-        with self.database.read() as connection:
-            table = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='credential_metadata'"
-            ).fetchone()
-        if table is None:
-            return
-        timestamp = _now()
-        with self.database.transaction(immediate=True) as connection:
-            rows = connection.execute(
-                "SELECT * FROM credential_metadata WHERE credential_scope='organization' "
-                "AND resource_type IN ('models','mcp','plugins')"
-            ).fetchall()
-            for row in rows:
-                connection.execute(
-                    "INSERT OR IGNORE INTO legacy_organization_credentials("
-                    "organization_id, credential_id, user_id, credential_scope, "
-                    "resource_type, resource_id, label, secret_service, secret_account, "
-                    "created_at, updated_at, archived_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        row["organization_id"], row["credential_id"], row["user_id"],
-                        row["credential_scope"], row["resource_type"], row["resource_id"],
-                        row["label"], row["secret_service"], row["secret_account"],
-                        row["created_at"], row["updated_at"], timestamp,
-                    ),
-                )
-            connection.execute(
-                "DELETE FROM credential_metadata WHERE credential_scope='organization' "
-                "AND resource_type IN ('models','mcp','plugins')"
-            )
-
     def _activate_pending_on_startup(self) -> None:
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
@@ -534,51 +341,6 @@ class ScopedResourceStore:
                 (resource_type,),
             ).fetchall()
         return [self._catalog_row(row) for row in rows]
-
-    def list_admin(self, resource_type: str) -> List[Dict[str, Any]]:
-        """List active resources plus the latest draft for platform editors."""
-        resource_type = self._validate_type(resource_type)
-        with self.database.read() as connection:
-            resources = connection.execute(
-                "SELECT * FROM platform_resources WHERE resource_type=? "
-                "ORDER BY resource_id",
-                (resource_type,),
-            ).fetchall()
-            result = []
-            for resource in resources:
-                revision = (
-                    resource["draft_revision"]
-                    or (
-                        resource["published_revision"]
-                        if resource["published_revision"] != resource["active_revision"]
-                        else resource["active_revision"]
-                    )
-                )
-                if revision is None:
-                    continue
-                version = connection.execute(
-                    "SELECT * FROM platform_resource_versions WHERE resource_pk=? "
-                    "AND revision=?",
-                    (resource["resource_pk"], revision),
-                ).fetchone()
-                item = self._catalog_row(
-                    {
-                        **dict(version),
-                        "resource_type": resource_type,
-                        "resource_id": resource["resource_id"],
-                        "activation_state": resource["activation_state"],
-                        "activation_error": resource["activation_error"],
-                    }
-                )
-                item.update(
-                    {
-                        "draft_revision": resource["draft_revision"],
-                        "published_revision": resource["published_revision"],
-                        "active_revision": resource["active_revision"],
-                    }
-                )
-                result.append(item)
-        return result
 
     def save_draft(
         self,

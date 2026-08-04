@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.core.config.loader import (
     ScriptDefinition,
@@ -101,6 +101,7 @@ class ScriptService:
         keychain_service: Optional[KeychainService] = None,
         external_registry: Optional[ExternalScriptRegistry] = None,
         env_resolver: Optional[EnvResolver] = None,
+        address_store: Optional[Any] = None,
     ) -> None:
         self.builtin_definitions = dict(definitions)
         self.external_registry = external_registry
@@ -118,11 +119,14 @@ class ScriptService:
         self.tenant_registry = tenant_registry
         self.integration_store = integration_store or IntegrationStore(tenant_registry)
         self.keychain_service = keychain_service or KeychainService()
+        # Duck-typed ChannelAddressStore; kept loose to avoid an import cycle.
+        self.address_store = address_store
         self._lock = threading.RLock()
         self._active: Dict[str, str] = {}
         self._active_run_keys: Dict[str, str] = {}
         self._processes: Dict[str, subprocess.Popen] = {}
         self._recipients: Dict[str, Recipient] = {}
+        self._credential_tenants: Dict[str, str] = {}
         self._cancelled = set()
         self._completion_listeners: List[Callable[[ScriptRun], None]] = []
         self._shutting_down = False
@@ -263,7 +267,7 @@ class ScriptService:
     ) -> Dict[str, Any]:
         if self.tenant_registry.get(tenant.tenant_id) != tenant:
             raise ValueError("租户身份不匹配")
-        self._require_integration(tenant, script_id)
+        credential_tenant_id = self._require_integration(tenant, script_id)
         definition, normalized = self.normalize(script_id, parameters)
         now = datetime.now(timezone.utc)
         run_id = "{}-{}-{}".format(
@@ -301,6 +305,8 @@ class ScriptService:
             self._active_run_keys[run_id] = active_key
             if recipient:
                 self._recipients[run_id] = recipient
+            if credential_tenant_id:
+                self._credential_tenants[run_id] = credential_tenant_id
             self._persist(run)
             self._executor.submit(self._execute, definition, run)
         return run.to_dict()
@@ -313,11 +319,74 @@ class ScriptService:
             "autogen_monitor": "autogen",
         }.get(script_id)
 
-    def _require_integration(self, tenant: TenantContext, script_id: str) -> None:
+    def _credential_tenant_ids(
+        self, tenant_id: Optional[str], personal_tenant_id: Optional[str] = None
+    ) -> List[str]:
+        """Rank credential owners: personal tenant first, organization last.
+
+        Integration secrets are written under the personal tenant (see
+        ``IntegrationService._tenant_id``), while organization schedules run
+        under the organization tenant. Probing both keeps the two ends aligned.
+        """
+        ids: List[str] = []
+        if personal_tenant_id:
+            ids.append(personal_tenant_id)
+        elif tenant_id and self.address_store is not None:
+            try:
+                endpoint = self.address_store.latest_endpoint(tenant_id)
+                derived = (
+                    self.address_store.personal_tenant_for_endpoint(
+                        tenant_id, endpoint.endpoint_id
+                    )
+                    if endpoint is not None
+                    else None
+                )
+                if derived:
+                    ids.append(derived)
+            except Exception:
+                # A missing route must never break credential resolution.
+                pass
+        if tenant_id and tenant_id not in ids:
+            ids.append(tenant_id)
+        return ids
+
+    def _resolve_integration_metadata(
+        self,
+        tenant_id: Optional[str],
+        integration_id: str,
+        personal_tenant_id: Optional[str] = None,
+    ) -> Tuple[Optional[str], Dict[str, Any]]:
+        """Return the first tenant whose integration binding is complete."""
+        partial: Optional[Tuple[str, Dict[str, Any]]] = None
+        for candidate in self._credential_tenant_ids(tenant_id, personal_tenant_id):
+            metadata = self.integration_store.get(candidate, integration_id)
+            if not metadata:
+                continue
+            if partial is None:
+                partial = (candidate, dict(metadata))
+            service = str(metadata.get("keychain_service", ""))
+            try:
+                ready = bool(service) and self.keychain_service.exists(
+                    KeychainReference(
+                        service, str(metadata.get("keychain_account", "credential"))
+                    )
+                )
+            except Exception:
+                ready = False
+            if ready:
+                return candidate, dict(metadata)
+        return partial or (None, {})
+
+    def _require_integration(
+        self, tenant: TenantContext, script_id: str
+    ) -> Optional[str]:
+        """Validate the integration binding and return the credential tenant."""
         integration_id = self._integration_id(script_id)
         if integration_id is None:
-            return
-        metadata = self.integration_store.get(tenant.tenant_id, integration_id)
+            return None
+        credential_tenant_id, metadata = self._resolve_integration_metadata(
+            tenant.tenant_id, integration_id, tenant.personal_tenant_id
+        )
         if not metadata or not self.keychain_service.exists(
             KeychainReference(
                 str(metadata.get("keychain_service", "")),
@@ -329,6 +398,49 @@ class ScriptService:
                     integration_id, integration_id
                 )
             )
+        return credential_tenant_id
+
+    def integration_status(
+        self, tenant_id: Optional[str], script_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Describe the integration credential binding for a script.
+
+        Scripts that map to a platform integration (ctsehr/ctsoa/autogen) get
+        their account and password from the per-tenant integration store and
+        the Keychain, not from the org-env store. This surfaces that binding so
+        the web UI can show whether credentials are configured before a run.
+        """
+        integration_id = self._integration_id(script_id)
+        if integration_id is None:
+            return None
+        _, metadata = (
+            self._resolve_integration_metadata(tenant_id, integration_id)
+            if tenant_id
+            else (None, {})
+        )
+        account = metadata.get("account", "")
+        keychain_service = metadata.get("keychain_service", "")
+        keychain_account = metadata.get("keychain_account", "credential")
+        secret_present = False
+        if keychain_service:
+            try:
+                secret_present = self.keychain_service.exists(
+                    KeychainReference(keychain_service, keychain_account)
+                )
+            except Exception:
+                secret_present = False
+        return {
+            "integration_id": integration_id,
+            "requires_credentials": True,
+            "account_set": bool(account),
+            "keychain_secret_set": bool(secret_present),
+            "ready": bool(account) and bool(secret_present),
+            "injected": [
+                "ILINKBOT_INTEGRATION_ACCOUNT",
+                "ILINKBOT_KEYCHAIN_SERVICE",
+                "ILINKBOT_KEYCHAIN_ACCOUNT",
+            ],
+        }
 
     @staticmethod
     def _active_key(run: ScriptRun, definition: ScriptDefinition) -> str:
@@ -509,7 +621,13 @@ class ScriptService:
                 environment.update(self.external_registry.environment_for(definition))
         integration_id = self._integration_id(run.script_id)
         if integration_id:
-            metadata = self.integration_store.get(run.tenant_id, integration_id)
+            # Credentials may live on the submitting member's personal tenant;
+            # artifacts and ILINKBOT_TENANT_ID intentionally stay on run.tenant_id.
+            with self._lock:
+                metadata_tenant_id = (
+                    self._credential_tenants.get(run.run_id) or run.tenant_id
+                )
+            metadata = self.integration_store.get(metadata_tenant_id, integration_id)
             if not metadata:
                 raise ValueError("租户集成配置缺失")
             environment["ILINKBOT_INTEGRATION_ID"] = integration_id
@@ -626,6 +744,7 @@ class ScriptService:
                 pass
             with self._lock:
                 self._processes.pop(run.run_id, None)
+                self._credential_tenants.pop(run.run_id, None)
                 active_key = self._active_run_keys.pop(run.run_id, "")
                 if self._active.get(active_key) == run.run_id:
                     self._active.pop(active_key, None)
@@ -830,6 +949,7 @@ class ScriptService:
             ]
             for run_id in run_ids:
                 self._recipients.pop(run_id, None)
+                self._credential_tenants.pop(run_id, None)
         for process in processes:
             self._stop_process(process)
         deadline = time.monotonic() + 5

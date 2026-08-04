@@ -34,10 +34,6 @@ def get_tool_runtime(request: Request):
     return request.app.state.tool_runtime
 
 
-def get_plugin_context(request: Request):
-    return request.app.state.plugin_context
-
-
 def get_plugin_manager(request: Request):
     return getattr(request.app.state, "plugin_manager", None)
 

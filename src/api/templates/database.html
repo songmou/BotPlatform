@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}数据库 - BotPlatform{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/tools.css">
+<link rel="stylesheet" href="/static/css/database.css?v=20260804b">
+{% endblock %}
+{% block content %}
+<div class="page-container">
+
+    <!-- ===== List Pane ===== -->
+    <div id="ds-pane-list">
+        <div class="page-header">
+            <div class="page-header-row">
+                <div>
+                    <h2>数据库数据源</h2>
+                    <p class="page-desc">配置 MySQL 或 PostgreSQL 连接，授权智能体查询表数据</p>
+                </div>
+                <button id="ds-create-btn" class="btn-primary" type="button">+ 添加数据源</button>
+            </div>
+        </div>
+        <div id="ds-list" class="plugin-card-grid"></div>
+    </div>
+
+    <!-- ===== Detail Pane ===== -->
+    <div id="ds-pane-detail" style="display:none">
+        <div class="mcp-detail-header">
+            <button id="ds-detail-back" class="btn-secondary btn-sm">&#8592; 返回</button>
+            <h2 id="ds-detail-title">数据源</h2>
+            <span class="tag" id="ds-detail-engine-tag">DB</span>
+        </div>
+        <div class="mcp-detail-subtabs">
+            <button type="button" class="mcp-detail-subtab active" data-detail-tab="overview">概览</button>
+            <button type="button" class="mcp-detail-subtab" data-detail-tab="schema">表结构</button>
+            <button type="button" class="mcp-detail-subtab" data-detail-tab="query">SQL 试跑</button>
+            <button type="button" class="mcp-detail-subtab" data-detail-tab="audit">查询审计</button>
+        </div>
+
+        <!-- Overview -->
+        <div id="ds-detail-overview" class="mcp-detail-section">
+            <h3 class="section-title">基本信息</h3>
+            <div id="ds-detail-info" class="mcp-info-grid"></div>
+            <h3 class="section-title">连接配置</h3>
+            <div class="mcp-config-box">
+                <button id="ds-detail-copy" class="btn-secondary btn-sm mcp-config-copy">复制</button>
+                <pre id="ds-detail-config"></pre>
+            </div>
+            <div class="mcp-detail-actions">
+                <button id="ds-detail-edit" class="btn-primary">编辑配置</button>
+                <button id="ds-detail-test" class="btn-secondary">测试连接</button>
+                <button id="ds-detail-toggle" class="btn-secondary">禁用</button>
+                <button id="ds-detail-delete" class="btn-danger">删除数据源</button>
+            </div>
+            <div id="ds-detail-test-result" class="ds-test-result" style="display:none"></div>
+        </div>
+
+        <!-- Schema -->
+        <div id="ds-detail-schema" class="mcp-detail-section" style="display:none">
+            <div class="ds-schema-head">
+                <h3 class="section-title">已授权表结构</h3>
+                <button id="ds-schema-refresh" class="btn-secondary btn-sm" type="button">刷新缓存</button>
+            </div>
+            <div id="ds-schema-list"></div>
+        </div>
+
+        <!-- Query -->
+        <div id="ds-detail-query" class="mcp-detail-section" style="display:none">
+            <h3 class="section-title">SQL 试跑</h3>
+            <div class="ds-query-area">
+                <textarea id="ds-query-sql" rows="5" placeholder="SELECT * FROM users LIMIT 10"></textarea>
+                <div class="ds-query-run-row">
+                    <button type="button" id="ds-query-run" class="btn-primary btn-sm">执行查询</button>
+                    <span id="ds-query-status" class="text-muted"></span>
+                </div>
+            </div>
+            <div id="ds-query-result"></div>
+        </div>
+
+        <!-- Audit -->
+        <div id="ds-detail-audit" class="mcp-detail-section" style="display:none">
+            <h3 class="section-title">查询审计</h3>
+            <div id="ds-audit-list"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Add/Edit Modal ===== -->
+<div id="ds-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3 id="ds-modal-title">添加数据源</h3>
+            <button id="ds-modal-close" class="modal-close-btn" type="button">&times;</button>
+        </div>
+        <form id="ds-form" class="modal-body">
+            <input type="hidden" id="ds-form-id" value="">
+
+            <div class="form-section">
+                <div class="form-section-title">基础信息</div>
+                <div class="form-group" id="ds-id-group">
+                    <label for="ds-id">数据源 ID</label>
+                    <input type="text" id="ds-id" placeholder="crm_mysql" required pattern="^[a-z][a-z0-9_]{0,63}$" maxlength="64">
+                    <small>小写字母开头，可含数字和下划线</small>
+                </div>
+                <div class="form-group">
+                    <label for="ds-name">名称</label>
+                    <input type="text" id="ds-name" placeholder="CRM 生产库" required>
+                </div>
+                <div class="form-group">
+                    <label>数据库类型</label>
+                    <div class="transport-selector" id="ds-engine-selector">
+                        <button type="button" class="transport-option active" data-engine="mysql">
+                            <span class="transport-option-name">MySQL</span>
+                            <span class="transport-option-desc">默认端口 3306</span>
+                        </button>
+                        <button type="button" class="transport-option" data-engine="postgresql">
+                            <span class="transport-option-name">PostgreSQL</span>
+                            <span class="transport-option-desc">默认端口 5432</span>
+                        </button>
+                    </div>
+                    <input type="hidden" id="ds-engine" value="mysql">
+                </div>
+            </div>
+
+            <div class="form-section">
+                <div class="form-section-title">连接信息</div>
+                <div class="form-group">
+                    <label for="ds-host">主机地址</label>
+                    <input type="text" id="ds-host" placeholder="10.0.1.20" required>
+                </div>
+                <div class="form-group">
+                    <label for="ds-port">端口</label>
+                    <input type="number" id="ds-port" value="3306" min="1" max="65535" required>
+                </div>
+                <div class="form-group">
+                    <label for="ds-database">数据库名</label>
+                    <input type="text" id="ds-database" placeholder="crm" required>
+                </div>
+                <div class="form-group">
+                    <label for="ds-username">用户名</label>
+                    <input type="text" id="ds-username" placeholder="bot_reader">
+                </div>
+                <div class="form-group">
+                    <label for="ds-password">密码</label>
+                    <input type="password" id="ds-password" placeholder="留空表示保持不变">
+                </div>
+            </div>
+
+            <div class="form-section">
+                <div class="form-section-title">安全与性能</div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="ds-enabled" checked> 启用</label>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="ds-readonly" checked> 只读模式（智能体只能执行 SELECT）</label>
+                </div>
+                <div class="form-group">
+                    <label for="ds-connect-timeout">连接超时（秒）</label>
+                    <input type="number" id="ds-connect-timeout" value="5" min="1">
+                </div>
+                <div class="form-group">
+                    <label for="ds-statement-timeout">SQL 超时（秒）</label>
+                    <input type="number" id="ds-statement-timeout" value="15" min="1">
+                </div>
+                <div class="form-group">
+                    <label for="ds-pool-size">连接池大小</label>
+                    <input type="number" id="ds-pool-size" value="3" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label for="ds-max-rows">最大返回行数</label>
+                    <input type="number" id="ds-max-rows" value="200" min="1" max="500">
+                </div>
+                <div class="form-group">
+                    <label for="ds-max-bytes">最大结果字节数</label>
+                    <input type="number" id="ds-max-bytes" value="262144" min="1024">
+                </div>
+            </div>
+
+            <div id="ds-test-result" class="ds-test-result" style="display:none"></div>
+            <div class="modal-footer">
+                <button type="button" id="ds-test-btn" class="btn-secondary">测试连接</button>
+                <button type="button" id="ds-modal-cancel" class="btn-secondary">取消</button>
+                <button type="submit" id="ds-submit-btn" class="btn-primary">立即创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/database.js?v=20260804e"></script>
+<script>initDatabase();</script>
+{% endblock %}

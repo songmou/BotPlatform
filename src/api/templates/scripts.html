@@ -137,6 +137,7 @@
         <div class="modal-header"><h3 id="script-run-title">执行脚本</h3><button id="script-run-close" class="modal-close-btn">&times;</button></div>
         <form id="script-run-form" class="modal-body">
             <div id="script-run-fields"></div>
+            <div id="script-run-credentials" class="env-bindings"></div>
             <div id="script-run-hint" class="run-version-hint"></div>
             <div class="modal-footer"><button type="button" id="script-run-cancel" class="btn-secondary">取消</button><button class="btn-danger" type="submit">确认执行</button></div>
         </form>
@@ -145,6 +146,7 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/js/env_panel.js"></script>
+<script src="/static/js/credential_panel.js"></script>
 <script src="/static/js/scripts.js"></script>
 <script>initScripts();</script>
 {% endblock %}

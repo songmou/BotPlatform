@@ -68,24 +68,6 @@ def normalize_plugin_settings(
     return manifest.normalize_settings(settings)
 
 
-def validate_plugin_settings_full(
-    plugin_id: str,
-    settings: Mapping[str, Any],
-    catalog: PluginCatalog | None = None,
-) -> None:
-    selected = catalog or default_catalog()
-    manifest = selected.get(plugin_id)
-    if manifest is None:
-        raise ValueError("未知平台插件：{}".format(plugin_id))
-    manifest.validate_settings(settings)
-    if manifest.missing_dependencies:
-        return
-    plugin_type = PluginManager._load_entrypoint(manifest)
-    validator = getattr(plugin_type, "validate_settings", None)
-    if callable(validator):
-        validator(settings)
-
-
 def build_plugin_manager(
     configs: Mapping[str, Any],
     context: PluginContext | None = None,

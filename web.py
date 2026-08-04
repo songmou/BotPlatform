@@ -175,6 +175,8 @@ def _run_combined(args) -> int:
             print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
             return 1
 
+        datasource_service = getattr(runtime.tool_runtime, "datasource_service", None) if runtime.tool_runtime else None
+
         try:
             app = create_app(
                 config,
@@ -202,6 +204,7 @@ def _run_combined(args) -> int:
                 script_registry=runtime.external_script_registry,
                 script_schedule_service=runtime.script_schedule_service,
                 channel_statuses=runtime.channel_statuses,
+                datasource_service=datasource_service,
                 secure_cookies=args.behind_https,
                 owns_services=False,
             )
@@ -351,6 +354,13 @@ def _run_panel_only(args) -> int:
         mcp_manager.start()
         mcp_manager.reload(config.mcp_servers)
 
+    datasource_service = None
+    if config.datasources:
+        from src.core.datasource import DataSourceService
+
+        datasource_service = DataSourceService()
+        datasource_service.reload(config.datasources)
+
     tool_runtime = (
         ToolRuntime(
             config.tools,
@@ -365,6 +375,7 @@ def _run_panel_only(args) -> int:
             mcp_manager=mcp_manager,
             drive_service=services.drive_service,
             drive_audit_store=drive_audit_store,
+            datasource_service=datasource_service,
         )
         if config.tools.enabled
         else None
@@ -426,6 +437,7 @@ def _run_panel_only(args) -> int:
         script_schedule_service=script_schedule_service,
         settings_store=settings_store,
         env_resolver=env_resolver,
+        datasource_service=datasource_service,
         secure_cookies=args.behind_https,
     )
 

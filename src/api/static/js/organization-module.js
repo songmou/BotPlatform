@@ -602,6 +602,7 @@ function initOrganizationModule(requestedModule) {
         if (module === "schedules") current = (state.data.items || []).filter(function (item) { return item.id === id; })[0];
         if (module === "members") current = (state.data.items || []).filter(function (item) { return String(item.user_id) === id; })[0];
         var promise = Promise.resolve();
+        try {
         if (action === "agent-toggle") promise = request(organizationApi("/agents/" + encodeURIComponent(id) + "/status"), {
             method: "PATCH", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ enabled: !(current.payload.enabled !== false && current.effective_scope !== "disabled") })
@@ -655,7 +656,10 @@ function initOrganizationModule(requestedModule) {
                     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ credentials: credentials })
                 });
             });
-        } else if (action === "channel-test") promise = request(organizationApi("/channels/" + encodeURIComponent(id) + "/test"), { method: "POST" });
+        } else if (action === "channel-test") promise = request(organizationApi("/channels/" + encodeURIComponent(id) + "/test"), { method: "POST" }).then(function (result) {
+            showToast((result && result.detail) || "渠道测试通过", "success");
+            return result;
+        });
         else if (action === "channel-delete") promise = showConfirm("确定删除该渠道及其组织凭据？").then(function (ok) {
             return ok ? request(organizationApi("/channels/" + encodeURIComponent(id)), { method: "DELETE" }) : null;
         });
@@ -681,6 +685,9 @@ function initOrganizationModule(requestedModule) {
                 body: JSON.stringify({ new_owner_user_id: Number(id) })
             }) : null;
         });
+        } catch (error) {
+            promise = Promise.reject(error);
+        }
         promise.then(refresh).catch(function (error) { showToast(error.message, "error"); });
     });
 

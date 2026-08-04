@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-import json
-import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -149,34 +147,6 @@ class PlatformCatalogStoreTest(unittest.TestCase):
             self.store.publish(
                 "models", "test_model", self.user_id, revision=draft["revision"]
             )
-
-    def test_upgrade_snapshot_captures_database_directories_and_config_manifest(self):
-        pre_migration = self.registry.database.path.with_name(
-            "botplatform.pre-v29.sqlite3"
-        )
-        shutil.copy2(self.registry.database.path, pre_migration)
-        organization_directory = self.registry.users_root / "snapshot-org"
-        organization_directory.mkdir()
-        (organization_directory / "marker.txt").write_text(
-            "snapshot", encoding="utf-8"
-        )
-
-        ScopedResourceStore(self.organizations, self.config)
-        backup = (
-            self.registry.system_root / "platform_catalog_migration_backup_v29"
-        )
-        self.assertTrue((backup / "botplatform.pre-v29.sqlite3").is_file())
-        self.assertTrue(
-            (backup / "organizations" / "snapshot-org" / "marker.txt").is_file()
-        )
-        manifest = json.loads(
-            (backup / "manifest.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(manifest["schema_version"], 29)
-        self.assertTrue(manifest["config"])
-        self.assertTrue(
-            all(len(item["sha256"]) == 64 for item in manifest["config"])
-        )
 
 
 class RetiredConfigurationApiTest(WebApiTestBase):

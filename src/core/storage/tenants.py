@@ -552,21 +552,6 @@ class ScheduleStore:
             ).fetchall()
         return [TenantRegistry._from_row(row) for row in rows]
 
-    def claim_attempt(self, tenant_id: str, task_id: str, interaction_at: str) -> bool:
-        with self.registry.database.transaction(immediate=True) as connection:
-            row = connection.execute(
-                "SELECT interaction_at FROM schedule_attempts WHERE tenant_id=? AND task_id=?",
-                (tenant_id, task_id),
-            ).fetchone()
-            if row and row["interaction_at"] == interaction_at:
-                return False
-            connection.execute(
-                "INSERT INTO schedule_attempts(tenant_id, task_id, interaction_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(tenant_id, task_id) DO UPDATE SET interaction_at=excluded.interaction_at",
-                (tenant_id, task_id, interaction_at),
-            )
-            return True
-
 
 class IntegrationStore:
     """Store non-secret integration metadata; secrets remain outside SQLite."""

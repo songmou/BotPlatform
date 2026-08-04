@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import hashlib
 import re
-import shutil
 import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -15,11 +14,13 @@ from typing import Any, Dict, List, Mapping, Optional
 from src.core.messaging.providers import channel_provider
 from src.core.services.resources import ScopedResourceStore
 from src.core.storage.organizations import OrganizationStore
-from src.core.paths import CONFIG_DIR
 
 
 CONTROL_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 CRON_FIELD = re.compile(r"^[0-9*/,-]+$")
+# Run history is diagnostic data; keep it bounded per organization.
+RUN_HISTORY_LIMIT = 500
+RUN_STATUSES = ("running", "succeeded", "failed", "skipped")
 
 
 class OrganizationControlError(ValueError):
@@ -91,233 +92,6 @@ class OrganizationControlStore:
                 "SELECT * FROM organization_runtime_revisions"
             ).fetchall()
         return {str(row["organization_id"]): dict(row) for row in rows}
-
-    def migrate_legacy_channels(
-        self,
-        organization_id: str,
-        channels: Mapping[str, Any],
-        actor_user_id: int,
-        credential_service: Any,
-    ) -> int:
-        """Import legacy global channel instances once into the default organization."""
-        migration_key = "v28:legacy-channels"
-        with self.database.read() as connection:
-            done = connection.execute(
-                "SELECT 1 FROM organization_data_migrations WHERE migration_key=?",
-                (migration_key,),
-            ).fetchone()
-        if done is not None:
-            return 0
-        from src.core.messaging.credentials import ChannelCredentialStore
-
-        legacy_credentials = ChannelCredentialStore()
-        config_path = CONFIG_DIR / "channels.json"
-        config_backup = config_path.with_suffix(config_path.suffix + ".pre-v28")
-        if config_path.exists() and not config_backup.exists():
-            shutil.copy2(config_path, config_backup)
-        migrated = 0
-        for channel_id, config in channels.items():
-            credential_path = legacy_credentials.path(str(channel_id))
-            credential_backup = credential_path.with_suffix(
-                credential_path.suffix + ".pre-v28"
-            )
-            if credential_path.exists() and not credential_backup.exists():
-                shutil.copy2(credential_path, credential_backup)
-            migration_error = ""
-            try:
-                credentials = legacy_credentials.load(
-                    str(channel_id), config.type, required=False
-                )
-            except Exception as exc:
-                credentials = None
-                migration_error = "旧渠道凭据校验失败：{}".format(exc)
-            if config.enabled and not credentials and not migration_error:
-                migration_error = "旧渠道缺少有效凭据，已暂停"
-            item = self.upsert_channel(
-                organization_id,
-                str(channel_id),
-                {
-                    "type": config.type,
-                    "agent_id": config.agent_id or self.config.app.default_agent,
-                    "enabled": bool(config.enabled) and not migration_error,
-                    "settings": dict(config.settings),
-                },
-                actor_user_id,
-            )
-            if credentials:
-                credential_service.put(
-                    organization_id,
-                    "channel:{}".format(channel_id),
-                    actor_user_id=actor_user_id,
-                    scope="organization",
-                    resource_type="channels",
-                    resource_id=item["channel_instance_id"],
-                    label="{} 渠道凭据".format(channel_id),
-                    secret=json.dumps(credentials, ensure_ascii=False),
-                    allow_platform_delegation=True,
-                )
-            if migration_error:
-                with self.database.transaction(immediate=True) as connection:
-                    connection.execute(
-                        "UPDATE organization_channels SET migration_error=? "
-                        "WHERE channel_instance_id=?",
-                        (migration_error, item["channel_instance_id"]),
-                    )
-            migrated += 1
-        with self.database.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO organization_data_migrations("
-                "migration_key, detail, applied_at) VALUES (?, ?, ?)",
-                (
-                    migration_key,
-                    "organization_id={};count={}".format(
-                        organization_id, migrated
-                    ),
-                    _now(),
-                ),
-            )
-        return migrated
-
-    def migrate_legacy_schedules(
-        self,
-        default_organization_id: str,
-        tasks: List[Any],
-        script_schedules: List[Any],
-        actor_user_id: int,
-    ) -> int:
-        """Import legacy subscriptions and approved script plans exactly once."""
-        migration_key = "v28:legacy-schedules"
-        with self.database.read() as connection:
-            done = connection.execute(
-                "SELECT 1 FROM organization_data_migrations WHERE migration_key=?",
-                (migration_key,),
-            ).fetchone()
-            if done is not None:
-                return 0
-            organization_ids = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT organization_id FROM organizations"
-                ).fetchall()
-            }
-            subscriptions = connection.execute(
-                "SELECT tenant_id, task_id, enabled FROM schedule_subscriptions"
-            ).fetchall()
-
-        by_task: Dict[str, List[Any]] = {}
-        for row in subscriptions:
-            by_task.setdefault(str(row["task_id"]), []).append(row)
-        imported: List[Dict[str, Any]] = []
-        for task in tasks:
-            action = {
-                key: value
-                for key, value in asdict(task.action).items()
-                if value not in (None, "", {})
-            }
-            if action.get("type") not in {"text", "agent_prompt", "script", "plugin"}:
-                continue
-            try:
-                dependency = self.dependency_revision(action)
-            except OrganizationControlError:
-                dependency = "migration-version-unavailable"
-            targets = by_task.get(task.id) or [None]
-            for subscription in targets:
-                organization_id = (
-                    str(subscription["tenant_id"])
-                    if subscription is not None
-                    and str(subscription["tenant_id"]) in organization_ids
-                    else default_organization_id
-                )
-                enabled = bool(
-                    subscription is not None
-                    and subscription["enabled"]
-                    and task.enabled
-                )
-                imported.append(
-                    {
-                        "organization_id": organization_id,
-                        "key": task.id,
-                        "enabled": enabled,
-                        "crons": task.crons or [task.cron],
-                        "action": action,
-                        "condition": asdict(task.condition) if task.condition else None,
-                        "dependency": dependency,
-                    }
-                )
-        for item in script_schedules:
-            organization_id = (
-                item.tenant_id
-                if item.tenant_id in organization_ids
-                else default_organization_id
-            )
-            imported.append(
-                {
-                    "organization_id": organization_id,
-                    "key": item.schedule_id,
-                    "enabled": bool(item.enabled),
-                    "crons": item.crons,
-                    "action": {
-                        "type": "script",
-                        "script_id": item.script_id,
-                        "parameters": item.parameters,
-                    },
-                    "condition": None,
-                    "dependency": item.authorized_sha256,
-                }
-            )
-        timestamp = _now()
-        with self.database.transaction(immediate=True) as connection:
-            for item in imported:
-                schedule_key = str(item["key"])
-                collision = connection.execute(
-                    "SELECT 1 FROM organization_schedules WHERE organization_id=? "
-                    "AND schedule_key=?",
-                    (item["organization_id"], schedule_key),
-                ).fetchone()
-                if collision is not None:
-                    schedule_key = "legacy_{}".format(schedule_key)[:64]
-                connection.execute(
-                    "INSERT OR IGNORE INTO organization_schedules("
-                    "schedule_id, organization_id, schedule_key, enabled, crons_json, "
-                    "target, action_json, condition_json, dependency_revision, revision, "
-                    "created_by, updated_by, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'last_active_user', ?, ?, ?, 1, ?, ?, ?, ?)",
-                    (
-                        str(uuid.uuid4()),
-                        item["organization_id"],
-                        schedule_key,
-                        1 if item["enabled"] else 0,
-                        json.dumps(item["crons"], ensure_ascii=False),
-                        json.dumps(item["action"], ensure_ascii=False),
-                        (
-                            json.dumps(item["condition"], ensure_ascii=False)
-                            if item["condition"] is not None
-                            else None
-                        ),
-                        item["dependency"],
-                        actor_user_id,
-                        actor_user_id,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-                self._bump(
-                    connection, item["organization_id"], "schedules_revision"
-                )
-            connection.execute("UPDATE schedule_subscriptions SET enabled=0")
-            connection.execute("UPDATE tenant_script_schedules SET enabled=0")
-            connection.execute(
-                "INSERT INTO organization_data_migrations("
-                "migration_key, detail, applied_at) VALUES (?, ?, ?)",
-                (
-                    migration_key,
-                    "default_organization_id={};count={}".format(
-                        default_organization_id, len(imported)
-                    ),
-                    timestamp,
-                ),
-            )
-        return len(imported)
 
     @staticmethod
     def _channel_row(row: Any, configured: bool = False) -> Dict[str, Any]:
@@ -755,6 +529,12 @@ class OrganizationControlStore:
                 None if status == "running" else timestamp,
             ),
         )
+        connection.execute(
+            "DELETE FROM organization_schedule_runs WHERE organization_id=? "
+            "AND run_id NOT IN (SELECT run_id FROM organization_schedule_runs "
+            "WHERE organization_id=? ORDER BY started_at DESC LIMIT ?)",
+            (organization_id, organization_id, RUN_HISTORY_LIMIT),
+        )
         return run_id
 
     def record_schedule_run(
@@ -777,10 +557,23 @@ class OrganizationControlStore:
                 run_id,
             )
 
-    def finish_schedule_run(self, run_id: str, status: str, detail: str) -> None:
+    def finish_schedule_run(
+        self,
+        run_id: str,
+        status: str,
+        detail: str,
+        script_run_id: Optional[str] = None,
+    ) -> None:
         if status not in {"succeeded", "failed", "skipped"}:
             raise OrganizationControlError("定时任务完成状态无效")
         with self.database.transaction(immediate=True) as connection:
+            if script_run_id:
+                connection.execute(
+                    "UPDATE organization_schedule_runs SET status=?, detail=?, "
+                    "finished_at=?, script_run_id=? WHERE run_id=?",
+                    (status, detail, _now(), script_run_id, run_id),
+                )
+                return
             connection.execute(
                 "UPDATE organization_schedule_runs SET status=?, detail=?, finished_at=? "
                 "WHERE run_id=?",
@@ -798,14 +591,63 @@ class OrganizationControlStore:
                 raise OrganizationControlError("定时任务不存在")
             self._bump(connection, organization_id, "schedules_revision")
 
+    @staticmethod
+    def _run_filters(
+        organization_id: str,
+        schedule_key: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> tuple[str, List[Any]]:
+        """Build the shared WHERE clause; the organization is never optional."""
+        clauses = ["r.organization_id=?"]
+        params: List[Any] = [organization_id]
+        if schedule_key:
+            clauses.append("s.schedule_key=?")
+            params.append(str(schedule_key))
+        if status:
+            if status not in RUN_STATUSES:
+                raise OrganizationControlError("定时任务运行状态无效")
+            clauses.append("r.status=?")
+            params.append(status)
+        return " WHERE " + " AND ".join(clauses), params
+
     def list_schedule_runs(
-        self, organization_id: str, limit: int = 100
+        self,
+        organization_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        schedule_key: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        where, params = self._run_filters(organization_id, schedule_key, status)
         with self.database.read() as connection:
             rows = connection.execute(
-                "SELECT r.*, s.schedule_key FROM organization_schedule_runs r "
-                "JOIN organization_schedules s ON s.schedule_id=r.schedule_id "
-                "WHERE r.organization_id=? ORDER BY r.started_at DESC LIMIT ?",
-                (organization_id, max(1, min(int(limit), 500))),
+                "SELECT r.*, s.schedule_key, s.action_json "
+                "FROM organization_schedule_runs r "
+                "JOIN organization_schedules s ON s.schedule_id=r.schedule_id"
+                + where
+                + " ORDER BY r.started_at DESC LIMIT ? OFFSET ?",
+                (*params, max(1, min(int(limit), 500)), max(0, int(offset))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            action = _loads(item.pop("action_json", "{}"), {})
+            item["action_type"] = str(action.get("type") or "")
+            item["script_id"] = str(action.get("script_id") or "")
+            items.append(item)
+        return items
+
+    def count_schedule_runs(
+        self,
+        organization_id: str,
+        schedule_key: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> int:
+        where, params = self._run_filters(organization_id, schedule_key, status)
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM organization_schedule_runs r "
+                "JOIN organization_schedules s ON s.schedule_id=r.schedule_id" + where,
+                tuple(params),
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0

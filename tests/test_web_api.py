@@ -165,7 +165,6 @@ def _make_config():
 class WebApiTest(unittest.TestCase):
     def setUp(self):
         from src.api.app import create_app
-        import src.api.routers.chat as chat_module
         from pathlib import Path
         from src.core.services.auth import AdminAuthService
         from src.core.storage.admin_users import (
@@ -218,16 +217,6 @@ class WebApiTest(unittest.TestCase):
             json={"username": "admin", "password": "password12345"},
         )
         assert response.status_code == 200, response.text
-
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        self._tmp.close()
-        os.remove(self._tmp.name)
-        self._patcher = patch.object(
-            chat_module, "CONVERSATIONS_FILE", type(chat_module.CONVERSATIONS_FILE)(self._tmp.name)
-        )
-        self._patcher.start()
-        self.addCleanup(self._patcher.stop)
-        self.addCleanup(lambda: os.path.exists(self._tmp.name) and os.remove(self._tmp.name))
 
     def _auth_params(self):
         return {}
@@ -801,7 +790,7 @@ class WebApiTest(unittest.TestCase):
     def test_unified_shell_versions_global_context_assets(self):
         response = self.client.get("/agents")
         self.assertEqual(response.status_code, 200)
-        self.assertIn('/static/js/common.js?v=20260801d', response.text)
+        self.assertIn('/static/js/common.js?v=20260803b', response.text)
         self.assertIn('/static/js/platform-catalog-client.js?v=20260801e', response.text)
         self.assertNotIn('/static/js/scoped-modules.js', response.text)
         self.assertNotIn('id="organization-switch"', response.text)

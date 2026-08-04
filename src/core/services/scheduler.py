@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -454,6 +455,18 @@ class SchedulerService:
             elif action_type == "script":
                 if self.script_service is None:
                     raise ValueError("平台脚本服务不可用")
+                # Integration secrets belong to the member, not the organization,
+                # so hand the script the personal tenant behind the active route.
+                resolver = getattr(
+                    address_store, "personal_tenant_for_endpoint", None
+                )
+                personal_tenant_id = (
+                    resolver(organization_id, endpoint.endpoint_id)
+                    if callable(resolver)
+                    else None
+                )
+                if personal_tenant_id:
+                    tenant = replace(tenant, personal_tenant_id=personal_tenant_id)
                 result = self.script_service.submit(
                     tenant,
                     str(action.get("script_id") or ""),
@@ -466,6 +479,7 @@ class SchedulerService:
                     run_id,
                     "skipped" if status == "skipped" else "succeeded",
                     "脚本任务已提交：{}".format(result.get("run_id", "-")),
+                    script_run_id=str(result.get("run_id") or "") or None,
                 )
                 return status != "skipped"
             elif action_type == "plugin":
@@ -499,7 +513,34 @@ class SchedulerService:
         except Exception as exc:
             controls.finish_schedule_run(run_id, "failed", str(exc))
             self.logger(schedule_key, "失败", str(exc), organization_id)
+            self._notify_organization_schedule_failure(
+                organization_id, item, str(exc)
+            )
             return False
+
+    def _notify_organization_schedule_failure(
+        self, organization_id: str, item: Dict[str, Any], detail: str
+    ) -> None:
+        """Surface organization schedule failures; scheduling stays enabled."""
+        if self.notification_service is None:
+            return
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            self.notification_service.enqueue_text_to_tenant(
+                organization_id,
+                "【组织定时任务】{} 执行失败。\n原因：{}\n"
+                "任务仍保持启用，修复后下次触发会自动恢复。".format(
+                    item.get("schedule_key", "-"), detail
+                ),
+                source_type="organization_schedule",
+                source_key="organization-schedule:{}:failed:{}".format(
+                    item.get("schedule_id", "-"), day
+                ),
+                attempt_immediately=True,
+            )
+        except Exception:
+            # Never let a notification issue mask the original failure.
+            pass
 
     def run_task(self, task: ScheduledTask) -> bool:
         tenants = self.schedule_store.enabled_tenants(task.id)

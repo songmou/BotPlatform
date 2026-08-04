@@ -120,20 +120,6 @@ class Database:
                 current = int(row[0])
                 if current > LATEST_SCHEMA_VERSION:
                     raise DatabaseError("数据库 schema 版本高于当前程序支持版本")
-                if current and current < LATEST_SCHEMA_VERSION:
-                    backup_path = self.path.with_name(
-                        "{}.pre-v{}{}".format(
-                            self.path.stem, LATEST_SCHEMA_VERSION, self.path.suffix
-                        )
-                    )
-                    if not backup_path.exists():
-                        backup = sqlite3.connect(str(backup_path))
-                        try:
-                            connection.backup(backup)
-                        finally:
-                            backup.close()
-                        if os.name != "nt":
-                            os.chmod(str(backup_path), 0o600)
                 for version in range(current + 1, LATEST_SCHEMA_VERSION + 1):
                     if version == 12:
                         self._migrate_v12(connection)

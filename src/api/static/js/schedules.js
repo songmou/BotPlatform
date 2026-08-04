@@ -288,8 +288,14 @@ function initScriptAutomation() {
     function renderScriptScheduleEnv(scriptId) {
         if (!window.EnvPanel) return;
         var container = document.getElementById("script-schedule-env-bindings");
-        if (!container) return;
-        window.EnvPanel.loadGlobalEnvBindings("script", scriptId, container);
+        if (container) {
+            window.EnvPanel.loadGlobalEnvBindings("script", scriptId, container);
+        }
+        if (window.CredentialPanel) {
+            var credContainer = document.getElementById("script-schedule-credential-bindings");
+            var tenantId = (typeof tenantSelect !== "undefined" && tenantSelect) ? tenantSelect.value : null;
+            window.CredentialPanel.loadScriptCredentials(scriptId, tenantId, credContainer);
+        }
     }
 
     function renderParameters(values) {

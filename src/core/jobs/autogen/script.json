@@ -14,5 +14,12 @@
       "flag": "--reset-story"
     }
   },
-  "artifact_types": ["image"]
+  "artifact_types": ["image"],
+  "env_allowlist": [
+    "SITE_BASE_URL",
+    "GENERATION_TIMEOUT_SECONDS",
+    "POLL_INTERVAL_SECONDS",
+    "HEADLESS",
+    "BROWSER_EXECUTABLE"
+  ]
 }

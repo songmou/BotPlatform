@@ -99,6 +99,29 @@ class PluginsToolsApiTest(WebApiTestBase):
         data = response.json()
         self.assertEqual(data["id"], "todo")
         self.assertEqual(data["tool_count"], len(data["tools"]))
+        # env_allowlist is always present, even when the manifest declares none.
+        self.assertIn("env_allowlist", data)
+        self.assertIsInstance(data["env_allowlist"], list)
+
+    def test_plugin_out_carries_declared_allowlist(self):
+        # A locally installed package manifest declaring env_allowlist must
+        # surface that list on the detail endpoint.
+        source = self._package(Path(self._file_dir.name) / "with_env")
+        manifest_path = source / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["env_allowlist"] = ["API_TOKEN", "PLUGIN_DEBUG"]
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+        )
+        installed = self.client.post(
+            "/api/plugins/install", json={"source_path": str(source)}
+        )
+        self.assertEqual(installed.status_code, 201, installed.text)
+        detail = self.client.get("/api/plugins/local_example")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(
+            detail.json()["env_allowlist"], ["API_TOKEN", "PLUGIN_DEBUG"]
+        )
 
     def test_get_unknown_plugin_404(self):
         response = self.client.get("/api/plugins/nonexistent")

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
+from src.core.config.datasource_secrets import merge_passwords
 from src.core.config.mcp_headers import merge_headers
 from src.core.modeling import ModelCapabilities
 from src.core.plugins.registry import (
@@ -91,8 +92,22 @@ BUILTIN_TOOL_NAMES = {
     "knowledge_search",
     "knowledge_list",
     "knowledge_delete",
+    "db_list_tables",
+    "db_describe_table",
+    "db_query",
+    "db_execute",
 }
 KNOWN_TOOL_NAMES = BUILTIN_TOOL_NAMES | plugin_tool_names()
+
+DATASOURCE_ENGINES = {"mysql", "postgresql"}
+
+_DATASOURCE_FIELDS = {
+    "id", "name", "engine", "host", "port", "database",
+    "username", "password", "options", "enabled", "read_only",
+    "connect_timeout_seconds", "statement_timeout_seconds",
+    "pool_size", "max_rows", "max_result_bytes",
+    "tables", "prompt_injection",
+}
 
 KNOWN_COMMAND_PROFILES = {
     "python",
@@ -176,6 +191,7 @@ class AgentPreset:
     plugin_tools: Dict[str, List[str]] = field(default_factory=dict)
     skills: List[str] = field(default_factory=list)
     mcp_servers: List[str] = field(default_factory=list)
+    datasources: List[str] = field(default_factory=list)
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: List[str] = field(default_factory=list)
@@ -298,6 +314,7 @@ class ProjectConfig:
     schedules: List[ScheduledTask]
     skills: List[Dict[str, Any]] = field(default_factory=list)
     mcp_servers: List[Dict[str, Any]] = field(default_factory=list)
+    datasources: List[Dict[str, Any]] = field(default_factory=list)
     channels: Dict[str, ChannelConfig] = field(default_factory=dict)
 
     def update_skills(self, skills: List[Dict[str, Any]]) -> None:
@@ -313,6 +330,12 @@ class ProjectConfig:
         """Validate and apply a runtime MCP server list update in place."""
         self.mcp_servers[:] = validate_mcp_server_entries(
             servers, "运行时 mcp_servers 更新"
+        )
+
+    def update_datasources(self, entries: List[Dict[str, Any]]) -> None:
+        """Validate and apply a runtime datasource list update in place."""
+        self.datasources[:] = validate_datasource_entries(
+            entries, "运行时 datasources 更新"
         )
 
     @property
@@ -848,7 +871,7 @@ def _load_agent(path: Path) -> AgentPreset:
     data = _load_json(path)
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
-        "capabilities", "tools", "plugin_tools", "skills", "mcp_servers", "model", "greeting",
+        "capabilities", "tools", "plugin_tools", "skills", "mcp_servers", "datasources", "model", "greeting",
         "greeting_hints", "temperature", "max_tokens", "enabled",
     }, path)
     enabled = data.get("enabled", True)
@@ -950,6 +973,18 @@ def _load_agent(path: Path) -> AgentPreset:
             raise _error(path, "mcp_servers", "不能包含重复服务：{}".format(server_id))
         mcp_servers.append(server_id)
 
+    raw_datasources = data.get("datasources", [])
+    if not isinstance(raw_datasources, list):
+        raise _error(path, "datasources", "必须是数组")
+    datasources: List[str] = []
+    for index, ds_id in enumerate(raw_datasources):
+        if not isinstance(ds_id, str) or not ds_id.strip():
+            raise _error(path, "datasources[{}]".format(index), "必须是非空字符串")
+        ds_id = ds_id.strip()
+        if ds_id in datasources:
+            raise _error(path, "datasources", "不能包含重复数据源：{}".format(ds_id))
+        datasources.append(ds_id)
+
     raw_greeting_hints = data.get("greeting_hints", [])
     if not isinstance(raw_greeting_hints, list):
         raise _error(path, "greeting_hints", "必须是数组")
@@ -985,6 +1020,7 @@ def _load_agent(path: Path) -> AgentPreset:
         plugin_tools=plugin_tools,
         skills=skills,
         mcp_servers=mcp_servers,
+        datasources=datasources,
         model=_optional_string(data, "model", path),
         greeting=_optional_string(data, "greeting", path),
         greeting_hints=greeting_hints,
@@ -1672,6 +1708,95 @@ def _load_mcp_servers(path: Path) -> List[Dict[str, Any]]:
     return merge_headers(servers)
 
 
+def validate_datasource_entries(entries: Any, source: Any) -> List[Dict[str, Any]]:
+    """Validate a raw datasource list; used at load time and on runtime updates."""
+    if not isinstance(entries, list):
+        raise _entry_error(source, "datasources", "必须是数组")
+    validated: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        field = "datasources[{}]".format(index)
+        if not isinstance(entry, dict):
+            raise _entry_error(source, field, "必须是对象")
+        unknown = sorted(set(entry) - _DATASOURCE_FIELDS)
+        if unknown:
+            raise _entry_error(source, field, "包含未知字段：{}".format("、".join(unknown)))
+        ds_id = _validated_entry_id(entry, field + ".id", source)
+        if ds_id in seen:
+            raise _entry_error(source, field + ".id", "不能重复：{}".format(ds_id))
+        seen.add(ds_id)
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise _entry_error(source, field + ".name", "必须是非空字符串")
+        engine = entry.get("engine")
+        if engine not in DATASOURCE_ENGINES:
+            raise _entry_error(
+                source,
+                field + ".engine",
+                "必须是 {} 之一".format("、".join(sorted(DATASOURCE_ENGINES))),
+            )
+        host = entry.get("host")
+        if not isinstance(host, str) or not host.strip():
+            raise _entry_error(source, field + ".host", "必须是非空字符串")
+        port = entry.get("port")
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            raise _entry_error(source, field + ".port", "必须是 1-65535 之间的整数")
+        database = entry.get("database")
+        if not isinstance(database, str) or not database.strip():
+            raise _entry_error(source, field + ".database", "必须是非空字符串")
+        username = entry.get("username")
+        if not isinstance(username, str):
+            raise _entry_error(source, field + ".username", "必须是字符串")
+        if "password" in entry and not isinstance(entry["password"], str):
+            raise _entry_error(source, field + ".password", "必须是字符串")
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise _entry_error(source, field + ".enabled", "必须是布尔值")
+        read_only = entry.get("read_only", True)
+        if not isinstance(read_only, bool):
+            raise _entry_error(source, field + ".read_only", "必须是布尔值")
+        for num_field in (
+            "connect_timeout_seconds", "statement_timeout_seconds",
+            "pool_size", "max_rows", "max_result_bytes",
+        ):
+            if num_field in entry:
+                val = entry[num_field]
+                if not isinstance(val, (int, float)) or val <= 0:
+                    raise _entry_error(source, field + "." + num_field, "必须是正数")
+        tables = entry.get("tables")
+        if tables is not None:
+            if not isinstance(tables, list):
+                raise _entry_error(source, field + ".tables", "必须是数组")
+            seen_tables: set[tuple[str, str]] = set()
+            for ti, tbl in enumerate(tables):
+                tf = field + ".tables[{}]".format(ti)
+                if not isinstance(tbl, dict):
+                    raise _entry_error(source, tf, "必须是对象")
+                t_schema = tbl.get("schema", "")
+                t_name = tbl.get("name")
+                if not isinstance(t_name, str) or not t_name.strip():
+                    raise _entry_error(source, tf + ".name", "必须是非空字符串")
+                key = (str(t_schema).lower() if t_schema else "", t_name.strip().lower())
+                if key in seen_tables:
+                    raise _entry_error(source, tf, "不能包含重复表")
+                seen_tables.add(key)
+                columns = tbl.get("columns")
+                if columns is not None and (
+                    not isinstance(columns, list)
+                    or any(not isinstance(c, str) for c in columns)
+                ):
+                    raise _entry_error(source, tf + ".columns", "必须是字符串数组")
+        validated.append(dict(entry))
+    return validated
+
+
+def _load_datasources(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = _load_json(path)
+    entries = validate_datasource_entries(data.get("datasources", []), path)
+    return merge_passwords(entries)
+
+
 def load_project_config(config_dir: Path) -> ProjectConfig:
     config_dir = config_dir.resolve()
     app = _load_app(config_dir / "app.json")
@@ -1682,8 +1807,10 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
     channels = _load_channels(config_dir / "channels.json")
     skills = _load_skills(config_dir / "skills.json")
     mcp_servers = _load_mcp_servers(config_dir / "mcp_servers.json")
+    datasources = _load_datasources(config_dir / "datasources.json")
     skill_ids = {s.get("id") for s in skills if isinstance(s, dict)}
     server_ids = {s.get("id") for s in mcp_servers if isinstance(s, dict)}
+    datasource_ids = {s.get("id") for s in datasources if isinstance(s, dict)}
     for agent in agents.values():
         unknown = sorted(set(agent.tools) - BUILTIN_TOOL_NAMES)
         if unknown:
@@ -1715,6 +1842,13 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
             raise ConfigError(
                 "Agent {} 引用了未知 MCP 服务：{}".format(
                     agent.id, "、".join(unknown_servers)
+                )
+            )
+        unknown_datasources = sorted(set(agent.datasources) - datasource_ids)
+        if unknown_datasources:
+            raise ConfigError(
+                "Agent {} 引用了未知数据源：{}".format(
+                    agent.id, "、".join(unknown_datasources)
                 )
             )
     if app.default_agent not in agents:
@@ -1833,5 +1967,6 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
         schedules=schedules,
         skills=skills,
         mcp_servers=mcp_servers,
+        datasources=datasources,
         channels=channels,
     )

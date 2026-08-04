@@ -45,6 +45,14 @@ def build_system_prompt(
                     manifest.name, manifest.instructions
                 )
     selected = set(agent.skills)
+    # -- Inject datasource schema block before the skills section --
+    ds_service = getattr(tool_runtime, "datasource_service", None) if tool_runtime else None
+    bound = list(getattr(agent, "datasources", []) or [])
+    if ds_service is not None and bound:
+        block = ds_service.prompt_block(bound)
+        if block:
+            prompt += "\n\n" + block
+    # -- End datasource injection --
     if not selected:
         return prompt
     for skill in skills:

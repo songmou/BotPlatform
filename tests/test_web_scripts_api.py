@@ -54,6 +54,55 @@ class ScriptsApiTest(WebApiTestBase):
         self.assertEqual(data["allowed_roots"], ["/tmp/scripts"])
         self.assertEqual(data["scripts"][0]["id"], "demo")
 
+    def test_list_scripts_includes_env_allowlist(self):
+        self.script_service.list_scripts.return_value = [
+            {
+                "id": "demo",
+                "name": "演示脚本",
+                "env_allowlist": ["API_TOKEN", "PLUGIN_DEBUG"],
+            }
+        ]
+        response = self.client.get("/api/scripts")
+        self.assertEqual(response.status_code, 200, response.text)
+        script = response.json()["scripts"][0]
+        self.assertEqual(script["env_allowlist"], ["API_TOKEN", "PLUGIN_DEBUG"])
+
+    def test_script_credentials_status(self):
+        self.script_service.integration_status.return_value = {
+            "integration_id": "ctsehr",
+            "requires_credentials": True,
+            "account_set": True,
+            "keychain_secret_set": False,
+            "ready": False,
+            "injected": ["ILINKBOT_INTEGRATION_ACCOUNT"],
+        }
+        tenant = self._make_tenant()
+        response = self.client.get(
+            "/api/scripts/ctsehr_check/credentials",
+            params={"tenant_id": tenant.tenant_id},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["integration_id"], "ctsehr")
+        self.assertTrue(data["account_set"])
+        self.assertFalse(data["keychain_secret_set"])
+        self.assertFalse(data["ready"])
+
+    def test_script_credentials_no_integration(self):
+        self.script_service.integration_status.return_value = None
+        response = self.client.get("/api/scripts/demo/credentials")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["requires_credentials"])
+
+    def test_script_credentials_unknown_script_404(self):
+        saved = self.script_service.definitions
+        self.script_service.definitions = {}
+        try:
+            response = self.client.get("/api/scripts/ghost/credentials")
+            self.assertEqual(response.status_code, 404)
+        finally:
+            self.script_service.definitions = saved
+
     def test_update_roots(self):
         self.script_registry.configure_roots.return_value = ["/srv/scripts"]
         response = self.client.put(

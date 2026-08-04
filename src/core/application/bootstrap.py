@@ -202,6 +202,7 @@ def build_bot_runtime(
             keychain_service=integration_service.keychain,
             external_registry=external_script_registry,
             env_resolver=env_resolver,
+            address_store=address_store,
         )
         script_schedule_service = ScriptScheduleService(
             tenant_registry,
@@ -227,6 +228,14 @@ def build_bot_runtime(
             mcp_manager = McpClientManager()
             mcp_manager.start()
             mcp_manager.reload(project_config.mcp_servers)
+
+        datasource_service = None
+        if project_config.datasources:
+            from src.core.datasource import DataSourceService
+
+            datasource_service = DataSourceService()
+            datasource_service.reload(project_config.datasources)
+
         tool_runtime = (
             ToolRuntime(
                 project_config.tools,
@@ -243,6 +252,7 @@ def build_bot_runtime(
                 drive_service=services.drive_service,
                 drive_audit_store=drive_audit_store,
                 resource_store=services.resource_store,
+                datasource_service=datasource_service,
             )
             if project_config.tools.enabled
             else None

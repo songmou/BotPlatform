@@ -158,6 +158,15 @@
                 </div>
                 <div id="script-schedule-env-bindings" class="env-bindings"></div>
             </div>
+            <div class="plugin-detail-section">
+                <div class="plugin-section-heading">
+                    <div>
+                        <h4 class="section-title">集成凭据</h4>
+                        <p>该脚本依赖平台集成（账户 + 密钥链）的凭据；未配置时定时执行会失败。</p>
+                    </div>
+                </div>
+                <div id="script-schedule-credential-bindings" class="env-bindings"></div>
+            </div>
             <label class="checkbox-label"><input id="script-schedule-enabled" type="checkbox" checked> 启用并授权无人值守执行</label>
             <div class="status-card">保存即确认当前脚本版本和参数；脚本内容变化后计划会自动暂停。</div>
             <div class="modal-footer"><button type="button" id="script-schedule-modal-cancel" class="btn-secondary">取消</button><button type="submit" class="btn-danger">确认并保存</button></div>
@@ -167,6 +176,7 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/js/env_panel.js"></script>
+<script src="/static/js/credential_panel.js"></script>
 <script src="/static/js/schedules.js"></script>
 <script>runScopedModule("schedules", function () { initScheduleTabs(); initSchedules(); initScriptAutomation(); });</script>
 {% endblock %}

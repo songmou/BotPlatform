@@ -24,6 +24,7 @@ APPROVAL_TOOLS = {
     "knowledge_index_file",
     "knowledge_delete",
     "drive_delete_file",
+    "db_execute",
 }
 
 
@@ -330,5 +331,74 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "drive_delete_file": {
         "description": "删除当前用户个人网盘中的文件或空目录，需要用户确认。",
         "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
+    },
+    "db_list_tables": {
+        "description": "列出当前智能体已授权数据源中的所有可查询表。请先使用此工具了解可用数据。",
+        "parameters": _object_schema(
+            {
+                "datasource_id": {
+                    "type": "string",
+                    "description": "数据源 ID，请从系统提示词中查找可用的数据源。",
+                },
+            },
+            ["datasource_id"],
+        ),
+    },
+    "db_describe_table": {
+        "description": "查看指定表的字段名、类型、注释与主键信息。表名来自 db_list_tables 返回结果。",
+        "parameters": _object_schema(
+            {
+                "datasource_id": {"type": "string"},
+                "table": {"type": "string", "description": "表名"},
+            },
+            ["datasource_id", "table"],
+        ),
+    },
+    "db_query": {
+        "description": (
+            "对已授权数据源执行只读 SELECT 查询。"
+            "仅允许单条 SELECT 语句，结果自动限制行数与字节数。"
+            "请先在系统提示词或 db_describe_table 中确认表结构后再编写 SQL。"
+        ),
+        "parameters": _object_schema(
+            {
+                "datasource_id": {"type": "string"},
+                "sql": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "要执行的 SELECT 语句",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "限制返回行数，默认使用数据源配置的上限",
+                },
+            },
+            ["datasource_id", "sql"],
+        ),
+    },
+    "db_execute": {
+        "description": (
+            "对已开启写权限的数据源执行单条 INSERT/UPDATE/DELETE 操作，需用户确认。"
+            "UPDATE 和 DELETE 必须包含 WHERE 条件。"
+            "请提供执行原因。"
+        ),
+        "parameters": _object_schema(
+            {
+                "datasource_id": {"type": "string"},
+                "sql": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "要执行的 INSERT/UPDATE/DELETE 语句",
+                },
+                "reason": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "执行原因，供用户审批时了解",
+                },
+            },
+            ["datasource_id", "sql", "reason"],
+        ),
     },
 }

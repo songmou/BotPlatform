@@ -310,20 +310,6 @@ class ToolStateUpdate(BaseModel):
     require_approval: Optional[bool] = None
 
 
-class ToolAuditOut(BaseModel):
-    id: int
-    ts: str
-    tenant_id: Optional[str] = None
-    session_id: Optional[str] = None
-    agent_id: Optional[str] = None
-    tool_name: str
-    status: str
-    duration_ms: int
-    output_bytes: int
-    args_hash: Optional[str] = None
-    error: Optional[str] = None
-
-
 class SkillOut(BaseModel):
     id: str
     name: str
@@ -485,15 +471,6 @@ class KnowledgeMoveIn(BaseModel):
     target_category_id: str
 
 
-class KnowledgeEmbeddingConfigIn(BaseModel):
-    id: str
-    enabled: bool
-    base_url: str
-    model: str
-    dimensions: int
-    timeout_seconds: float
-
-
 class KnowledgeEmbeddingStatusOut(BaseModel):
     bound: bool
     profile_id: Optional[str] = None
@@ -520,12 +497,6 @@ class DriveBreadcrumbOut(BaseModel):
     path: str
 
 
-class DriveListOut(BaseModel):
-    path: str
-    breadcrumbs: List[DriveBreadcrumbOut]
-    entries: List[DriveEntryOut]
-
-
 class DriveFolderIn(BaseModel):
     scope: str
     tenant_id: Optional[str] = None
@@ -542,16 +513,97 @@ class DriveEntryActionIn(BaseModel):
     target: str
 
 
-class DriveAuditOut(BaseModel):
-    id: int
-    ts: str
-    operator: str
-    source: str
-    scope: str
-    tenant_id: Optional[str] = None
-    action: str
-    path: str
-    target_path: Optional[str] = None
-    size_bytes: int
-    status: str
-    error: Optional[str] = None
+# ------------------------------------------------------------------ Datasource
+
+
+class DatasourceCreate(BaseModel):
+    id: str
+    name: str
+    engine: str
+    host: str
+    port: int
+    database: str
+    username: str = ""
+    password: str = ""
+    options: Optional[Dict[str, Any]] = None
+    enabled: bool = True
+    read_only: bool = True
+    connect_timeout_seconds: int = 5
+    statement_timeout_seconds: int = 15
+    pool_size: int = 3
+    max_rows: int = 200
+    max_result_bytes: int = 262144
+    tables: Optional[List[Dict[str, Any]]] = None
+    prompt_injection: Optional[Dict[str, Any]] = None
+
+
+class DatasourceUpdate(BaseModel):
+    name: Optional[str] = None
+    engine: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    database: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None  # null = keep unchanged
+    options: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+    read_only: Optional[bool] = None
+    connect_timeout_seconds: Optional[int] = None
+    statement_timeout_seconds: Optional[int] = None
+    pool_size: Optional[int] = None
+    max_rows: Optional[int] = None
+    max_result_bytes: Optional[int] = None
+    tables: Optional[List[Dict[str, Any]]] = None
+    prompt_injection: Optional[Dict[str, Any]] = None
+
+
+class DatasourceOut(BaseModel):
+    id: str
+    name: str
+    engine: str
+    host: str
+    port: int
+    database: str
+    username: str = ""
+    password: str = ""
+    password_set: bool = False
+    options: Optional[Dict[str, Any]] = None
+    enabled: bool = True
+    read_only: bool = True
+    connect_timeout_seconds: int = 5
+    statement_timeout_seconds: int = 15
+    pool_size: int = 3
+    max_rows: int = 200
+    max_result_bytes: int = 262144
+    tables: Optional[List[Dict[str, Any]]] = None
+    prompt_injection: Optional[Dict[str, Any]] = None
+    driver_ready: bool = False
+    driver_hint: str = ""
+
+
+class DatasourceStatusUpdate(BaseModel):
+    enabled: bool
+
+
+class DatasourceTestRequest(BaseModel):
+    engine: str
+    host: str
+    port: int
+    database: str
+    username: str = ""
+    password: str = ""
+    options: Optional[Dict[str, Any]] = None
+    connect_timeout_seconds: int = 5
+    statement_timeout_seconds: int = 15
+
+
+class DatasourceTestResponse(BaseModel):
+    ok: bool
+    latency_ms: int = 0
+    version: str = ""
+    error: str = ""
+
+
+class DatasourceQueryRequest(BaseModel):
+    sql: str
+    limit: Optional[int] = None

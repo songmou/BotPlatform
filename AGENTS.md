@@ -2,7 +2,7 @@
 
 本文件为 AI 智能体在本仓库中工作提供指引。
 
-BotPlatform 是一个轻量级的AI中台的项目，外加一个 FastAPI Web 管理面板。支持多租户，具备可审批的本机工具、知识库、记忆、定时任务、插件以及 MCP。
+BotPlatform 是一个轻量级的AI中台的项目，外加一个 FastAPI Web 管理面板。支持多租户，具备可审批的本机工具、知识库、记忆、定时任务、插件、MCP 以及数据库数据源。
 
 ## 导入根路径
 - 所有真实代码位于 `src.core.*`（bot/services/storage/tooling/…）与 `src.api.*`（Web 面板）之下。请从这些路径导入，**不要**从 `src.*` 导入。
@@ -37,3 +37,4 @@ BotPlatform 是一个轻量级的AI中台的项目，外加一个 FastAPI Web �
 - 内置工具是「名称→字典」的定义，分发到 `_tool_{name}` 方法（而非类）。一个智能体可用的工具 = 内置 + 插件 + MCP。
 - MCP：异步的 `mcp` SDK 通过一个后台事件循环线程桥接到同步运行时；每个服务器连接由一个专属的生命周期任务持有（anyio 要求 transport 的 cancel scope 在同一任务中开启和关闭）。MCP 工具名采用 `{server_id}__{tool_name}` 命名空间。
 - Skill 是注入到系统提示词中的提示片段；MCP 服务器则是真正的工具来源。
+- 数据库数据源（`config/datasources.json`）允许管理员配置 MySQL/PostgreSQL 连接，智能体通过 `AgentPreset.datasources` 绑定数据源。密码不落 config 文件（恒写空串），实际值存 `data/system/datasource_secrets.json`（KeychainService，0600）。SQL 只读校验由 `src/core/datasource/gateway.py` 使用 sqlglot AST 实现。运行时更新用 `config.update_datasources(...)` 列表切片就地替换，参照 `update_mcp_servers` 模式。

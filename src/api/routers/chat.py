@@ -42,7 +42,6 @@ from src.core.modeling.contracts import (
     ModelRequest,
 )
 from src.core.config.loader import AgentPreset, Capability
-from src.core.paths import SYSTEM_DATA_DIR
 from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
 from src.core.services.resources import ResourceError
 from src.core.storage.organizations import OrganizationError
@@ -54,9 +53,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 DEFAULT_TITLE = "新对话"
-# Kept as the source path for the one-time legacy migration. New writes use
-# the database-backed ``web_conversations`` table.
-CONVERSATIONS_FILE = SYSTEM_DATA_DIR / "web_conversations.json"
 
 
 def _agent_from_payload(resource_id: str, payload: dict) -> AgentPreset:

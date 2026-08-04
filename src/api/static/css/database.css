@@ -1,0 +1,291 @@
+/* Database datasource page styles.
+   Only database-specific styles — buttons, badges, modal, form, card grid
+   are all provided by app.css / plugins.css / tools.css. */
+
+/* ===== List ===== */
+#ds-list .plugin-tile-desc {
+    min-height: 2em;
+}
+
+#ds-list .ds-tile-engine {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+#ds-list .plugin-tile-actions {
+    display: flex;
+    gap: 8px;
+    padding-top: 12px;
+    margin-top: auto;
+    border-top: 1px solid var(--border);
+}
+
+#ds-list .plugin-tile-actions .btn-sm {
+    flex: 1;
+    justify-content: center;
+}
+
+/* ===== Detail: schema ===== */
+.ds-schema-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.ds-schema-head .section-title {
+    margin-bottom: 0;
+}
+
+.ds-schema-table {
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg);
+}
+
+.ds-schema-table-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.ds-schema-table-header small {
+    font-weight: normal;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.ds-schema-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.ds-schema-table th,
+.ds-schema-table td {
+    padding: 6px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.ds-schema-table th {
+    background: var(--bg-secondary);
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.ds-schema-table td code {
+    font-size: 12px;
+    background: var(--bg-secondary);
+    padding: 1px 5px;
+    border-radius: 3px;
+}
+
+.ds-schema-table td em {
+    color: var(--text-muted);
+    font-style: normal;
+}
+
+.ds-schema-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+/* ===== Detail: query ===== */
+.ds-query-area {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ds-query-area textarea {
+    width: 100%;
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 13px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    resize: vertical;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ds-query-area textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.ds-query-run-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ds-query-result {
+    margin-top: 12px;
+}
+
+.ds-query-result table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.ds-query-result th,
+.ds-query-result td {
+    padding: 6px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.ds-query-result th {
+    background: var(--bg-secondary);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.ds-query-result td em {
+    color: var(--text-muted);
+    font-style: normal;
+}
+
+.ds-query-result tbody tr:last-child td {
+    border-bottom: none;
+}
+
+/* ===== Detail: audit ===== */
+.ds-audit-entry {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    background: var(--bg);
+    overflow: hidden;
+}
+
+.ds-audit-entry summary {
+    cursor: pointer;
+    padding: 10px 14px;
+    display: grid;
+    grid-template-columns: auto 1fr auto auto auto;
+    gap: 12px;
+    align-items: center;
+    font-size: 13px;
+    list-style: none;
+}
+
+.ds-audit-entry summary::-webkit-details-marker {
+    display: none;
+}
+
+.ds-audit-entry summary::before {
+    content: "\25B8";
+    color: var(--text-muted);
+    font-size: 12px;
+    transition: transform 0.15s;
+}
+
+.ds-audit-entry[open] summary::before {
+    transform: rotate(90deg);
+}
+
+.ds-audit-entry .ds-audit-ts {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.ds-audit-entry .ds-audit-sql {
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ds-audit-entry .ds-audit-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.ds-audit-detail {
+    padding: 12px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.ds-audit-detail-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.ds-audit-detail-row span:first-child {
+    color: var(--text-muted);
+    min-width: 80px;
+}
+
+.ds-audit-detail-row code {
+    font-size: 11px;
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    word-break: break-all;
+}
+
+/* ===== Test result ===== */
+.ds-test-result {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+}
+
+/* Modal context: test result sits above the footer */
+#ds-modal .ds-test-result {
+    margin-bottom: 12px;
+}
+
+.ds-test-result.success {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+.ds-test-result.error {
+    background: #fce4ec;
+    color: #c62828;
+}
+
+[data-theme="dark"] .ds-test-result.error {
+    background: #3a1a1a;
+    color: #ef9a9a;
+}
+
+/* ===== Error message ===== */
+.ds-error-msg {
+    color: #c62828;
+    padding: 12px 14px;
+    background: #fce4ec;
+    border-radius: var(--radius);
+    font-size: 13px;
+}
+
+[data-theme="dark"] .ds-error-msg {
+    background: #3a1a1a;
+    color: #ef9a9a;
+}

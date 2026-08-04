@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 30
+LATEST_SCHEMA_VERSION = 32
 
 
 SCHEMA_V1 = r"""
@@ -206,16 +206,7 @@ CREATE INDEX IF NOT EXISTS ix_memory_tenant_status
 SCHEMA_V2 = "-- Retired legacy plugin schema."
 
 
-SCHEMA_V3 = r"""
-CREATE TABLE IF NOT EXISTS legacy_imports (
-    source_tenant_id TEXT PRIMARY KEY,
-    target_tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    imported_at TEXT NOT NULL,
-    details_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_legacy_imports_target
-    ON legacy_imports(target_tenant_id, imported_at);
-"""
+SCHEMA_V3 = "-- Retired legacy import bookkeeping."
 
 
 SCHEMA_V4 = "-- Retired legacy plugin schema."
@@ -1040,49 +1031,6 @@ CREATE TABLE IF NOT EXISTS web_conversations (
 CREATE INDEX IF NOT EXISTS ix_web_conversations_owner
     ON web_conversations(organization_id, user_id, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS scoped_resources (
-    resource_pk INTEGER PRIMARY KEY AUTOINCREMENT,
-    resource_type TEXT NOT NULL,
-    resource_id TEXT NOT NULL,
-    scope TEXT NOT NULL CHECK (scope IN ('public', 'organization')),
-    organization_id TEXT
-        REFERENCES organizations(organization_id) ON DELETE CASCADE,
-    base_resource_id TEXT,
-    revision INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL DEFAULT 'published' CHECK (
-        status IN ('draft', 'published', 'deprecated', 'disabled')
-    ),
-    payload_json TEXT NOT NULL,
-    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    CHECK (
-        (scope = 'public' AND organization_id IS NULL)
-        OR (scope = 'organization' AND organization_id IS NOT NULL)
-    ),
-    UNIQUE (resource_type, resource_id, scope, organization_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ix_scoped_resources_public
-    ON scoped_resources(resource_type, resource_id)
-    WHERE scope = 'public';
-CREATE INDEX IF NOT EXISTS ix_scoped_resources_org
-    ON scoped_resources(organization_id, resource_type, status);
-
-CREATE TABLE IF NOT EXISTS organization_resource_overrides (
-    organization_id TEXT NOT NULL
-        REFERENCES organizations(organization_id) ON DELETE CASCADE,
-    resource_type TEXT NOT NULL,
-    public_resource_id TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    list_modes_json TEXT NOT NULL DEFAULT '{}',
-    patch_json TEXT NOT NULL DEFAULT '{}',
-    base_revision INTEGER NOT NULL DEFAULT 1,
-    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (organization_id, resource_type, public_resource_id)
-);
-
 CREATE TABLE IF NOT EXISTS organization_agent_knowledge_categories (
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
@@ -1453,6 +1401,36 @@ CREATE TABLE IF NOT EXISTS tenant_env (
 """
 
 
+# Script actions only record the dispatch outcome; the real result lands in
+# script_runs. Keeping the script run id lets the panel follow that link.
+SCHEMA_V31 = r"""
+ALTER TABLE organization_schedule_runs ADD COLUMN script_run_id TEXT;
+"""
+
+
+SCHEMA_V32 = r"""
+CREATE TABLE IF NOT EXISTS datasource_query_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT,
+    agent_id TEXT,
+    session_id TEXT,
+    user_id INTEGER,
+    datasource_id TEXT NOT NULL,
+    statement_kind TEXT NOT NULL,
+    sql_text TEXT NOT NULL,
+    tables TEXT NOT NULL DEFAULT '',
+    row_count INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_datasource_query_audit_time
+    ON datasource_query_audit(datasource_id, created_at DESC);
+"""
+
+
 # Versions applied as plain SQL scripts. Specialized versions with inspection
 # or permission backfills are dispatched through dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
@@ -1484,4 +1462,6 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     28: SCHEMA_V28,
     29: SCHEMA_V29,
     30: SCHEMA_V30,
+    31: SCHEMA_V31,
+    32: SCHEMA_V32,
 }
