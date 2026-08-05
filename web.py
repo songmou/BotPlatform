@@ -234,7 +234,10 @@ def _run_combined(args) -> int:
                 return run_channel_loop(runtime, config)
             finally:
                 server.should_exit = True
-                server_thread.join(timeout=5.0)
+                try:
+                    server_thread.join(timeout=5.0)
+                except KeyboardInterrupt:
+                    pass
         finally:
             runtime.shutdown()
             services.close()

@@ -92,6 +92,12 @@ class OrganizationControlStore:
             ).fetchall()
         return {str(row["organization_id"]): dict(row) for row in rows}
 
+    def bump_channels_revision(self, organization_id: str) -> None:
+        """Trigger a channel runtime rebuild for externally updated credentials."""
+        self.organizations.get(organization_id)
+        with self.database.transaction(immediate=True) as connection:
+            self._bump(connection, organization_id, "channels_revision")
+
     def migrate_legacy_channels(
         self,
         organization_id: str,

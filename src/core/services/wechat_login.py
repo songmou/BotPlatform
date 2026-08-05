@@ -41,6 +41,7 @@ class WeChatLoginManager:
         client_factory: Callable[[], Any] = ILinkClient,
         credentials_saver: Callable[[Any, Any], None] = save_credentials,
         credentials_path: Optional[Any] = None,
+        connected_checker: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.channel_id = channel_id
         self.credentials_path = (
@@ -50,7 +51,8 @@ class WeChatLoginManager:
         )
         self._client_factory = client_factory
         self._save = credentials_saver
-        self._lock = threading.Lock()
+        self._connected_checker = connected_checker
+        self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._state = "idle"
         self._qr_data_url = ""
@@ -58,6 +60,11 @@ class WeChatLoginManager:
         self._bot_id = ""
 
     def is_connected(self) -> bool:
+        if self._connected_checker is not None:
+            try:
+                return bool(self._connected_checker())
+            except Exception:  # noqa: BLE001 - status polling must not fail
+                return False
         return self.credentials_path.exists()
 
     def status(self) -> Dict[str, Any]:

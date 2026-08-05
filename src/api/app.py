@@ -20,13 +20,13 @@ from src.api.routers import (
     auth,
     bots,
     chat,
+    connections,
     content_v2,
     drive,
     knowledge,
     models,
     mcp,
     plugins,
-    publish,
     scripts,
     schedules,
     skills,
@@ -50,7 +50,6 @@ def create_app(config, model_router, registry, conversation_store,
                script_service=None, script_registry=None,
                script_schedule_service=None,
                drive_service=None, drive_audit_store=None,
-               publish_store=None,
                channel_statuses=None,
                organization_store=None, resource_store=None,
                organization_control_store=None,
@@ -202,9 +201,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.script_schedule_service = script_schedule_service
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
-    from src.core.services.publish import PublishStore
-
-    app.state.publish_store = publish_store or PublishStore()
+    app.state.wechat_login_managers = {}
     app.state.channel_statuses = channel_statuses
     app.state.organization_store = organization_store
     app.state.resource_store = resource_store
@@ -304,7 +301,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(schedules.router)
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
-    app.include_router(publish.router)
+    app.include_router(connections.router)
     app.include_router(bots.channels_router)
     app.include_router(skills.router)
     app.include_router(scripts.router)

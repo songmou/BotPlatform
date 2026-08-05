@@ -33,11 +33,6 @@ from src.core.services.agent import AgentService
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService
-from src.core.services.publish import (
-    PLATFORM_WECHAT,
-    AgentBindingResolver,
-    PublishStore,
-)
 from src.core.services.script import ScriptService
 from src.core.services.notification import NotificationDispatcher, TenantRecipientStore
 from src.core.tooling import ApprovalRequired, ToolError
@@ -140,7 +135,6 @@ class MessageBot:
         integration_service: Optional[IntegrationService] = None,
         notification_dispatcher: Optional[NotificationDispatcher] = None,
         address_store: Optional[ChannelAddressStore] = None,
-        publish_store: Optional[PublishStore] = None,
         channel_configs: Optional[Dict[str, ChannelConfig]] = None,
     ) -> None:
         self.message_router = message_router
@@ -160,9 +154,6 @@ class MessageBot:
         self.memory_service = memory_service
         self.integration_service = integration_service
         self.notification_dispatcher = notification_dispatcher
-        self._binding_resolver = (
-            AgentBindingResolver(publish_store) if publish_store is not None else None
-        )
         self._approval_timer_lock = threading.Lock()
         self._approval_timers: Dict[str, Tuple[str, Any]] = {}
         self._deletion_pending: Dict[str, Tuple[str, datetime]] = {}
@@ -1015,24 +1006,6 @@ class MessageBot:
         if not text and not image_item:
             return
 
-        resolved_agent_id: Optional[str] = None
-        if (
-            self._binding_resolver is not None
-            and endpoint.platform == "wechat_ilink"
-        ):
-            routing = self._binding_resolver.resolve(
-                PLATFORM_WECHAT,
-                self._subject_key(subject),
-                "" if image_item else normalized_text,
-                self.agent_service.agents,
-            )
-            if routing.reply is not None:
-                self._log(self._direction("输入", endpoint), user_id, text)
-                self._reply(endpoint, routing.reply, tenant)
-                self._log(self._direction("输出", endpoint), user_id, routing.reply)
-                return
-            resolved_agent_id = routing.agent_id
-
         question = text or self.agent_service.image_prompt
         input_log = "[图片] {}".format(question) if image_item else question
         self._log(self._direction("输入", endpoint), user_id, input_log)
@@ -1048,10 +1021,7 @@ class MessageBot:
                     subject,
                     question,
                     image_bytes=image_bytes,
-                    agent_id=(
-                        resolved_agent_id
-                        or self._channel_agent_id(message.channel_id)
-                    ),
+                    agent_id=self._channel_agent_id(message.channel_id),
                     conversation_id=self._session_key(message),
                     allow_tools=message.conversation_type == DIRECT,
                     allow_private_context=message.conversation_type == DIRECT,

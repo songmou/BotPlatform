@@ -382,6 +382,22 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertGreaterEqual(version, 19)
             self.assertEqual(version, LATEST_SCHEMA_VERSION)
 
+    def test_v30_creates_personal_channel_connections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "botplatform.sqlite3")
+            with database.read() as connection:
+                table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='personal_channel_connections'"
+                ).fetchone()
+                version = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+
+            self.assertIsNotNone(table)
+            self.assertGreaterEqual(version, 30)
+            self.assertEqual(version, LATEST_SCHEMA_VERSION)
+
     def test_v11_creates_admin_tables_with_builtin_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "botplatform.sqlite3"

@@ -158,6 +158,7 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
             request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and path.startswith("/api/")
             and not path.startswith("/api/v2/")
+            and not path.startswith("/api/connections")
             and path != "/api/auth/logout"
             and not principal.allows("admins.manage")
         ):

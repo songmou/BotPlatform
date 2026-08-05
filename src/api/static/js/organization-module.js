@@ -216,19 +216,274 @@ function initOrganizationModule(requestedModule) {
         document.querySelectorAll('#organization-agent-plugin-tools input').forEach(function (box) { box.checked = ((payload.plugin_tools || {})[box.getAttribute("data-plugin-id")] || []).indexOf(box.value) >= 0; });
     }
 
+    function suggestChannelId(type) {
+        var existing = {};
+        (((state.data || {}).items) || []).forEach(function (item) { existing[item.id] = true; });
+        var base = type || "channel";
+        var candidate = base;
+        var n = 0;
+        while (existing[candidate]) { n += 1; candidate = base + "_" + n; }
+        return candidate;
+    }
+
+    var channelWechatTimer = null;
+
+    function stopChannelWechatPoll() {
+        if (channelWechatTimer) { clearTimeout(channelWechatTimer); channelWechatTimer = null; }
+    }
+
+    function channelWechatStatusHtml(status) {
+        if (status.state === "pending" || status.state === "scanned") {
+            var hint = status.state === "scanned" ? "已扫码，请在手机上确认…" : "打开微信，扫描二维码连接";
+            return (status.qr
+                ? '<img class="wechat-qr" src="' + status.qr + '" alt="微信登录二维码">'
+                : '<div class="wecom-qr-placeholder">正在生成二维码…</div>') +
+                '<p class="wechat-connect-hint">' + hint + "</p>";
+        }
+        if (status.connected || status.state === "success") {
+            return '<div class="wechat-connect-status">' +
+                '<span class="badge badge-success">机器人已连接</span>' +
+                (status.bot_id ? '<span class="text-muted"> bot_id: ' + escapeHtml(status.bot_id) + "</span>" : "") +
+                "</div>" +
+                '<p class="wechat-connect-hint">若在别处重新绑定了该微信号导致掉线，可点此重新扫码夺回连接。</p>' +
+                '<button type="button" class="btn-secondary" data-action="channel-wechat-login">重新扫码（换号/重连）</button>';
+        }
+        if (status.state === "failed") {
+            return '<div class="wechat-connect-status">' +
+                '<span class="badge badge-muted">机器人未连接</span></div>' +
+                (status.error ? '<p class="wechat-connect-error">' + escapeHtml(status.error) + "</p>" : "") +
+                '<button type="button" class="btn-primary" data-action="channel-wechat-login">刷新二维码</button>';
+        }
+        return '<div class="wechat-connect-status">' +
+            '<span class="badge badge-muted">机器人未连接</span></div>' +
+            '<button type="button" class="btn-primary" data-action="channel-wechat-login">扫码登录</button>';
+    }
+
+    function pollChannelWechatStatus(channelId, modalMode, onConnected) {
+        stopChannelWechatPoll();
+        var qrArea = document.getElementById("organization-channel-wechat-qr-area");
+        request(organizationApi("/channels/" + encodeURIComponent(channelId) + "/wechat/status")).then(function (status) {
+            if (!qrArea) return;
+            if (status.connected || status.state === "success") {
+                stopChannelWechatPoll();
+                if (modalMode && onConnected) {
+                    qrArea.innerHTML = '<div class="wechat-connect-status">' +
+                        '<span class="badge badge-success">扫码成功，正在启用机器人…</span></div>';
+                    onConnected(channelId);
+                    return;
+                }
+                qrArea.innerHTML = channelWechatStatusHtml(status);
+                showToast("微信已连接", "success");
+                return;
+            }
+            qrArea.innerHTML = channelWechatStatusHtml(status);
+            if (status.state === "pending" || status.state === "scanned") {
+                channelWechatTimer = setTimeout(function () {
+                    pollChannelWechatStatus(channelId, modalMode, onConnected);
+                }, 2000);
+            }
+        }).catch(function () {
+            if (qrArea) qrArea.innerHTML = '<div class="tool-empty">连接状态获取失败</div>';
+        });
+    }
+
+    function startChannelWechatLogin(channelId, modalMode, onConnected) {
+        var qrArea = document.getElementById("organization-channel-wechat-qr-area");
+        if (qrArea) qrArea.innerHTML = '<div class="wecom-qr-placeholder">正在生成二维码…</div>';
+        request(organizationApi("/channels/" + encodeURIComponent(channelId) + "/wechat/login"), { method: "POST" })
+            .then(function () { pollChannelWechatStatus(channelId, modalMode, onConnected); })
+            .catch(function (error) { showToast("启动扫码失败：" + error.message, "error"); });
+    }
+
     function channelDialog(current, creating) {
         current = current || {};
-        return showFormDialog({ title: creating ? "新建渠道" : "编辑渠道", fields: [
-            { name: "id", label: "渠道实例 ID", value: current.id || "", required: true },
-            { name: "type", label: "渠道类型", type: "select", value: current.type || "wecom_aibot", options: [{ value: "wecom_aibot", label: "企业微信智能机器人" }, { value: "feishu", label: "飞书" }, { value: "wechat_ilink", label: "微信" }] },
-            { name: "agent_id", label: "关联智能体 ID", value: current.agent_id || "general", required: true },
-            { name: "enabled", label: "启用渠道", type: "checkbox", value: current.enabled === true },
-            { name: "group_policy", label: "群聊策略", type: "select", value: (current.settings || {}).group_policy || "private_only", options: [{ value: "private_only", label: "仅私聊" }, { value: "mention_only", label: "仅被 @ 时响应" }] }
-        ]}).then(function (value) {
-            if (!value) return null;
-            value.settings = Object.assign({}, current.settings || {}, { group_policy: value.group_policy });
-            delete value.group_policy;
-            return value;
+        return request(organizationApi("/agents")).then(function (data) {
+            var modal = document.getElementById("organization-channel-modal");
+            var form = document.getElementById("organization-channel-form");
+            var typeSelect = document.getElementById("organization-channel-type");
+            var agentSelect = document.getElementById("organization-channel-agent");
+            var formPanel = document.getElementById("organization-channel-form-panel");
+            var bindPanel = document.getElementById("organization-channel-bind-panel");
+            var bindWechat = document.getElementById("organization-channel-bind-wechat");
+            var bindWecom = document.getElementById("organization-channel-bind-wecom");
+            var bindFeishu = document.getElementById("organization-channel-bind-feishu");
+            var qrArea = document.getElementById("organization-channel-wechat-qr-area");
+            var stepNext = document.getElementById("organization-channel-step-next");
+            var stepBack = document.getElementById("organization-channel-step-back");
+            var bindSave = document.getElementById("organization-channel-bind-save");
+            var submitBtn = form.querySelector('button[type="submit"]');
+            document.getElementById("organization-channel-modal-title").textContent = creating ? "新建渠道" : "编辑渠道";
+            var idInput = document.getElementById("organization-channel-id");
+            var idEdited = !creating;
+            typeSelect.disabled = false;
+            agentSelect.disabled = false;
+            idInput.value = current.id || suggestChannelId(current.type || "wecom_aibot");
+            idInput.disabled = !creating;
+            idInput.oninput = function () { idEdited = true; };
+            typeSelect.value = current.type || "wecom_aibot";
+            agentSelect.innerHTML = (data.items || []).map(function (item) {
+                var payload = item.payload || {};
+                return '<option value="' + escapeHtml(item.resource_id) + '">' +
+                    escapeHtml(payload.name || item.resource_id) + "</option>";
+            }).join("");
+            var wantedAgent = current.agent_id || "general";
+            if (!Array.prototype.some.call(agentSelect.options, function (option) { return option.value === wantedAgent; })) {
+                agentSelect.insertAdjacentHTML("beforeend", '<option value="' + escapeHtml(wantedAgent) + '">' +
+                    escapeHtml(wantedAgent) + "（已不可用）</option>");
+            }
+            agentSelect.value = wantedAgent;
+            document.getElementById("organization-channel-enabled").checked = current.enabled === true;
+            document.getElementById("organization-channel-group-policy").value =
+                (current.settings || {}).group_policy || "private_only";
+            document.getElementById("organization-channel-bot-id").value =
+                (creating ? "" : (current.bot_account_id || ""));
+            document.getElementById("organization-channel-secret").value = "";
+            modal.style.display = "";
+            var settled = false;
+            var pendingChannelId = null;
+            var credentialBound = false;
+            return new Promise(function (resolve) {
+                function unbind() {
+                    modal.style.display = "none";
+                    stopChannelWechatPoll();
+                    form.onsubmit = null;
+                    typeSelect.onchange = null;
+                    idInput.oninput = null;
+                    stepNext.onclick = null;
+                    stepBack.onclick = null;
+                    bindSave.onclick = null;
+                    document.getElementById("organization-channel-modal-cancel").onclick = null;
+                    document.getElementById("organization-channel-modal-close").onclick = null;
+                }
+                function close() {
+                    var pendingId = pendingChannelId;
+                    var bound = credentialBound;
+                    pendingChannelId = null;
+                    credentialBound = false;
+                    unbind();
+                    settle(null);
+                    if (creating && pendingId && !bound) {
+                        // The channel was saved but never bound; remove it so
+                        // cancelling the dialog does not leave an orphan.
+                        request(organizationApi("/channels/" + encodeURIComponent(pendingId)), { method: "DELETE" })
+                            .then(function () { refresh(); })
+                            .catch(function () {});
+                    }
+                }
+                function settle(value) {
+                    if (settled) return;
+                    settled = true;
+                    resolve(value);
+                }
+                function showStep(step) {
+                    document.querySelectorAll("[data-channel-tab]").forEach(function (button) {
+                        button.classList.toggle("active", button.getAttribute("data-channel-tab") === step);
+                    });
+                    formPanel.style.display = step === "form" ? "" : "none";
+                    bindPanel.style.display = step === "bind" ? "" : "none";
+                    var type = typeSelect.value;
+                    if (step === "bind") {
+                        bindWechat.style.display = type === "wechat_ilink" ? "" : "none";
+                        bindWecom.style.display = type === "wecom_aibot" ? "" : "none";
+                        bindFeishu.style.display = type === "feishu" ? "" : "none";
+                    }
+                    stepNext.style.display = step === "form" ? "" : "none";
+                    stepBack.style.display = step === "bind" ? "" : "none";
+                    bindSave.style.display = step === "bind" && type === "wecom_aibot" ? "" : "none";
+                    if (step === "form") {
+                        typeSelect.disabled = false;
+                        agentSelect.disabled = false;
+                        if (creating) idInput.disabled = false;
+                        submitBtn.textContent = "保存";
+                    }
+                }
+                function showConnectPhase(channelId) {
+                    pendingChannelId = channelId;
+                    credentialBound = false;
+                    typeSelect.disabled = true;
+                    agentSelect.disabled = true;
+                    idInput.disabled = true;
+                    showStep("bind");
+                    if (typeSelect.value === "wechat_ilink") {
+                        startChannelWechatLogin(channelId, true, autoConfirmWechat);
+                    }
+                }
+                function autoConfirmWechat(channelId) {
+                    stopChannelWechatPoll();
+                    request(organizationApi("/channels/" + encodeURIComponent(channelId) + "/wechat/confirm"), { method: "POST" })
+                        .then(function () {
+                            credentialBound = true;
+                            showToast("机器人已启用", "success");
+                            close();
+                        })
+                        .catch(function (error) { showToast("启用失败：" + error.message, "error"); });
+                }
+                function submitWecom(channelId) {
+                    var botId = document.getElementById("organization-channel-bot-id").value.trim();
+                    var secret = document.getElementById("organization-channel-secret").value.trim();
+                    if (!botId && !secret && !creating) {
+                        // Editing without touching credentials: just finish.
+                        close();
+                        return;
+                    }
+                    if (!botId || !secret) {
+                        showToast("请填写 Bot ID 和 Secret", "error");
+                        return;
+                    }
+                    bindSave.disabled = true;
+                    var originalText = bindSave.textContent;
+                    bindSave.textContent = "正在保存…";
+                    request(organizationApi("/channels/" + encodeURIComponent(channelId) + "/credentials"), {
+                        method: "PUT", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ credentials: { bot_id: botId, secret: secret } })
+                    }).then(function () {
+                        credentialBound = true;
+                        showToast("企微机器人凭证已保存", "success");
+                        close();
+                    }).catch(function (error) {
+                        bindSave.disabled = false;
+                        bindSave.textContent = originalText;
+                        showToast("凭证保存失败：" + error.message, "error");
+                    });
+                }
+                qrArea.addEventListener("click", function (event) {
+                    var button = event.target.closest('[data-action="channel-wechat-login"]');
+                    if (button && idInput.value) {
+                        startChannelWechatLogin(idInput.value.trim(), true, autoConfirmWechat);
+                    }
+                });
+                typeSelect.onchange = function () {
+                    if (creating && !idEdited) idInput.value = suggestChannelId(typeSelect.value);
+                };
+                document.getElementById("organization-channel-modal-cancel").onclick = close;
+                document.getElementById("organization-channel-modal-close").onclick = close;
+                stepNext.onclick = function () {
+                    if (!form.checkValidity()) { form.reportValidity(); return; }
+                    if (!agentSelect.value) { showToast("请选择关联智能体", "error"); return; }
+                    settle({
+                        payload: {
+                            id: idInput.value.trim(),
+                            type: typeSelect.value,
+                            agent_id: agentSelect.value,
+                            enabled: document.getElementById("organization-channel-enabled").checked,
+                            settings: Object.assign({}, current.settings || {}, {
+                                group_policy: document.getElementById("organization-channel-group-policy").value
+                            })
+                        },
+                        connect: showConnectPhase
+                    });
+                };
+                stepBack.onclick = function () {
+                    showStep("form");
+                };
+                form.onsubmit = function (event) {
+                    event.preventDefault();
+                    if (bindSave.style.display === "none") return;
+                    var channelId = idInput.value.trim();
+                    submitWecom(channelId);
+                };
+                showStep("form");
+            });
         });
     }
 
@@ -532,13 +787,23 @@ function initOrganizationModule(requestedModule) {
         return channelDialog(existing || {
             type: "wecom_aibot", agent_id: "general", enabled: false,
             settings: { group_policy: "private_only" }
-        }, !existing).then(function (payload) {
-            if (!payload) return null;
+        }, !existing).then(function (result) {
+            if (!result) return null;
+            var payload = result.payload;
+            if (payload.type === "feishu") {
+                result.connect(null);
+                return null;
+            }
             return request(organizationApi("/channels/" + encodeURIComponent(payload.id)), {
-            method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
+                method: "PUT", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            }).then(function (saved) {
+                if (!saved) return null;
+                refresh();
+                result.connect(saved.id || payload.id);
+                return saved;
             });
-        }).then(function (result) { return result ? refresh() : null; });
+        });
     }
 
     function createSchedule(existing) {
@@ -714,6 +979,7 @@ function initOrganizationModule(requestedModule) {
         }
         refresh();
     }).catch(function (error) {
+        console.error("organization module error:", error, error && error.stack);
         list.innerHTML = '<div class="organization-empty">' + escapeHtml(error.message) + "</div>";
     });
 }

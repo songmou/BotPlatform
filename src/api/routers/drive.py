@@ -74,10 +74,23 @@ def _bad_request(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=message)
 
 
+def _require_platform_admin(principal) -> None:
+    if not principal.allows("admins.manage"):
+        raise HTTPException(status_code=403, detail="仅平台管理员可访问组织内容")
+
+
+def _require_public_scope(principal, scope: str, tenant_id) -> None:
+    if principal.allows("admins.manage"):
+        return
+    if tenant_id or scope not in ("", "public"):
+        raise HTTPException(status_code=403, detail="仅平台管理员可访问组织内容")
+
+
 @router.get("/tenants")
 def list_drive_tenants(
     request: Request, principal=Depends(require_permission("drive.read"))
 ):
+    _require_platform_admin(principal)
     registry = get_registry(request)
     return [
         {
@@ -97,6 +110,7 @@ def list_drive_entries(
     path: str = Query(default=""),
     principal=Depends(require_permission("drive.read")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     service = _drive_service(request)
     try:
         return service.list_entries(scope, tenant_id or None, path)
@@ -111,6 +125,7 @@ def drive_usage(
     tenant_id: str = Query(default=""),
     principal=Depends(require_permission("drive.read")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     service = _drive_service(request)
     try:
         return service.usage(scope, tenant_id or None)
@@ -124,6 +139,7 @@ def create_drive_folder(
     request: Request,
     principal=Depends(require_permission("drive.manage")),
 ):
+    _require_public_scope(principal, body.scope, body.tenant_id)
     service = _drive_service(request)
     tenant_id = body.tenant_id or None
     try:
@@ -161,6 +177,7 @@ def upload_drive_file(
     file: UploadFile = File(...),
     principal=Depends(require_permission("drive.manage")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     service = _drive_service(request)
     tenant = tenant_id or None
     filename = (file.filename or "").strip()
@@ -202,6 +219,7 @@ def download_drive_file(
     path: str = Query(min_length=1),
     principal=Depends(require_permission("drive.read")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     service = _drive_service(request)
     tenant = tenant_id or None
     try:
@@ -243,6 +261,7 @@ def preview_drive_file(
     max_bytes: int = Query(default=MAX_PREVIEW_BYTES, ge=1),
     principal=Depends(require_permission("drive.read")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     service = _drive_service(request)
     try:
         return service.read_text(scope, tenant_id or None, path, max_bytes)
@@ -256,6 +275,7 @@ def update_drive_entry(
     request: Request,
     principal=Depends(require_permission("drive.manage")),
 ):
+    _require_public_scope(principal, body.scope, body.tenant_id)
     service = _drive_service(request)
     tenant_id = body.tenant_id or None
     if body.action not in ("rename", "move"):
@@ -299,6 +319,7 @@ def delete_drive_entry(
     recursive: bool = Query(default=False),
     principal=Depends(require_permission("drive.manage")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     service = _drive_service(request)
     tenant = tenant_id or None
     try:
@@ -330,6 +351,7 @@ def list_drive_audit(
     offset: int = Query(default=0, ge=0),
     principal=Depends(require_permission("drive.read")),
 ):
+    _require_public_scope(principal, scope or "*", tenant_id)
     store = get_drive_audit_store(request)
     if store is None:
         raise HTTPException(status_code=503, detail="网盘审计服务不可用")
