@@ -6,7 +6,7 @@ import json
 import logging
 import re
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from src.api.deps import get_config, require_permission
 from src.api.schemas import (
@@ -19,7 +19,6 @@ from src.api.schemas import (
     DatasourceQueryRequest,
 )
 from src.core.config.datasource_secrets import (
-    DATASOURCE_SECRETS_FILE,
     delete_password,
     merge_passwords,
     save_password,

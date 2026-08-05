@@ -8,7 +8,6 @@ from src.core.services.connections import (
     PersonalConnectionError,
     PersonalConnectionService,
 )
-from src.core.services.credentials import CredentialError
 
 from tests._web_api_base import WebApiTestBase
 

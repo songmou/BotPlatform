@@ -70,7 +70,7 @@ def _get_login_manager(
         manager = managers.get(connection_id)
         if manager is not None:
             return manager
-        service = _service(request)
+        _service(request)
         organization_id = detail["organization_id"]
         channel_id = detail["channel"]["id"]
         holder: Dict[str, Any] = {}

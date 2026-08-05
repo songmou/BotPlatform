@@ -174,7 +174,9 @@ def read_keychain_password(account: str, service: str) -> str:
     )
     password = completed.stdout.rstrip("\r\n")
     if completed.returncode != 0 or not password:
-        raise CredentialError("未能从 macOS 钥匙串读取 OA 密码，请在机器人私聊中使用 /integration setup ctsehr 配置凭据")
+        raise CredentialError(
+            "未能从 macOS 钥匙串读取 OA 密码，请在机器人私聊中使用 /integration setup ctsehr 配置凭据"
+        )
     return password
 
 

@@ -10,7 +10,6 @@ from contextlib import closing
 
 from fastapi.testclient import TestClient
 
-from src.core.modeling import CanonicalMessage
 from src.core.storage.organizations import OrganizationError
 from src.core.tooling.runtime import ToolRuntime
 from tests._web_api_base import WebApiTestBase
@@ -201,7 +200,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
 
     def test_public_agent_is_read_only_and_copy_is_a_snapshot(self):
         org_id, owner = self._create_owner("override")
-        public = self._publish_catalog(
+        self._publish_catalog(
             "agents",
             "shared_helper",
             {
@@ -226,7 +225,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(copied.status_code, 201, copied.text)
 
-        updated = self._publish_catalog(
+        self._publish_catalog(
             "agents",
             "shared_helper",
             {

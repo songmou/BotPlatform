@@ -9,11 +9,6 @@ from pathlib import Path
 from src.core.storage.database import (
     Database,
     LATEST_SCHEMA_VERSION,
-    SCHEMA_V1,
-    SCHEMA_V2,
-    SCHEMA_V3,
-    SCHEMA_V4,
-    SCHEMA_V5,
     SCHEMA_V25,
 )
 

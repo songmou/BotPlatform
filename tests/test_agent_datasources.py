@@ -23,7 +23,6 @@ import unittest
 from unittest.mock import patch
 
 import src.api.routers.agents as agents_module
-from src.api.routers.v2 import organization_agent_editor_options
 from src.core.config.loader import AgentPreset, Capability, ToolConfig
 from src.core.datasource.service import DataSourceService
 from src.core.services.agent_tools import resolve_tool_names

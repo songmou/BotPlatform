@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import shutil
 import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 from src.core.messaging.providers import channel_provider
+from src.core.paths import CONFIG_DIR
 from src.core.services.resources import ScopedResourceStore
 from src.core.storage.organizations import OrganizationStore
 

@@ -152,7 +152,7 @@ class ConnectionsApiTests(WebApiTestBase):
 
         from src.core.services.connections import PersonalConnectionService
 
-        service = PersonalConnectionService(
+        PersonalConnectionService(
             self.app.state.organization_store,
             self.app.state.organization_control_store,
             self.app.state.credential_service,
@@ -369,14 +369,13 @@ class ConnectionsApiTests(WebApiTestBase):
 
         from src.core.services.connections import PersonalConnectionService
 
-        service = PersonalConnectionService(
+        PersonalConnectionService(
             self.app.state.organization_store,
             self.app.state.organization_control_store,
             self.app.state.credential_service,
         )
 
-        owner_me = owner.get("/api/auth/me").json()
-        owner_user_id = int(owner_me["user"]["user_id"])
+        owner.get("/api/auth/me").json()
 
         holder = {}
         manager = WeChatLoginManager(

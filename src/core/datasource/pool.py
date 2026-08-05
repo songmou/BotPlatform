@@ -10,9 +10,8 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable
 
-from src.core.datasource.errors import DataSourceError
 
 logger = logging.getLogger(__name__)
 

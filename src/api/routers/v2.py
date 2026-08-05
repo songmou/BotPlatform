@@ -1519,9 +1519,6 @@ def set_typed_organization_agent_status(
     context = _organization_context(request, principal, organization_id)
     enabled = bool(body.get("enabled"))
     try:
-        current = get_resource_store(request).get_effective(
-            organization_id, "agents", agent_id
-        )
         if not enabled:
             enabled_agents = get_resource_store(request).effective_agent_presets(
                 organization_id
