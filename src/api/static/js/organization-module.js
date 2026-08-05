@@ -473,6 +473,7 @@ function initOrganizationModule(requestedModule) {
             setItems(data.items || [], function (item) {
                 var actions = "";
                 if (canWriteOrganization()) {
+                    actions += button("schedule-run", item.id, "执行");
                     actions += button("schedule-toggle", item.id, item.enabled ? "暂停" : "启用");
                     actions += button("schedule-edit", item.id, "编辑");
                     actions += button("schedule-delete", item.id, "删除", true);
@@ -829,6 +830,12 @@ function initOrganizationModule(requestedModule) {
             return ok ? request(organizationApi("/channels/" + encodeURIComponent(id)), { method: "DELETE" }) : null;
         });
         else if (action === "schedule-edit") return createSchedule(current).catch(function (e) { showToast(e.message, "error"); });
+        else if (action === "schedule-run") promise = request(organizationApi("/schedules/" + encodeURIComponent(id) + "/run"), {
+            method: "POST"
+        }).then(function (result) {
+            showToast("已触发执行", "success");
+            return result;
+        });
         else if (action === "schedule-toggle") promise = request(organizationApi("/schedules/" + encodeURIComponent(id) + "/status"), {
             method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !current.enabled })
         });

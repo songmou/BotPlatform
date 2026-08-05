@@ -22,7 +22,7 @@ from src.core.config.loader import (
     ScriptParameter,
     ToolConfig,
 )
-from src.core.config.mcp_headers import merge_headers
+from src.core.config.mcp_headers import delete_headers, merge_headers, save_headers
 from src.core.modeling import ModelCapabilities
 from src.core.storage.organizations import OrganizationStore
 from src.core.tooling.definitions import TOOL_DEFINITIONS
@@ -590,6 +590,15 @@ class ScopedResourceStore:
         status: str = "published",
     ) -> Dict[str, Any]:
         """Save and activate one public resource in a single operation."""
+        if resource_type == "mcp":
+            # MCP request headers carry secrets.  Persist them in the keychain
+            # (never the catalog DB) and store an empty shell, mirroring the
+            # legacy /api/mcp behaviour.  The runtime merges them back via
+            # merge_headers at read time.
+            headers = payload.get("headers")
+            if isinstance(headers, dict) and headers:
+                save_headers(resource_id, headers)
+                payload = {**payload, "headers": {}}
         draft = self.save_draft(resource_type, resource_id, payload, user_id)
         activation = self.publish(
             resource_type,
@@ -639,6 +648,8 @@ class ScopedResourceStore:
                     self._activation_handler(resource_type, resource_id, None, previous)
                 except Exception as exc:
                     raise ResourceError("运行时应用失败：{}".format(exc)) from exc
+            if resource_type == "mcp":
+                delete_headers(resource_id)
             with self.database.transaction(immediate=True) as connection:
                 deleted = connection.execute(
                     "DELETE FROM platform_resources WHERE resource_type=? AND resource_id=?",

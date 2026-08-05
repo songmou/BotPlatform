@@ -15,6 +15,7 @@ BotPlatform 是一个轻量级的AI中台的项目，外加一个 FastAPI Web �
 ## 配置：无热重载，冻结数据类
 - 修改 `config/*.json` 中的任何内容都需要完整重启进程 —— 没有热重载。
 - 内置后台脚本没有集中式配置文件：每个脚本是 `src/core/jobs/<目录>/` 下的自包含文件夹，由同目录的 `script.json` 清单声明，启动时自动扫描发现（无 `script.json` 的目录被忽略，可作共享辅助包）；`config/scripts.json` 已移除。
+- 脚本可声明「等待用户输入」：`write_script_result(..., await_input={"param": <脚本参数名>, "ttl_seconds": <秒>})`（见 `src/core/jobs/_common/script_result.py`）会让平台登记一个带 TTL 的 `PendingScriptInput`（`src/core/services/script_input.py`）。用户下一条私聊回复会被 `MessageBot._route_pending_script_input` 拦截，并直接带参重跑该脚本（resume），不再依赖大模型猜测。带图验证码（如 `ctsoa_check`）即用此机制；任何脚本都能复用，通用原语。
 - 改完代码后，务必确认已真正杀掉旧进程再重启（同端口上残留的旧服务是常见坑）。`web.py`/`uvicorn` 运行时不带 `--reload`。
 - `ProjectConfig` 及所有配置数据类都是 `@dataclass(frozen=True)`。若要在运行时更新 `config.skills`/`config.mcp_servers`（例如 API 写入后刷新），必须调用 `config.update_skills(...)` / `config.update_mcp_servers(...)` —— 它们会先用 loader 的校验规则验证，再就地替换列表内容（引用不变，持有者自动可见）。禁止用 `object.__setattr__` 绕过冻结校验；直接赋值会抛出 `FrozenInstanceError`。
 

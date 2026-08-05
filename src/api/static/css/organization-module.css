@@ -85,6 +85,11 @@
     color: #dc2626;
 }
 
+.organization-card-actions button[data-action="schedule-run"] {
+    color: #2563eb;
+    font-weight: 600;
+}
+
 .organization-pill {
     padding: 3px 7px;
     color: var(--text-secondary);

@@ -11,7 +11,13 @@ import traceback
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from src.api.deps import get_config, get_tool_runtime, require_permission
-from src.api.schemas import McpServerCreate, McpServerOut, McpServerUpdate
+from src.api.schemas import (
+    McpServerCreate,
+    McpServerOut,
+    McpServerUpdate,
+    McpTemplateAuth,
+    McpTemplateOut,
+)
 from src.core.config.loader import ConfigError
 from src.core.config.mcp_headers import (
     delete_headers,
@@ -26,6 +32,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 MCP_FILE = CONFIG_DIR / "mcp_servers.json"
+MCP_TEMPLATES_FILE = CONFIG_DIR / "mcp_templates.json"
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TRANSPORTS = {"stdio", "sse", "streamablehttp"}
 
@@ -79,6 +86,23 @@ def _save(servers: list) -> None:
     )
 
 
+def _load_templates() -> list:
+    """Load the curated MCP template catalog (a list of blueprint dicts)."""
+    if not MCP_TEMPLATES_FILE.exists():
+        return []
+    try:
+        data = json.loads(MCP_TEMPLATES_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("templates", [])
+    else:
+        return []
+    return [t for t in items if isinstance(t, dict) and t.get("key") and t.get("name")]
+
+
 def _ensure_manager(request: Request):
     tool_runtime = get_tool_runtime(request)
     if tool_runtime is None:
@@ -119,6 +143,24 @@ def _to_out(item: dict) -> McpServerOut:
         url=item.get("url"),
         headers=item.get("headers", {}),
         enabled=item.get("enabled", True),
+    )
+
+
+def _template_out(t: dict) -> McpTemplateOut:
+    auth = t.get("auth")
+    return McpTemplateOut(
+        key=t["key"],
+        name=t["name"],
+        description=t.get("description", ""),
+        category=t.get("category", ""),
+        transport=t.get("transport", "stdio"),
+        command=t.get("command"),
+        args=t.get("args", []),
+        env=t.get("env", {}),
+        url=t.get("url"),
+        icon=t.get("icon", ""),
+        auth=McpTemplateAuth(**auth) if isinstance(auth, dict) else None,
+        help_url=t.get("help_url"),
     )
 
 
@@ -163,6 +205,28 @@ def create_server(
     save_headers(body.id, body.headers)
     _sync(request, servers)
     return _to_out(item)
+
+
+@router.get("/templates", response_model=list[McpTemplateOut])
+def list_templates(
+    response: Response,
+    _principal=Depends(require_permission("panel.read")),
+):
+    """返回内置的 MCP 服务模板目录（蓝图，不含密钥）。"""
+    response.headers["Cache-Control"] = "no-store"
+    return [_template_out(t) for t in _load_templates()]
+
+
+@router.get("/templates/{key}", response_model=McpTemplateOut)
+def get_template(
+    key: str,
+    _principal=Depends(require_permission("panel.read")),
+):
+    """返回单个 MCP 服务模板；创建实例时可据此预填固定配置。"""
+    for t in _load_templates():
+        if t["key"] == key:
+            return _template_out(t)
+    raise HTTPException(status_code=404, detail="模板不存在")
 
 
 @router.put("/{server_id}", response_model=McpServerOut)

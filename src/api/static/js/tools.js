@@ -437,9 +437,28 @@ function initTools() {
     /* ---- MCP 服务 ---- */
     var mcpModal = document.getElementById("mcp-modal");
     var mcpEditingId = null;
+    var mcpTemplateAuth = null;
+    var mcpTemplatesCache = [];
+    var mcpTemplateModal = document.getElementById("mcp-template-modal");
+
+    document.getElementById("create-mcp-from-template-btn").addEventListener("click", function () {
+        loadMcpTemplates();
+        mcpTemplateModal.style.display = "";
+    });
+    document.getElementById("mcp-template-close").addEventListener("click", function () { mcpTemplateModal.style.display = "none"; });
+    mcpTemplateModal.addEventListener("click", function (e) { if (e.target === mcpTemplateModal) mcpTemplateModal.style.display = "none"; });
+    document.getElementById("mcp-template-list").addEventListener("click", function (e) {
+        var tile = e.target.closest("[data-template-key]");
+        if (!tile) return;
+        var key = tile.getAttribute("data-template-key");
+        var t = mcpTemplatesCache.filter(function (x) { return x.key === key; })[0];
+        if (t) openMcpTemplate(t);
+    });
 
     document.getElementById("create-mcp-btn").addEventListener("click", function () {
         mcpEditingId = null;
+        mcpTemplateAuth = null;
+        document.getElementById("mcp-secret-group").style.display = "none";
         document.getElementById("mcp-modal-title").textContent = "添加 MCP 服务";
         document.getElementById("mcp-id-group").style.display = "";
         document.getElementById("mcp-id").required = true;
@@ -493,6 +512,23 @@ function initTools() {
         var payload = { name: name, transport: transport, enabled: enabled };
         if (transport === "stdio") { payload.command = command; payload.args = args; }
         else { payload.url = url; payload.headers = headers; }
+        if (mcpTemplateAuth) {
+            var secretVal = document.getElementById("mcp-secret-value").value.trim();
+            if (!secretVal) { showToast((mcpTemplateAuth.label || "密钥") + "不能为空", "error"); return; }
+            if (mcpTemplateAuth.prefix && !secretVal.startsWith(mcpTemplateAuth.prefix)) {
+                secretVal = mcpTemplateAuth.prefix + secretVal;
+            }
+            if (mcpTemplateAuth.kind === "header") {
+                payload.headers = {};
+                payload.headers[mcpTemplateAuth.key] = secretVal;
+            } else if (mcpTemplateAuth.kind === "env") {
+                payload.env = {};
+                payload.env[mcpTemplateAuth.key] = secretVal;
+            } else if (mcpTemplateAuth.kind === "query") {
+                var sep = url.indexOf("?") >= 0 ? "&" : "?";
+                payload.url = url + sep + encodeURIComponent(mcpTemplateAuth.key) + "=" + encodeURIComponent(secretVal);
+            }
+        }
         var method, apiUrl;
         if (mcpEditingId) { method = "PUT"; apiUrl = "/api/mcp/" + encodeURIComponent(mcpEditingId); }
         else { method = "POST"; apiUrl = "/api/mcp"; payload.id = id; }
@@ -511,8 +547,85 @@ function initTools() {
             .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
     });
 
+    function loadMcpTemplates() {
+        var container = document.getElementById("mcp-template-list");
+        container.innerHTML = '<div class="empty-state">加载中…</div>';
+        fetch("/api/mcp/templates").then(function (r) {
+            if (!r.ok) { throw new Error("HTTP_" + r.status); }
+            return r.json();
+        }).then(function (templates) {
+            if (!Array.isArray(templates)) { throw new Error("bad_payload"); }
+            mcpTemplatesCache = templates;
+            if (!mcpTemplatesCache.length) { container.innerHTML = '<div class="empty-state">暂无可用模板</div>'; return; }
+            var byCat = {};
+            mcpTemplatesCache.forEach(function (t) {
+                var cat = t.category || "其他";
+                (byCat[cat] = byCat[cat] || []).push(t);
+            });
+            var html = "";
+            Object.keys(byCat).forEach(function (cat) {
+                html += '<div class="section-title">' + escapeHtml(cat) + "</div>";
+                html += byCat[cat].map(function (t) {
+                    var letter = (t.name || "?").trim().charAt(0).toUpperCase();
+                    var transport = t.transport === "stdio" ? "本地命令" : "远程服务";
+                    return '<div class="plugin-tile" data-template-key="' + escapeHtml(t.key) + '">' +
+                        '<div class="plugin-tile-header">' +
+                            '<div class="plugin-avatar" style="background:#6366f1">' + escapeHtml(letter) + "</div>" +
+                            '<div class="plugin-tile-info">' +
+                                '<div class="plugin-tile-name">' + escapeHtml(t.name) + "</div>" +
+                                '<div class="plugin-tile-meta"><span class="text-muted">' + escapeHtml(transport) + "</span></div>" +
+                            "</div>" +
+                        "</div>" +
+                        (t.description ? '<div class="plugin-tile-tags"><span class="tag">' + escapeHtml(t.category || "") + "</span></div>" : "") +
+                        (t.description ? '<div class="plugin-tile-desc">' + escapeHtml(t.description) + "</div>" : "") +
+                    "</div>";
+                }).join("");
+            });
+            container.innerHTML = html;
+        }).catch(function (e) {
+            var msg = "模板加载失败，请刷新页面重试";
+            if (e && e.message && e.message.indexOf("401") >= 0) { msg = "请先在面板登录后再试"; }
+            container.innerHTML = '<div class="empty-state">' + msg + '</div>';
+        });
+    }
+
+    function openMcpTemplate(t) {
+        mcpTemplateModal.style.display = "none";
+        mcpEditingId = null;
+        mcpTemplateAuth = t.auth || null;
+        document.getElementById("mcp-modal-title").textContent = "从模板创建：" + (t.name || "");
+        document.getElementById("mcp-id-group").style.display = "";
+        document.getElementById("mcp-id").required = true;
+        document.getElementById("mcp-form").reset();
+        document.getElementById("mcp-id").value = t.key || "";
+        document.getElementById("mcp-name").value = t.name || "";
+        document.getElementById("mcp-transport").value = t.transport || "stdio";
+        document.getElementById("mcp-command").value = t.command || "";
+        document.getElementById("mcp-args").value = (t.args || []).join(" ");
+        document.getElementById("mcp-url").value = t.url || "";
+        document.getElementById("mcp-enabled").checked = true;
+        document.getElementById("mcp-submit-btn").textContent = "创建实例";
+        toggleMcpTransport();
+        if (mcpTemplateAuth) {
+            document.getElementById("mcp-secret-group").style.display = "";
+            document.getElementById("mcp-secret-label").textContent = mcpTemplateAuth.label || "密钥";
+            document.getElementById("mcp-secret-value").value = "";
+            document.getElementById("mcp-secret-value").placeholder = mcpTemplateAuth.placeholder || "填写 Token / 密钥";
+            document.getElementById("mcp-secret-help").textContent = mcpTemplateAuth.help || "";
+            document.getElementById("mcp-headers-group").style.display = "none";
+        } else {
+            document.getElementById("mcp-secret-group").style.display = "none";
+            document.getElementById("mcp-headers-group").style.display = "none";
+        }
+        mcpModal.style.display = "";
+    }
+
     function loadMcpServers() {
-        fetch("/api/mcp").then(function (r) { return r.json(); }).then(function (servers) {
+        fetch("/api/mcp").then(function (r) {
+            if (!r.ok) { throw new Error("HTTP_" + r.status); }
+            return r.json();
+        }).then(function (servers) {
+            if (!Array.isArray(servers)) { throw new Error("bad_payload"); }
             var container = document.getElementById("mcp-list");
             if (!servers.length) { container.innerHTML = '<div class="empty-state">暂无 MCP 服务，点击"添加服务"创建</div>'; return; }
             container.innerHTML = servers.map(function (s) {
@@ -532,6 +645,11 @@ function initTools() {
                     '<div class="plugin-tile-tags">' + transportTag + "</div>" +
                 "</div>";
             }).join("");
+        }).catch(function (e) {
+            var container = document.getElementById("mcp-list");
+            var msg = "服务加载失败，请刷新页面重试";
+            if (e && e.message && e.message.indexOf("401") >= 0) { msg = "请先在面板登录后再试"; }
+            container.innerHTML = '<div class="empty-state">' + msg + '</div>';
         });
     }
 

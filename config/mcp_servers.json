@@ -10,6 +10,17 @@
       "url": "https://gw.songker.com/ctshub/mcp/demo",
       "headers": {},
       "enabled": true
+    },
+    {
+      "id": "tencent_docs",
+      "name": "腾讯文档",
+      "transport": "streamablehttp",
+      "command": null,
+      "args": [],
+      "env": {},
+      "url": "https://docs.qq.com/openapi/mcp",
+      "headers": {},
+      "enabled": true
     }
   ]
 }

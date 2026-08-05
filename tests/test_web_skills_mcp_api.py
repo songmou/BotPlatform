@@ -96,6 +96,46 @@ class McpApiTest(WebApiTestBase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        self.templates_file = Path(self._file_dir.name) / "mcp_templates.json"
+        self.templates_file.write_text(json.dumps({
+            "templates": [
+                {
+                    "key": "tencent_docs",
+                    "name": "腾讯文档",
+                    "description": "测试模板",
+                    "category": "文档协作",
+                    "transport": "streamablehttp",
+                    "url": "https://docs.qq.com/openapi/mcp",
+                    "auth": {
+                        "kind": "header",
+                        "key": "Authorization",
+                        "label": "Token",
+                        "secret": True,
+                        "help": "获取地址：https://docs.qq.com/open/auth/mcp.html",
+                    },
+                    "help_url": "https://docs.qq.com/open/auth/mcp.html",
+                },
+                {
+                    "key": "notion",
+                    "name": "Notion",
+                    "description": "stdio 模板",
+                    "category": "文档协作",
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@notionhq/notion-mcp-server"],
+                    "auth": {
+                        "kind": "env",
+                        "key": "NOTION_TOKEN",
+                        "label": "Integration Token",
+                        "secret": True,
+                    },
+                },
+            ]
+        }, ensure_ascii=False))
+        patcher = patch.object(mcp_module, "MCP_TEMPLATES_FILE", self.templates_file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _server(self, server_id="local_fs", **overrides):
         body = {
             "id": server_id,
@@ -201,3 +241,72 @@ class McpApiTest(WebApiTestBase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertFalse(response.json()["ok"])
+
+    def test_list_templates(self):
+        response = self.client.get("/api/mcp/templates")
+        self.assertEqual(response.status_code, 200, response.text)
+        keys = [t["key"] for t in response.json()]
+        self.assertIn("tencent_docs", keys)
+        self.assertIn("notion", keys)
+
+    def test_list_templates_empty_when_file_absent(self):
+        with patch.object(mcp_module, "MCP_TEMPLATES_FILE", Path(self._file_dir.name) / "nope.json"):
+            response = self.client.get("/api/mcp/templates")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_get_template_by_key(self):
+        response = self.client.get("/api/mcp/templates/tencent_docs")
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["key"], "tencent_docs")
+        self.assertEqual(data["transport"], "streamablehttp")
+        self.assertIsNotNone(data["auth"])
+        self.assertEqual(data["auth"]["key"], "Authorization")
+
+    def test_get_template_not_found(self):
+        response = self.client.get("/api/mcp/templates/missing")
+        self.assertEqual(response.status_code, 404)
+
+    def test_create_from_template_header_auth(self):
+        # 模拟前端从模板预填后提交（header 鉴权）
+        body = {
+            "id": "tencent_docs",
+            "name": "腾讯文档",
+            "transport": "streamablehttp",
+            "url": "https://docs.qq.com/openapi/mcp",
+            "headers": {"Authorization": "test-token"},
+            "enabled": True,
+        }
+        response = self.client.post("/api/mcp", json=body)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(self.config.mcp_servers[0]["id"], "tencent_docs")
+
+    def test_create_from_template_env_auth(self):
+        # 模拟前端从 stdio 模板预填后提交（env 鉴权）
+        body = {
+            "id": "notion",
+            "name": "Notion",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@notionhq/notion-mcp-server"],
+            "env": {"NOTION_TOKEN": "ntn_test"},
+            "enabled": True,
+        }
+        response = self.client.post("/api/mcp", json=body)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(self.config.mcp_servers[0]["id"], "notion")
+
+    def test_create_from_template_query_auth(self):
+        # 模拟前端从「高德地图」模板预填后提交（query 鉴权：Key 作为 URL 查询参数）
+        body = {
+            "id": "amap",
+            "name": "高德地图",
+            "transport": "streamablehttp",
+            "url": "https://mcp.amap.com/mcp?key=amap_test_key",
+            "enabled": True,
+        }
+        response = self.client.post("/api/mcp", json=body)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(self.config.mcp_servers[0]["id"], "amap")
+        self.assertEqual(self.config.mcp_servers[0]["url"], "https://mcp.amap.com/mcp?key=amap_test_key")

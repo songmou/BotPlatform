@@ -1892,7 +1892,7 @@ def run_typed_organization_schedule_now(
     principal=Depends(get_principal),
 ):
     """Trigger one organization schedule immediately for troubleshooting."""
-    _organization_context(request, principal, organization_id, minimum_role="admin")
+    _organization_context(request, principal, organization_id)
     store = get_organization_control_store(request)
     try:
         store.get_schedule(organization_id, schedule_key)

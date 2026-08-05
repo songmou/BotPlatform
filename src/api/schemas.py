@@ -371,6 +371,35 @@ class McpServerUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 
+class McpTemplateAuth(BaseModel):
+    """描述模板创建实例时用户必须补全的鉴权字段（绝不含密钥值）。"""
+
+    kind: str  # "header" / "env" / "query"
+    key: str  # 请求头名称、环境变量名或 URL 查询参数名，如 "Authorization" / "NOTION_TOKEN" / "key"
+    label: str  # 前端展示的字段名，如 "Token"
+    secret: bool = True  # 是否以掩码输入
+    placeholder: Optional[str] = None
+    help: Optional[str] = None
+    prefix: Optional[str] = None  # 写入密钥值前自动拼接的前缀，如 Bearer 类鉴权填 "Bearer "
+
+
+class McpTemplateOut(BaseModel):
+    """一个预设 MCP 服务模板（蓝图），不含任何密钥值。"""
+
+    key: str
+    name: str
+    description: str = ""
+    category: str = ""
+    transport: str = "stdio"
+    command: Optional[str] = None
+    args: List[str] = []
+    env: Dict[str, str] = {}
+    url: Optional[str] = None
+    icon: str = ""
+    auth: Optional[McpTemplateAuth] = None
+    help_url: Optional[str] = None
+
+
 class TenantOverviewOut(BaseModel):
     tenant_id: str
     bot_id: str

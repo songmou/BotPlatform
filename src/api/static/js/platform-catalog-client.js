@@ -92,7 +92,8 @@
         // Non-CRUD subresources (MCP debugging and plugin installation/setup)
         // stay on their specialised endpoints.
         if (tail && (tail.indexOf("tools/") >= 0 || tail.indexOf("setup") >= 0 ||
-            tail.indexOf("package") >= 0 || tail.indexOf("data") >= 0)) {
+            tail.indexOf("package") >= 0 || tail.indexOf("data") >= 0 ||
+            tail.indexOf("templates") === 0)) {
             return nativeFetch(input, options);
         }
         if (type === "agents" && tail === "active" && method === "GET") {
