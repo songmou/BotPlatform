@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- 环境变量与组织变量机制：脚本/插件通过清单 `env_allowlist` 声明所需变量名；平台维护全局环境变量，组织通过组织管理页的「组织环境变量」卡片按租户填写覆盖值（`tenant_env` 表，组织 > 全局）；脚本子进程按白名单重建环境，插件经 `PluginContext.env()` 注入以避免跨租户泄漏；保留名（`PATH`/`HOME`/`ILINKBOT_` 等）禁止声明；敏感凭据仍走集成凭据（Keychain）。
+- 「执行脚本」与「新建/编辑脚本计划」弹窗新增集成凭据就绪状态展示；`autogen_monitor` 声明非敏感 `env_allowlist`（SITE_BASE_URL 等）；管理面板「帮助文档」与 README、`docs/organization-multitenancy.md` 补充该机制说明。
 - 移除历史兼容代码：删除 pre-SQLite JSON 数据一次性迁移器（LegacyDataMigrator）、iLink 兼容适配器与机器人 legacy 轮询模式（MessageBot 现在只走渠道抽象）、`codex-hook` 入口分支、inbox 身份回填与 setup_keychain 占位脚本。
 - 智能体配置不再兼容旧式工具声明：插件工具写入 `tools` 数组会直接报配置错误，请改用 `plugin_tools`。
 

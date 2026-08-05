@@ -178,6 +178,16 @@ function initUsers() {
                                 subscriptions + "</section>" +
                             '<section class="tenant-detail-section"><h4>集成</h4>' +
                                 integrations + "</section>" +
+                            '<section class="tenant-detail-section" id="tenant-env-section">' +
+                                '<div class="tenant-section-title"><h4>环境变量</h4></div>' +
+                                '<div id="tenant-env-list" class="tenant-env-list"></div>' +
+                                '<form id="tenant-env-form" class="tenant-env-form">' +
+                                    '<input id="tenant-env-name" placeholder="变量名（大写字母/数字/下划线）" pattern="^[A-Z_][A-Z0-9_]*$" required>' +
+                                    '<input id="tenant-env-value" placeholder="变量值" type="text" required>' +
+                                    '<button type="submit" class="btn-secondary">保存变量</button>' +
+                                '</form>' +
+                                '<p class="form-hint">组织变量在脚本/插件运行时覆盖全局同名变量；敏感值仅以脱敏形式展示，写入不会触发重新审批。</p>' +
+                            '</section>' +
                         "</div>" +
                         '<section class="tenant-detail-section tenant-conversation-section">' +
                             '<div class="tenant-section-title"><h4>最近对话</h4><span>最近 ' +
@@ -185,11 +195,81 @@ function initUsers() {
                             conversations +
                         "</section>" +
                     "</div>";
+                loadTenantEnv(id);
             })
             .catch(function () {
                 body.innerHTML = '<div class="tenant-detail-error">加载用户详情失败，请稍后重试</div>';
                 showToast("加载详情失败", "error");
             });
+    }
+
+    function loadTenantEnv(id) {
+        var list = document.getElementById("tenant-env-list");
+        if (!list) return;
+        fetch("/api/tenants/" + encodeURIComponent(id) + "/env")
+            .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+            .then(function (data) {
+                var vars = data.variables || [];
+                if (!vars.length) {
+                    list.innerHTML = '<div class="tenant-section-empty">暂无组织环境变量</div>';
+                } else {
+                    list.innerHTML = '<table class="env-table"><thead><tr><th>变量名</th>' +
+                        "<th>值(脱敏)</th><th></th></tr></thead><tbody>" +
+                        vars.map(function (v) {
+                            return "<tr><td><code>" + escapeHtml(v.name) + "</code></td><td class=\"env-value\">" +
+                                escapeHtml(v.masked) + "</td><td>" +
+                                '<button type="button" class="btn-danger btn-sm tenant-env-del" data-name="' +
+                                escapeHtml(v.name) + '">删除</button></td></tr>';
+                        }).join("") + "</tbody></table>";
+                }
+                list.querySelectorAll(".tenant-env-del").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        deleteTenantEnv(id, btn.getAttribute("data-name"));
+                    });
+                });
+            })
+            .catch(function () {
+                list.innerHTML = '<div class="tenant-section-empty">加载失败</div>';
+            });
+
+        var form = document.getElementById("tenant-env-form");
+        if (form && !form.dataset.bound) {
+            form.dataset.bound = "1";
+            form.addEventListener("submit", function (event) {
+                event.preventDefault();
+                var name = document.getElementById("tenant-env-name").value.trim();
+                var value = document.getElementById("tenant-env-value").value;
+                if (!name) return;
+                fetch("/api/tenants/" + encodeURIComponent(id) + "/env/" + encodeURIComponent(name), {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ value: value })
+                }).then(function (r) {
+                    if (r.ok) {
+                        document.getElementById("tenant-env-name").value = "";
+                        document.getElementById("tenant-env-value").value = "";
+                        loadTenantEnv(id);
+                        showToast("已保存环境变量", "success");
+                    } else {
+                        r.json().then(function (e) {
+                            showToast("保存失败：" + (e.detail || "错误"), "error");
+                        }).catch(function () { showToast("保存失败", "error"); });
+                    }
+                }).catch(function () { showToast("保存失败", "error"); });
+            });
+        }
+    }
+
+    function deleteTenantEnv(id, name) {
+        showConfirm("删除环境变量 " + name + "？").then(function (ok) {
+            if (!ok) return;
+            fetch("/api/tenants/" + encodeURIComponent(id) + "/env/" + encodeURIComponent(name), {
+                method: "DELETE"
+            }).then(function (r) {
+                if (r.ok) { loadTenantEnv(id); showToast("已删除", "success"); }
+                else showToast("删除失败", "error");
+            }).catch(function () { showToast("删除失败", "error"); });
+        });
     }
 
     document.getElementById("tenant-detail-close").addEventListener("click", function () {

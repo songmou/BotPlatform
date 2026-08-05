@@ -601,6 +601,37 @@ class ChannelAddressStore:
             ).fetchone()
         return self._endpoint_from_row(row) if row is not None else None
 
+    def personal_tenant_for_endpoint(
+        self, tenant_id: str, endpoint_id: str
+    ) -> Optional[str]:
+        """Return the personal tenant behind one organization delivery endpoint.
+
+        Mirrors the derivation performed by ``resolve()`` so scheduled jobs see
+        the very same personal tenant an inbound chat message would produce.
+        """
+        if not tenant_id or not endpoint_id:
+            return None
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT identity.tenant_id AS identity_tenant_id, identity.user_id "
+                "FROM delivery_endpoints endpoint "
+                "JOIN channel_identities identity "
+                "ON identity.identity_id=endpoint.identity_id "
+                "WHERE endpoint.endpoint_id=?",
+                (endpoint_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["user_id"] is not None:
+            try:
+                return self.registry.member_personal_context(
+                    tenant_id, int(row["user_id"])
+                ).tenant_id
+            except (TenantStoreError, ValueError):
+                return None
+        identity_tenant_id = str(row["identity_tenant_id"])
+        return identity_tenant_id if identity_tenant_id != tenant_id else None
+
     def latest_endpoint_for_identity(
         self, identity_id: str, channel_id: str
     ) -> Optional[DeliveryEndpoint]:

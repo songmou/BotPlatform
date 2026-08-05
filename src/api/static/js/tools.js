@@ -24,7 +24,7 @@ function initTools() {
             var pane = document.getElementById("tools-pane-" + t);
             if (pane) pane.style.display = t === hash ? "" : "none";
         });
-        document.querySelectorAll(".nav-sub-item").forEach(function (el) {
+        document.querySelectorAll(".nav-sub-item[data-tab]").forEach(function (el) {
             el.classList.toggle("active", el.getAttribute("data-tab") === hash);
         });
         // Audit data is loaded lazily and refreshed on every tab entry.
@@ -330,6 +330,7 @@ function initTools() {
         skillEditingId = null;
         document.getElementById("skill-modal-title").textContent = "新建技能";
         document.getElementById("skill-id-group").style.display = "";
+        document.getElementById("skill-id").required = true;
         document.getElementById("skill-form").reset();
         document.getElementById("skill-enabled").checked = true;
         document.getElementById("skill-desc-count").textContent = "0";
@@ -408,6 +409,7 @@ function initTools() {
             skillEditingId = id;
             document.getElementById("skill-modal-title").textContent = "编辑技能";
             document.getElementById("skill-id-group").style.display = "none";
+            document.getElementById("skill-id").required = false;
             document.getElementById("skill-name").value = s.name;
             document.getElementById("skill-description").value = s.description;
             document.getElementById("skill-prompt").value = s.prompt;
@@ -441,6 +443,7 @@ function initTools() {
         mcpEditingId = null;
         document.getElementById("mcp-modal-title").textContent = "添加 MCP 服务";
         document.getElementById("mcp-id-group").style.display = "";
+        document.getElementById("mcp-id").required = true;
         document.getElementById("mcp-form").reset();
         document.getElementById("mcp-enabled").checked = true;
         document.getElementById("mcp-transport").value = "stdio";
@@ -537,6 +540,7 @@ function initTools() {
         mcpEditingId = s.id;
         document.getElementById("mcp-modal-title").textContent = "编辑 MCP 服务";
         document.getElementById("mcp-id-group").style.display = "none";
+        document.getElementById("mcp-id").required = false;
         document.getElementById("mcp-id").value = s.id;
         document.getElementById("mcp-name").value = s.name;
         document.getElementById("mcp-transport").value = s.transport;

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -37,6 +37,32 @@ def _tenant(request: Request, tenant_id: str):
         return get_registry(request).get(tenant_id)
     except TenantStoreError as exc:
         raise HTTPException(status_code=404, detail="租户不存在") from exc
+
+
+@router.get("/api/scripts/{script_id}/credentials")
+def script_credentials(
+    script_id: str,
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    principal=Depends(require_permission("scripts.read")),
+):
+    """Report the integration credential binding for a script.
+
+    Scripts backed by a platform integration (ctsehr/ctsoa/autogen) receive
+    their account/password from the per-tenant integration store and the
+    Keychain. This endpoint lets the web UI show whether those credentials
+    are configured for the selected tenant before a run or schedule.
+    """
+    scripts = get_script_service(request)
+    if scripts is None:
+        raise HTTPException(status_code=503, detail="脚本服务不可用")
+    definition = scripts.definitions.get(script_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="脚本不存在")
+    status = scripts.integration_status(tenant_id, script_id)
+    if status is None:
+        return {"requires_credentials": False}
+    return status
 
 
 @router.get("/api/scripts")

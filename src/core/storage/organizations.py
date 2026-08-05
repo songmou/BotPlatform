@@ -119,91 +119,6 @@ class OrganizationStore:
                     ),
                 )
 
-    def migrate_legacy_web_conversations(
-        self,
-        path: Path,
-        owner_user_id: int,
-        owner_username: str,
-    ) -> int:
-        """Copy the legacy global Web catalog into one member-owned debug space."""
-        if not path.exists():
-            return 0
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            items = payload.get("conversations", [])
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return 0
-        if not isinstance(items, list):
-            return 0
-
-        organization_id = self.ensure_debug_organization(
-            owner_user_id, owner_username
-        )
-        migrated = 0
-        timestamp = _now()
-        with self.database.transaction(immediate=True) as connection:
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                conversation_id = str(item.get("id") or "").strip()
-                if not conversation_id:
-                    continue
-                created_at = str(item.get("created_at") or timestamp)
-                updated_at = str(item.get("updated_at") or created_at)
-                inserted = connection.execute(
-                    "INSERT OR IGNORE INTO organization_conversations("
-                    "conversation_id, organization_id, creator_user_id, source, title, "
-                    "created_at, updated_at"
-                    ") VALUES (?, ?, ?, 'web', ?, ?, ?)",
-                    (
-                        conversation_id,
-                        organization_id,
-                        owner_user_id,
-                        str(item.get("title") or "新对话")[:100],
-                        created_at,
-                        updated_at,
-                    ),
-                )
-                if inserted.rowcount == 0:
-                    continue
-                migrated += 1
-                source = connection.execute(
-                    "SELECT tenant_id FROM tenants WHERE bot_id='web' "
-                    "AND user_id=? AND deleting=0",
-                    (conversation_id,),
-                ).fetchone()
-                if source is None:
-                    continue
-                source_id = str(source["tenant_id"])
-                session_key = "organization:{}".format(conversation_id)
-                connection.execute(
-                    "INSERT INTO conversation_context_messages("
-                    "tenant_id, role, content, created_at, session_key, user_id"
-                    ") SELECT ?, role, content, created_at, ?, ? "
-                    "FROM conversation_context_messages WHERE tenant_id=? "
-                    "ORDER BY message_id",
-                    (
-                        organization_id,
-                        session_key,
-                        owner_user_id,
-                        source_id,
-                    ),
-                )
-                connection.execute(
-                    "INSERT INTO conversation_events("
-                    "tenant_id, role, content, image, event_type, created_at, "
-                    "session_key, user_id"
-                    ") SELECT ?, role, content, image, event_type, created_at, ?, ? "
-                    "FROM conversation_events WHERE tenant_id=? ORDER BY event_id",
-                    (
-                        organization_id,
-                        session_key,
-                        owner_user_id,
-                        source_id,
-                    ),
-                )
-        return migrated
-
     def ensure_user(self, user_id: int, username: str = "") -> None:
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
@@ -392,14 +307,6 @@ class OrganizationStore:
         for row in personal_rows:
             self.registry.delete(self.registry.get(str(row["tenant_id"])))
         self.registry.delete(self.registry.get(organization_id))
-
-    def backup_and_delete(
-        self, organization_id: str
-    ) -> Path:
-        """Create a recoverable snapshot before deleting organization data."""
-        backup_root = self.backup_organization(organization_id)
-        self.delete_after_backup(organization_id)
-        return backup_root
 
     def create_invitation(
         self,

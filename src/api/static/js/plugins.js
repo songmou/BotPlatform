@@ -341,6 +341,11 @@ function initPlugins() {
             }).join("") || '<p class="text-muted">无工具定义</p>';
         renderSettings(plugin);
         renderSetupPanel(plugin);
+        if (window.EnvPanel) {
+            window.EnvPanel.loadGlobalEnvBindings(
+                "plugin", plugin.id, document.getElementById("plugin-env-bindings")
+            );
+        }
         document.getElementById("plugin-settings-json").textContent =
             JSON.stringify(plugin.settings || {}, null, 2);
         document.getElementById("plugin-remove-btn").style.display =

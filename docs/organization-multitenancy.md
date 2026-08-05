@@ -15,6 +15,7 @@
 - 插件包、本机脚本、工具引擎与 MCP 等能力只能由平台发布，组织不能覆盖或单独启停。
 - 组织可以新建智能体，或复制指定版本的平台智能体模板；复制后完全独立，不跟随模板升级。
 - 资源 JSON 禁止保存密钥字段；模型 Key、MCP 请求头和插件密钥继续保存在受限密钥存储。
+- 组织级环境变量（`tenant_env` 表）只保存**非敏感**的组织配置（如开关、URL、超时）；账户、密码等敏感凭据必须走受限密钥存储，不得写入组织环境变量。
 
 ## 资源解析
 
@@ -43,6 +44,15 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 外置密钥引用；密文值写入权限为 `0600` 的独立凭据存储，任何列表、详情、
 日志和审计响应都不会返回明文。Owner/Admin 可维护渠道凭据，成员只能维护并
 查看自己的个人业务集成凭据；成员退出与组织注销会同步清理对应的外置密钥。
+
+### 组织环境变量
+
+非敏感的组织级配置存于 `tenant_env` 表（`tenant_id` 主键 + `env_json`）。
+它由脚本/插件清单 `env_allowlist` 声明的变量名驱动：平台维护全局环境变量，
+组织维护同名覆盖值，运行时组织值优先于全局值（组织 > 全局）。变量值明文
+存储于权限 `0600` 的 SQLite，因此只适合非敏感配置；`PATH`、`HOME`、`LANG`、
+`AUTOGEN_ENV_FILE` 等系统变量与 `ILINKBOT_` 等运行时注入前缀被禁止声明。
+账户、密码等敏感凭据不在此存放，统一走受限密钥存储（见上文集成凭据）。
 历史组织级模型、插件与 MCP 凭据只保留只读迁移元数据，不参与运行。
 
 渠道命令：
@@ -83,7 +93,7 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 
 - `/api/v2/me`：账号、平台权限和组织成员关系列表，不返回当前或所选组织；
 - `/api/v2/catalog/*`：可见公共目录；
-- `/api/v2/platform/knowledge/*`、`/api/v2/platform/drive/*`：平台公共知识与公共文件管理；
+- `/api/v2/platform/knowledge/*`、`/api/v2/platform/drive/*`：平台公共知识与公共文件；
 - `/api/v2/orgs/{organization_id}/agents|channels|schedules|knowledge|drive|members|analytics|audit`：类型化组织能力；
 - `/api/v2/platform/catalog/{type}/{id}/draft|publish|rollback|activation`：平台目录版本与激活；
 - `/api/v2/platform/*`：组织管理和平台审计。
@@ -94,7 +104,7 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 自动补全 URL；多个组织且 URL 未指定时显示选择状态，不会静默选择首项。无权访问
 URL 中的组织直接返回 403。旧页面地址只进行 308 跳转。
 
-知识库与文件管理采用双入口：`/platform/knowledge`、`/platform/drive` 管理公共内容，
+知识库与文件库采用双入口：`/platform/knowledge`、`/platform/drive` 管理公共内容，
 `/organization/knowledge`、`/organization/drive` 管理 URL 指定组织的共享内容。
 组织成员可在组织页面浏览公共知识和公共文件，但公共内容始终只读；平台管理员需要
 代管具体组织时也必须通过带 `organization_id` 的组织页面进入并留下代管审计。

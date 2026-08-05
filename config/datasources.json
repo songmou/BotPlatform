@@ -1,0 +1,33 @@
+{
+  "datasources": [
+    {
+      "id": "localhost",
+      "name": "localhost",
+      "engine": "postgresql",
+      "host": "localhost",
+      "port": 5432,
+      "database": "VisionDev",
+      "username": "appuser",
+      "password": "",
+      "options": {},
+      "enabled": true,
+      "read_only": true,
+      "connect_timeout_seconds": 5,
+      "statement_timeout_seconds": 15,
+      "pool_size": 3,
+      "max_rows": 200,
+      "max_result_bytes": 262144,
+      "tables": [
+        {
+          "schema": "public",
+          "name": "AiTaskImages"
+        },
+        {
+          "schema": "public",
+          "name": "AiTaskVideos"
+        }
+      ],
+      "prompt_injection": {}
+    }
+  ]
+}

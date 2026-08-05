@@ -236,6 +236,12 @@ function initScripts() {
         document.getElementById("script-working-directory").value = value.working_directory || "";
         document.getElementById("script-concurrency").value = value.concurrency_scope || "global";
         document.getElementById("script-env").value = (value.env_allowlist || []).join("\n");
+        if (window.EnvPanel) {
+            window.EnvPanel.loadGlobalEnvBindings(
+                "script", item ? item.id : null,
+                document.getElementById("script-env-bindings")
+            );
+        }
         document.getElementById("script-parameters").value = JSON.stringify(value.parameters || {}, null, 2);
         document.getElementById("script-enabled").checked = value.enabled !== false;
         openModal(modal);
@@ -282,6 +288,16 @@ function initScripts() {
                 return '<option value="' + escapeHtml(item.tenant_id) + '">' +
                     escapeHtml(item.user_id + " / " + item.bot_id) + "</option>";
             }).join("") + "</select></div>" + parameterFields(script);
+        var credContainer = document.getElementById("script-run-credentials");
+        function refreshCred() {
+            var t = document.getElementById("run-tenant");
+            if (window.CredentialPanel && t) {
+                window.CredentialPanel.loadScriptCredentials(script.id, t.value, credContainer);
+            }
+        }
+        refreshCred();
+        var rt = document.getElementById("run-tenant");
+        if (rt) rt.addEventListener("change", refreshCred);
         document.getElementById("script-run-hint").innerHTML =
             "将执行已审核版本 <code>" + escapeHtml(script.sha256_short || "内置") +
             "</code>。真实发布不会自动串联预检。";
@@ -555,26 +571,19 @@ function initScripts() {
         event.preventDefault();
         var tenantId = document.getElementById("run-tenant").value;
         var params = collectRunParameters(document.getElementById("script-run-fields"));
-        var summary = "脚本：" + runningScript.name + "（" + runningScript.id + "）" +
-            "\n参数：" + JSON.stringify(params) +
-            "\n版本：" + (runningScript.sha256_short || "内置") +
-            "\n执行时间：立即执行\n是否无人值守：否";
-        showConfirm(summary + "\n\n确定执行吗？").then(function (ok) {
-            if (!ok) return;
-            var submitButton = document.querySelector("#script-run-form button[type='submit']");
-            setBusy(submitButton, true, "提交中…");
-            request("/api/scripts/" + encodeURIComponent(runningScript.id) + "/runs", {
-                method: "POST", headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({tenant_id: tenantId, parameters: params})
-            }).then(function (run) {
-                closeModal(runModal); showToast("已提交：" + run.run_id, "success");
-                document.getElementById("script-run-tenant").value = tenantId;
-                expandedRunId = run.run_id;
-                activateTab("runs", true);
-            }).catch(function (error) {
-                showToast("执行失败：" + error.message, "error");
-            }).finally(function () { setBusy(submitButton, false); });
-        });
+        var submitButton = document.querySelector("#script-run-form button[type='submit']");
+        setBusy(submitButton, true, "提交中…");
+        request("/api/scripts/" + encodeURIComponent(runningScript.id) + "/runs", {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({tenant_id: tenantId, parameters: params})
+        }).then(function (run) {
+            closeModal(runModal); showToast("已提交：" + run.run_id, "success");
+            document.getElementById("script-run-tenant").value = tenantId;
+            expandedRunId = run.run_id;
+            activateTab("runs", true);
+        }).catch(function (error) {
+            showToast("执行失败：" + error.message, "error");
+        }).finally(function () { setBusy(submitButton, false); });
     });
 
     document.getElementById("script-run-list").addEventListener("click", function (event) {

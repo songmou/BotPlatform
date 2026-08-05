@@ -113,6 +113,15 @@
                     <pre id="plugin-settings-json"></pre>
                 </details>
             </div>
+            <div class="plugin-detail-section">
+                <div class="plugin-section-heading">
+                    <div>
+                        <h4 class="section-title">环境变量</h4>
+                        <p>插件运行时按此处声明的名称注入变量（全局值见下，组织级覆盖在组织管理页配置）</p>
+                    </div>
+                </div>
+                <div id="plugin-env-bindings" class="env-bindings"></div>
+            </div>
         </div>
         <div class="modal-footer">
             <button id="plugin-clear-data-btn" class="btn-danger" type="button">清除数据</button>
@@ -153,6 +162,7 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/js/env_panel.js"></script>
 <script src="/static/js/plugins.js"></script>
 <script>initPlugins();</script>
 {% endblock %}

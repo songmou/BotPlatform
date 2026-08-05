@@ -154,6 +154,13 @@ def page_platform_mcp(
                  tools_tab="mcp")
 
 
+@router.get("/platform/database", response_class=HTMLResponse)
+def page_platform_database(
+    request: Request, _principal=Depends(require_permission("panel.read"))
+):
+    return _page(request, "database.html", "platform-database")
+
+
 @router.get("/platform/plugins", response_class=HTMLResponse)
 def page_platform_plugins(
     request: Request, _principal=Depends(require_permission("panel.read"))

@@ -227,7 +227,6 @@ class NotificationOutboxStore:
     ) -> None:
         self.registry = registry
         self.now_provider = now_provider
-        self.migrate_existing_events()
 
     @staticmethod
     def _iso(value: datetime) -> str:
@@ -344,77 +343,6 @@ class NotificationOutboxStore:
         if row is None:
             raise NotificationError("待办提醒入队失败")
         return dict(row)
-
-    def migrate_existing_events(self) -> int:
-        """Adopt due todo events created before the shared Outbox."""
-
-        now = self._iso(self.now_provider())
-        migrated = 0
-        with self.registry.database.transaction(immediate=True) as connection:
-            sources: List[Dict[str, Any]] = []
-            todo_rows = connection.execute(
-                "SELECT event.tenant_id, event.todo_number, event.due_at, "
-                "event.delivery_status, event.attempt_count, event.created_at, "
-                "event.last_error, todo.title FROM todo_reminder_events AS event "
-                "JOIN todos AS todo ON todo.tenant_id=event.tenant_id "
-                "AND todo.todo_number=event.todo_number "
-                "WHERE event.delivery_status IN ('pending','sending') "
-                "AND event.due_at<=? AND todo.status='pending' "
-                "AND todo.reminder_at=event.due_at",
-                (now,),
-            ).fetchall()
-            for row in todo_rows:
-                sources.append(
-                    {
-                        "sort_at": str(row["created_at"]),
-                        "tenant_id": str(row["tenant_id"]),
-                        "source_type": "todo",
-                        "source_key": "{}:{}".format(
-                            row["todo_number"], row["due_at"]
-                        ),
-                        "source_ref": str(row["todo_number"]),
-                        "text": "【待办提醒】T{:04d} {}".format(
-                            int(row["todo_number"]), row["title"]
-                        ),
-                        "status": "pending",
-                        "attempt_count": int(row["attempt_count"]),
-                        "next_attempt_at": None,
-                        "last_error": row["last_error"],
-                    }
-                )
-            for item in sorted(sources, key=lambda value: value["sort_at"]):
-                notification_id = str(uuid.uuid4())
-                inserted = connection.execute(
-                    "INSERT OR IGNORE INTO notification_outbox("
-                    "notification_id, tenant_id, batch_id, batch_position, "
-                    "source_type, source_key, source_ref, kind, text_payload, "
-                    "delivery_status, attempt_count, next_attempt_at, created_at, "
-                    "last_error) VALUES (?, ?, ?, 0, ?, ?, ?, 'text', ?, ?, ?, ?, ?, ?)",
-                    (
-                        notification_id,
-                        item["tenant_id"],
-                        notification_id,
-                        item["source_type"],
-                        item["source_key"],
-                        item["source_ref"],
-                        item["text"],
-                        item["status"],
-                        item["attempt_count"],
-                        item["next_attempt_at"],
-                        item["sort_at"],
-                        item["last_error"],
-                    ),
-                ).rowcount
-                if not inserted:
-                    continue
-                migrated += 1
-                if item["source_type"] == "todo":
-                    connection.execute(
-                        "UPDATE todo_reminder_events SET delivery_status='sending', "
-                        "updated_at=? WHERE tenant_id=? AND todo_number=?",
-                        (now, item["tenant_id"], int(item["source_ref"])),
-                    )
-        return migrated
 
     def claim_due(self, limit: int = 20) -> List[Dict[str, Any]]:
         now = self._iso(self.now_provider())

@@ -285,6 +285,19 @@ function initScriptAutomation() {
         });
     }
 
+    function renderScriptScheduleEnv(scriptId) {
+        if (!window.EnvPanel) return;
+        var container = document.getElementById("script-schedule-env-bindings");
+        if (container) {
+            window.EnvPanel.loadGlobalEnvBindings("script", scriptId, container);
+        }
+        if (window.CredentialPanel) {
+            var credContainer = document.getElementById("script-schedule-credential-bindings");
+            var tenantId = (typeof tenantSelect !== "undefined" && tenantSelect) ? tenantSelect.value : null;
+            window.CredentialPanel.loadScriptCredentials(scriptId, tenantId, credContainer);
+        }
+    }
+
     function renderParameters(values) {
         var selected = scripts.find(function (item) { return item.id === scriptSelect.value; });
         var specs = selected ? selected.parameters || {} : {};
@@ -397,11 +410,12 @@ function initScriptAutomation() {
         document.getElementById("script-schedule-crons").value = item ? item.crons.join("\n") : "";
         document.getElementById("script-schedule-enabled").checked = item ? item.enabled : true;
         renderParameters(item ? item.parameters : {});
+        renderScriptScheduleEnv(scriptSelect.value);
         modal.style.display = "";
     }
 
     tenantSelect.addEventListener("change", loadSchedules);
-    scriptSelect.addEventListener("change", function () { renderParameters(); });
+    scriptSelect.addEventListener("change", function () { renderParameters(); renderScriptScheduleEnv(scriptSelect.value); });
     document.getElementById("create-script-schedule-btn").addEventListener("click", function () {
         if (!tenants.length || !scripts.length) {
             showToast("需要先有机器人用户和已注册脚本", "error"); return;

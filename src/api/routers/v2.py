@@ -37,11 +37,17 @@ from src.core.services.credentials import CredentialError
 from src.core.services.organization_controls import OrganizationControlError
 from src.core.services.resources import ResourceError
 from src.core.storage.organizations import OrganizationError
-from src.core.messaging.providers import channel_provider, list_channel_providers
+from src.core.messaging.providers import (
+    build_channel_adapter,
+    channel_provider,
+    list_channel_providers,
+)
 from src.core.messaging import OutboundMessage
+from src.core.messaging.errors import MessagingError
+from src.core.config.loader import ChannelConfig
 from src.core.services.drive import MAX_PREVIEW_BYTES, MAX_UPLOAD_BYTES
 from src.core.plugins.registry import default_catalog
-from src.core.tooling.definitions import TOOL_DEFINITIONS
+from src.core.tooling.definitions import DATASOURCE_TOOLS, TOOL_DEFINITIONS
 
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
@@ -1138,7 +1144,7 @@ _FOUNDATION_TYPES = {"models", "tools", "skills", "plugins", "mcp", "scripts"}
 _CAPABILITY_SAFE_FIELDS = {
     "agents": {
         "id", "name", "role", "description", "system_prompt", "capabilities", "tools",
-        "plugin_tools", "skills", "mcp_servers", "model", "greeting",
+        "plugin_tools", "skills", "mcp_servers", "datasources", "model", "greeting",
         "greeting_hints", "enabled", "temperature", "max_tokens",
     },
     "models": {
@@ -1307,9 +1313,30 @@ def organization_agent_editor_options(
     }
     builtin = []
     for name, definition in TOOL_DEFINITIONS.items():
+        # db_* tools are granted exclusively through the 数据源 tab; never let
+        # them be picked à la carte from the built-in tool list.
+        if name in DATASOURCE_TOOLS:
+            continue
         builtin.append({
             "name": str(name),
             "description": str(definition.get("description") or ""),
+        })
+    config = getattr(request.app.state, "config", None)
+    datasource_options = []
+    for entry in (getattr(config, "datasources", None) or []):
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        if not entry.get("enabled", True):
+            continue
+        tables = entry.get("tables") or []
+        datasource_options.append({
+            "id": str(entry.get("id")),
+            "name": str(entry.get("name") or entry.get("id")),
+            "engine": str(entry.get("engine") or ""),
+            "database": str(entry.get("database") or ""),
+            "description": str(entry.get("description") or ""),
+            "read_only": bool(entry.get("read_only", True)),
+            "table_count": len(tables) if isinstance(tables, list) else 0,
         })
     return {
         "templates": [
@@ -1320,6 +1347,7 @@ def organization_agent_editor_options(
             if bool((item.get("payload") or {}).get("enabled", True))
         ],
         "builtin_tools": builtin,
+        "datasources": datasource_options,
         "plugins": _enabled_plugin_options(request),
         "skills": [
             _safe_catalog_item("skills", item) for item in public["skills"]
@@ -1877,18 +1905,55 @@ def test_typed_organization_channel(
     principal=Depends(get_principal),
 ):
     _organization_context(request, principal, organization_id)
+    store = get_organization_control_store(request)
     _reject_personal_channel(request, organization_id, channel_id)
     try:
-        channel = get_organization_control_store(request).get_channel(
-            organization_id, channel_id
-        )
+        channel = store.get_channel(organization_id, channel_id)
         secret = get_credential_service(request).secret_for_resource(
             organization_id, "channels", channel["channel_instance_id"]
         )
-        channel_provider(channel["type"]).validate_credentials(json.loads(secret))
+        credentials = json.loads(secret)
+        channel_provider(channel["type"]).validate_credentials(credentials)
+
+        # 用存储的凭据构建一个临时 adapter，并向最近一个收件人真实发送测试消息。
+        config = ChannelConfig(
+            id=channel["channel_instance_id"], type=channel["type"], enabled=True
+        )
+        adapter = build_channel_adapter(config, credentials)
+        try:
+            address_store = getattr(
+                getattr(request.app.state, "notification_service", None),
+                "address_store",
+                None,
+            )
+            endpoint = (
+                address_store.latest_endpoint(
+                    organization_id, channel_id=channel["channel_instance_id"]
+                )
+                if address_store is not None
+                else None
+            )
+            if endpoint is None:
+                return {
+                    "ok": True,
+                    "state": "credentials_valid",
+                    "detail": "凭据格式有效，但尚未发现可发送的收件人（请先在该渠道与机器人私聊一次后再测试）",
+                }
+            adapter.send(
+                endpoint,
+                OutboundMessage(text="这是来自 BotPlatform 的渠道连通性测试消息。"),
+            )
+        finally:
+            adapter.close()
     except (OrganizationControlError, CredentialError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "state": "credentials_valid", "detail": "渠道凭据格式有效"}
+    except MessagingError as exc:
+        raise HTTPException(status_code=400, detail="发送测试消息失败：{}".format(exc)) from exc
+    return {
+        "ok": True,
+        "state": "message_sent",
+        "detail": "测试消息已通过 {} 发送至 {}".format(channel["type"], endpoint.recipient_id),
+    }
 
 
 @router.delete("/orgs/{organization_id}/channels/{channel_id}")
@@ -1989,14 +2054,64 @@ def delete_typed_organization_schedule(
 def list_typed_organization_schedule_runs(
     organization_id: str,
     request: Request,
+    schedule_key: str = Query(default=""),
+    status: str = Query(default=""),
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     principal=Depends(get_principal),
 ):
     _organization_context(request, principal, organization_id)
-    return {
-        "items": get_organization_control_store(request).list_schedule_runs(
-            organization_id, limit
+    store = get_organization_control_store(request)
+    # The organization always comes from the path; clients never pass a tenant.
+    filters = {"schedule_key": schedule_key or None, "status": status or None}
+    try:
+        items = store.list_schedule_runs(
+            organization_id, limit=limit, offset=offset, **filters
         )
+        total = store.count_schedule_runs(organization_id, **filters)
+    except OrganizationControlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/orgs/{organization_id}/script-runs/{run_id}")
+def get_typed_organization_script_run(
+    organization_id: str,
+    run_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    """Expose the real script outcome behind a scheduled dispatch."""
+    _organization_context(request, principal, organization_id)
+    service = getattr(request.app.state, "script_service", None)
+    registry = getattr(request.app.state, "registry", None)
+    if service is None or registry is None:
+        raise HTTPException(status_code=503, detail="脚本服务不可用")
+    try:
+        return service.get_run(registry.get(organization_id), run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/orgs/{organization_id}/schedules/{schedule_key}/run")
+def run_typed_organization_schedule_now(
+    organization_id: str,
+    schedule_key: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    """Trigger one organization schedule immediately for troubleshooting."""
+    _organization_context(request, principal, organization_id, minimum_role="admin")
+    store = get_organization_control_store(request)
+    try:
+        store.get_schedule(organization_id, schedule_key)
+    except OrganizationControlError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="调度服务不可用")
+    return {
+        "ok": bool(scheduler.run_organization_schedule(organization_id, schedule_key))
     }
 
 

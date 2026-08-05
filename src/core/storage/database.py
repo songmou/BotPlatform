@@ -120,20 +120,6 @@ class Database:
                 current = int(row[0])
                 if current > LATEST_SCHEMA_VERSION:
                     raise DatabaseError("数据库 schema 版本高于当前程序支持版本")
-                if current and current < LATEST_SCHEMA_VERSION:
-                    backup_path = self.path.with_name(
-                        "{}.pre-v{}{}".format(
-                            self.path.stem, LATEST_SCHEMA_VERSION, self.path.suffix
-                        )
-                    )
-                    if not backup_path.exists():
-                        backup = sqlite3.connect(str(backup_path))
-                        try:
-                            connection.backup(backup)
-                        finally:
-                            backup.close()
-                        if os.name != "nt":
-                            os.chmod(str(backup_path), 0o600)
                 for version in range(current + 1, LATEST_SCHEMA_VERSION + 1):
                     if version == 12:
                         self._migrate_v12(connection)
@@ -147,6 +133,8 @@ class Database:
                         self._migrate_v24(connection)
                     elif version == 28:
                         self._migrate_v28(connection)
+                    elif version == 31:
+                        self._migrate_v31(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -372,6 +360,28 @@ WHERE EXISTS (
 );
 """.format(table=table)
         cls._apply_schema_script(connection, 28, script)
+
+    @classmethod
+    def _migrate_v31(cls, connection: sqlite3.Connection) -> None:
+        """Add script_run_id to schedule runs idempotently.
+
+        Guarded so re-running the migration (e.g. after schema_migrations rows
+        were trimmed during a test or a partial upgrade) does not raise a
+        duplicate-column error.
+        """
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(organization_schedule_runs)"
+            ).fetchall()
+        }
+        script = ""
+        if "script_run_id" not in columns:
+            script += (
+                "ALTER TABLE organization_schedule_runs "
+                "ADD COLUMN script_run_id TEXT;\n"
+            )
+        cls._apply_schema_script(connection, 31, script)
 
     @staticmethod
     def _migrate_v12(connection: sqlite3.Connection) -> None:

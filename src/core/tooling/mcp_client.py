@@ -152,10 +152,6 @@ class McpClientManager:
             conn = self._connections.get(cfg["id"])
             return list(conn.tools.keys()) if conn else []
 
-    def disconnect_server(self, server_id: str) -> None:
-        with self._lock:
-            self._disconnect_locked(server_id)
-
     def server_ids(self) -> List[str]:
         with self._lock:
             return list(self._connections.keys())

@@ -149,6 +149,24 @@
             <div class="form-group"><label for="script-schedule-script">脚本</label><select id="script-schedule-script"></select></div>
             <div class="form-group"><label for="script-schedule-crons">Cron（每行一个）</label><textarea id="script-schedule-crons" rows="3" placeholder="0 3 * * *" required></textarea><small>时区：Asia/Shanghai</small></div>
             <div id="script-schedule-parameters"></div>
+            <div class="plugin-detail-section">
+                <div class="plugin-section-heading">
+                    <div>
+                        <h4 class="section-title">环境变量</h4>
+                        <p>所选脚本声明的变量将在定时执行时注入（全局值见下，组织级覆盖在组织管理页配置）</p>
+                    </div>
+                </div>
+                <div id="script-schedule-env-bindings" class="env-bindings"></div>
+            </div>
+            <div class="plugin-detail-section">
+                <div class="plugin-section-heading">
+                    <div>
+                        <h4 class="section-title">集成凭据</h4>
+                        <p>该脚本依赖平台集成（账户 + 密钥链）的凭据；未配置时定时执行会失败。</p>
+                    </div>
+                </div>
+                <div id="script-schedule-credential-bindings" class="env-bindings"></div>
+            </div>
             <label class="checkbox-label"><input id="script-schedule-enabled" type="checkbox" checked> 启用并授权无人值守执行</label>
             <div class="status-card">保存即确认当前脚本版本和参数；脚本内容变化后计划会自动暂停。</div>
             <div class="modal-footer"><button type="button" id="script-schedule-modal-cancel" class="btn-secondary">取消</button><button type="submit" class="btn-danger">确认并保存</button></div>
@@ -157,6 +175,8 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/js/env_panel.js"></script>
+<script src="/static/js/credential_panel.js"></script>
 <script src="/static/js/schedules.js"></script>
 <script>runScopedModule("schedules", function () { initScheduleTabs(); initSchedules(); initScriptAutomation(); });</script>
 {% endblock %}

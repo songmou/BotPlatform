@@ -121,7 +121,10 @@
             </div>
             <div class="form-group"><label for="script-working-directory">工作目录（留空使用入口目录）</label><input id="script-working-directory"></div>
             <div class="form-group"><label for="script-concurrency">并发范围</label><select id="script-concurrency"><option value="global">全局互斥</option><option value="tenant">按用户互斥</option></select></div>
-            <div class="form-group"><label for="script-env">允许环境变量（每行一个名称）</label><textarea id="script-env" rows="2"></textarea></div>
+            <div class="form-group"><label for="script-env">允许环境变量（每行一个名称）</label><textarea id="script-env" rows="2"></textarea>
+                <div id="script-env-bindings" class="env-bindings"></div>
+                <small>运行时按此处声明的名称注入变量；全局值见下方绑定，组织级覆盖在组织管理页配置。</small>
+            </div>
             <div class="form-group"><label for="script-parameters">参数定义（JSON 对象）</label><textarea id="script-parameters" rows="8" class="code-input">{}</textarea></div>
             <label class="checkbox-label"><input id="script-enabled" type="checkbox" checked> 启用</label>
             <div class="modal-footer"><button type="button" id="script-modal-cancel" class="btn-secondary">取消</button><button id="script-save-button" class="btn-primary" type="submit">保存并信任当前版本</button></div>
@@ -134,6 +137,7 @@
         <div class="modal-header"><h3 id="script-run-title">执行脚本</h3><button id="script-run-close" class="modal-close-btn">&times;</button></div>
         <form id="script-run-form" class="modal-body">
             <div id="script-run-fields"></div>
+            <div id="script-run-credentials" class="env-bindings"></div>
             <div id="script-run-hint" class="run-version-hint"></div>
             <div class="modal-footer"><button type="button" id="script-run-cancel" class="btn-secondary">取消</button><button class="btn-danger" type="submit">确认执行</button></div>
         </form>
@@ -141,6 +145,8 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="/static/js/env_panel.js"></script>
+<script src="/static/js/credential_panel.js"></script>
 <script src="/static/js/scripts.js"></script>
 <script>initScripts();</script>
 {% endblock %}

@@ -719,53 +719,6 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(history.status_code, 200)
 
-    def test_legacy_web_conversation_migration_is_idempotent(self):
-        path = self.data_root / "legacy-web.json"
-        conversation_id = "legacy-conversation"
-        legacy = self.registry.resolve("web", conversation_id)
-        self.conversation_store.save_context(
-            legacy.tenant_id,
-            [
-                CanonicalMessage("user", "旧问题")
-            ],
-        )
-        path.write_text(
-            json.dumps(
-                {
-                    "conversations": [
-                        {
-                            "id": conversation_id,
-                            "title": "旧会话",
-                            "created_at": "2026-01-01T00:00:00+00:00",
-                            "updated_at": "2026-01-01T00:00:00+00:00",
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        root = self.admin_users.get_by_username("root")
-        store = self.app.state.organization_store
-        self.assertEqual(
-            store.migrate_legacy_web_conversations(
-                path, root.user_id, root.username
-            ),
-            1,
-        )
-        self.assertEqual(
-            store.migrate_legacy_web_conversations(
-                path, root.user_id, root.username
-            ),
-            0,
-        )
-        conversation = store.get_conversation(root.user_id, conversation_id)
-        messages = self.conversation_store.load_context(
-            conversation["organization_id"],
-            session_key="organization:{}".format(conversation_id),
-        )
-        self.assertEqual([item.content for item in messages], ["旧问题"])
-
     def test_owner_transfer_and_member_exit_lifecycle(self):
         org_id, owner = self._create_owner("lifecycle")
         member = self._invite_member(owner, org_id, "lifecycle")
@@ -1022,6 +975,99 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(saved.json()["scope_id"], org_a)
+
+    def _make_channel(self, org_id, owner, suffix):
+        channel = owner.put(
+            "/api/v2/orgs/{}/channels/main".format(org_id),
+            json={
+                "type": "wecom_aibot",
+                "agent_id": "general",
+                "enabled": False,
+                "settings": {"group_policy": "private_only"},
+            },
+        )
+        self.assertEqual(channel.status_code, 200, channel.text)
+        return channel.json()["channel_instance_id"]
+
+    def _configure_channel_credentials(self, org_id, owner):
+        saved = owner.put(
+            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+            json={"credentials": {"bot_id": "bot", "secret": "test-secret" + org_id}},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+
+    def test_channel_test_without_credentials_returns_400(self):
+        org_id, owner = self._create_owner("channel-test-nocred")
+        self._make_channel(org_id, owner, "channel-test-nocred")
+        response = owner.post(
+            "/api/v2/orgs/{}/channels/main/test".format(org_id)
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_channel_test_sends_message_to_latest_endpoint(self):
+        from unittest.mock import MagicMock, patch
+
+        from src.core.messaging.contracts import DeliveryEndpoint
+
+        org_id, owner = self._create_owner("channel-test-send")
+        channel_instance_id = self._make_channel(org_id, owner, "channel-test-send")
+        self._configure_channel_credentials(org_id, owner)
+
+        fake_adapter = MagicMock()
+        endpoint = DeliveryEndpoint(
+            channel_id=channel_instance_id,
+            platform="wecom_aibot",
+            account_id="bot",
+            conversation_type="direct",
+            conversation_id="user-1",
+            recipient_id="user-1",
+        )
+        address_store = MagicMock()
+        address_store.latest_endpoint.return_value = endpoint
+        self.app.state.notification_service = MagicMock()
+        self.app.state.notification_service.address_store = address_store
+
+        with patch(
+            "src.api.routers.v2.build_channel_adapter", return_value=fake_adapter
+        ):
+            response = owner.post(
+                "/api/v2/orgs/{}/channels/main/test".format(org_id)
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["state"], "message_sent")
+        self.assertIn("user-1", payload["detail"])
+        fake_adapter.send.assert_called_once()
+        sent_endpoint, sent_message = fake_adapter.send.call_args.args
+        self.assertEqual(sent_endpoint.recipient_id, "user-1")
+        self.assertIn("BotPlatform", sent_message.text)
+        fake_adapter.close.assert_called_once()
+
+    def test_channel_test_without_recipient_reports_valid_credentials(self):
+        from unittest.mock import MagicMock, patch
+
+        org_id, owner = self._create_owner("channel-test-norecip")
+        self._make_channel(org_id, owner, "channel-test-norecip")
+        self._configure_channel_credentials(org_id, owner)
+
+        fake_adapter = MagicMock()
+        address_store = MagicMock()
+        address_store.latest_endpoint.return_value = None
+        self.app.state.notification_service = MagicMock()
+        self.app.state.notification_service.address_store = address_store
+
+        with patch(
+            "src.api.routers.v2.build_channel_adapter", return_value=fake_adapter
+        ):
+            response = owner.post(
+                "/api/v2/orgs/{}/channels/main/test".format(org_id)
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["state"], "credentials_valid")
+        self.assertIn("收件人", payload["detail"])
+        fake_adapter.send.assert_not_called()
+        fake_adapter.close.assert_called_once()
 
 
 class ToolRuntimeThreadBindingTest(unittest.TestCase):

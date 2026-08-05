@@ -175,6 +175,8 @@ def _run_combined(args) -> int:
             print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
             return 1
 
+        datasource_service = getattr(runtime.tool_runtime, "datasource_service", None) if runtime.tool_runtime else None
+
         try:
             app = create_app(
                 config,
@@ -202,6 +204,7 @@ def _run_combined(args) -> int:
                 script_registry=runtime.external_script_registry,
                 script_schedule_service=runtime.script_schedule_service,
                 channel_statuses=runtime.channel_statuses,
+                datasource_service=datasource_service,
                 secure_cookies=args.behind_https,
                 owns_services=False,
             )
@@ -255,8 +258,9 @@ def _run_panel_only(args) -> int:
     from src.core.services.scheduler import SchedulerService
     from src.core.services.script import ScriptService
     from src.core.services.script_registry import ExternalScriptRegistry
+    from src.core.services.env_resolver import EnvResolver
     from src.core.services.script_schedule import ScriptScheduleService
-    from src.core.storage.tenants import TenantStoreError
+    from src.core.storage.tenants import TenantStoreError, SettingsStore
     from src.core.storage.tool_audit import ToolAuditStore
     from src.core.storage.drive_audit import DriveAuditStore
     from src.core.tooling import ToolRuntime
@@ -307,6 +311,8 @@ def _run_panel_only(args) -> int:
         SYSTEM_DATA_DIR / "script_registry.json",
         SYSTEM_DATA_DIR / "scripts.env",
     )
+    settings_store = SettingsStore(registry)
+    env_resolver = EnvResolver(settings_store, external_script_registry.global_values)
     script_service = ScriptService(
         config.scripts,
         credentials,
@@ -314,6 +320,7 @@ def _run_panel_only(args) -> int:
         PROJECT_ROOT,
         registry,
         external_registry=external_script_registry,
+        env_resolver=env_resolver,
     )
     script_schedule_service = ScriptScheduleService(
         registry,
@@ -331,6 +338,7 @@ def _run_panel_only(args) -> int:
         notification_service=notification_service,
         timezone=config.app.timezone,
         data_root=DATA_DIR / "plugins",
+        env_resolver=env_resolver,
     )
     plugin_manager = build_plugin_manager(
         config.plugins if config.tools.enabled else {},
@@ -349,6 +357,13 @@ def _run_panel_only(args) -> int:
         mcp_manager.start()
         mcp_manager.reload(config.mcp_servers)
 
+    datasource_service = None
+    if config.datasources:
+        from src.core.datasource import DataSourceService
+
+        datasource_service = DataSourceService()
+        datasource_service.reload(config.datasources)
+
     tool_runtime = (
         ToolRuntime(
             config.tools,
@@ -363,6 +378,7 @@ def _run_panel_only(args) -> int:
             mcp_manager=mcp_manager,
             drive_service=services.drive_service,
             drive_audit_store=drive_audit_store,
+            datasource_service=datasource_service,
         )
         if config.tools.enabled
         else None
@@ -422,6 +438,9 @@ def _run_panel_only(args) -> int:
         script_service=script_service,
         script_registry=external_script_registry,
         script_schedule_service=script_schedule_service,
+        settings_store=settings_store,
+        env_resolver=env_resolver,
+        datasource_service=datasource_service,
         secure_cookies=args.behind_https,
     )
 

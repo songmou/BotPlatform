@@ -92,6 +92,8 @@ class PluginManager:
             timezone=self.context.timezone,
             data_root=self.context.data_root if has_tenant_storage else None,
             plugin_id=manifest.id,
+            env_resolver=self.context.env_resolver,
+            env_allowlist=manifest.env_allowlist,
         )
 
     def _register(

@@ -128,9 +128,11 @@
                         <div id="knowledge-embedding-runtime" class="text-muted">—</div>
                     </div>
                 </div>
+                {% if resource_mode != 'organization' %}
                 <div class="knowledge-config-footer">
                     <a class="btn-primary" href="/models">前往模型管理</a>
                 </div>
+                {% endif %}
             </div>
             <aside class="knowledge-config-note">
                 <h4>配置说明</h4>

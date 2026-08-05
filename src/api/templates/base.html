@@ -13,8 +13,8 @@
             } catch (e) {}
         })();
     </script>
-    <link rel="stylesheet" href="/static/app.css?v=20260801e">
-    <link rel="stylesheet" href="/static/css/organization-module.css?v=20260804f">
+    <link rel="stylesheet" href="/static/app.css?v=20260804a">
+    <link rel="stylesheet" href="/static/css/organization-module.css?v=20260804b">
     {% block head %}{% endblock %}
 </head>
 <body data-module="{{ module|default('') }}"
@@ -70,18 +70,19 @@
                 <a href="/platform" class="nav-item {% if active == 'platform-overview' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg><span>平台概览</span></a>
                 <a href="/platform/models" class="nav-item {% if active == 'platform-models' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg><span>模型服务</span></a>
                 <a href="/platform/agent-templates" class="nav-item {% if active == 'platform-agents' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 9h8M8 13h5M8 17h4"/></svg><span>智能体模板</span></a>
-                <div class="nav-group {% if active in ['platform-tools', 'platform-skills', 'platform-mcp'] %}open{% endif %}">
-                    <a href="/platform/tools" class="nav-item nav-group-toggle {% if active in ['platform-tools', 'platform-skills', 'platform-mcp'] %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14.7 6.3 3 3M5 19l4.2-1.1L19 8.1a2.1 2.1 0 0 0-3-3l-9.8 9.8z"/><path d="m4 20 5-1"/></svg><span>系统工具</span><span class="nav-arrow">⌄</span></a>
+                <div class="nav-group {% if active in ['platform-tools', 'platform-skills', 'platform-mcp', 'platform-database'] %}open{% endif %}">
+                    <a href="/platform/tools" class="nav-item nav-group-toggle {% if active in ['platform-tools', 'platform-skills', 'platform-mcp', 'platform-database'] %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14.7 6.3 3 3M5 19l4.2-1.1L19 8.1a2.1 2.1 0 0 0-3-3l-9.8 9.8z"/><path d="m4 20 5-1"/></svg><span>系统工具</span><span class="nav-arrow">⌄</span></a>
                     <div class="nav-sub">
                         <a href="/platform/tools" class="nav-sub-item {% if active == 'platform-tools' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 7 7 14l3 3 7-7"/><path d="m13 8 3-3 3 3-3 3"/><path d="m11 16-3 3-3-3 3-3"/></svg><span>工具</span></a>
                         <a href="/platform/skills" class="nav-sub-item {% if active == 'platform-skills' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 4 7l8 4 8-4z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></svg><span>Skill</span></a>
                         <a href="/platform/mcp" class="nav-sub-item {% if active == 'platform-mcp' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="7" r="3"/><circle cx="17" cy="17" r="3"/><path d="m9.6 10.5 4.8-2.1M9.6 13.5l4.8 2.1"/></svg><span>MCP</span></a>
+                        <a href="/platform/database" class="nav-sub-item {% if active == 'platform-database' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span>数据库</span></a>
                     </div>
                 </div>
                 <a href="/platform/plugins" class="nav-item {% if active == 'platform-plugins' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/><path d="M5 5h14v14H5z"/></svg><span>插件中心</span></a>
                 <a href="/platform/scripts" class="nav-item {% if active == 'platform-scripts' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6"/><path d="m14 3 7 7M21 3l-9 9"/></svg><span>运维脚本</span></a>
                 <a href="/platform/knowledge" class="nav-item {% if active == 'platform-knowledge' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5a3 3 0 0 1 3-3h13v17H7a3 3 0 0 0-3 3z"/><path d="M4 5v16a3 3 0 0 1 3-3h13"/></svg><span>公共知识库</span></a>
-                <a href="/platform/drive" class="nav-item {% if active == 'platform-drive' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>公共文件</span></a>
+                <a href="/platform/drive" class="nav-item {% if active == 'platform-drive' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>公共文件库</span></a>
 
                 <div class="nav-section-label">平台治理</div>
                 <a href="/platform/organizations" class="nav-item {% if active == 'platform-organizations' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 21V5l8-3 8 3v16"/><path d="M8 8h1M8 12h1M8 16h1M15 8h1M15 12h1M15 16h1"/></svg><span>组织管理</span></a>
@@ -97,7 +98,7 @@
                 <a href="/organization/chat" data-organization-link class="nav-item {% if active == 'organization-chat' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3z"/></svg><span>对话</span></a>
                 <a href="/organization/agents" data-organization-link class="nav-item {% if active == 'organization-agents' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="4"/><path d="M8 10h8M8 14h5M9 3v3M15 3v3"/></svg><span>智能体</span></a>
                 <a href="/organization/knowledge" data-organization-link class="nav-item {% if active == 'organization-knowledge' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5a3 3 0 0 1 3-3h13v17H7a3 3 0 0 0-3 3z"/><path d="M4 5v16a3 3 0 0 1 3-3h13"/></svg><span>知识库</span></a>
-                <a href="/organization/drive" data-organization-link class="nav-item {% if active == 'organization-drive' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>文件管理</span></a>
+                <a href="/organization/drive" data-organization-link class="nav-item {% if active == 'organization-drive' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>文件库</span></a>
                 <a href="/organization/channels" data-organization-link class="nav-item {% if active == 'organization-channels' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 12h10M12 7v10"/><circle cx="12" cy="12" r="9"/></svg><span>消息渠道</span></a>
                 <a href="/connections" data-organization-link class="nav-item {% if active == 'connections' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 17H7a4 4 0 0 1 0-8h2M15 7h2a4 4 0 0 1 0 8h-2M8 12h8"/></svg><span>我的连接</span></a>
                 <a href="/organization/schedules" data-organization-link class="nav-item {% if active == 'organization-schedules' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M8 2v4M16 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01"/></svg><span>定时任务</span></a>
@@ -141,8 +142,8 @@
             <div id="page-content-root">{% block content %}{% endblock %}</div>
         </main>
     </div>
-    <script src="/static/js/common.js?v=20260801d"></script>
-    <script src="/static/js/organization-module.js?v=20260805j"></script>
+    <script src="/static/js/common.js?v=20260803b"></script>
+    <script src="/static/js/organization-module.js?v=20260805a"></script>
     {% if platform_catalog %}<script src="/static/js/platform-catalog-client.js?v=20260801e"></script>{% endif %}
     {% block scripts %}{% endblock %}
 </body>

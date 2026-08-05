@@ -53,6 +53,16 @@ class RemainingPagesTest(WebApiTestBase):
         self.assertIn('data-module="schedules"', response.text)
         self.assertIn('id="organization-page-switch"', response.text)
         self.assertNotIn('id="organization-switch"', response.text)
+        self.assertIn('data-schedule-tab="schedules"', response.text)
+        self.assertIn('data-schedule-tab="runs"', response.text)
+        self.assertIn('id="organization-runs-body"', response.text)
+
+    def test_schedule_runs_tab_is_scoped_to_schedules_module(self):
+        agents = self.client.get("/organization/agents")
+        self.assertEqual(agents.status_code, 200, agents.text)
+        self.assertIn('data-module="agents"', agents.text)
+        self.assertNotIn('data-schedule-tab="runs"', agents.text)
+        self.assertNotIn('id="organization-runs-panel"', agents.text)
 
     def test_organization_pages_share_page_local_picker(self):
         for page in (

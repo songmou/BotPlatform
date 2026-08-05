@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import hashlib
 import re
-import shutil
 import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -15,11 +14,13 @@ from typing import Any, Dict, List, Mapping, Optional
 from src.core.messaging.providers import channel_provider
 from src.core.services.resources import ScopedResourceStore
 from src.core.storage.organizations import OrganizationStore
-from src.core.paths import CONFIG_DIR
 
 
 CONTROL_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 CRON_FIELD = re.compile(r"^[0-9*/,-]+$")
+# Run history is diagnostic data; keep it bounded per organization.
+RUN_HISTORY_LIMIT = 500
+RUN_STATUSES = ("running", "succeeded", "failed", "skipped")
 
 
 class OrganizationControlError(ValueError):
@@ -761,6 +762,12 @@ class OrganizationControlStore:
                 None if status == "running" else timestamp,
             ),
         )
+        connection.execute(
+            "DELETE FROM organization_schedule_runs WHERE organization_id=? "
+            "AND run_id NOT IN (SELECT run_id FROM organization_schedule_runs "
+            "WHERE organization_id=? ORDER BY started_at DESC LIMIT ?)",
+            (organization_id, organization_id, RUN_HISTORY_LIMIT),
+        )
         return run_id
 
     def record_schedule_run(
@@ -783,10 +790,23 @@ class OrganizationControlStore:
                 run_id,
             )
 
-    def finish_schedule_run(self, run_id: str, status: str, detail: str) -> None:
+    def finish_schedule_run(
+        self,
+        run_id: str,
+        status: str,
+        detail: str,
+        script_run_id: Optional[str] = None,
+    ) -> None:
         if status not in {"succeeded", "failed", "skipped"}:
             raise OrganizationControlError("定时任务完成状态无效")
         with self.database.transaction(immediate=True) as connection:
+            if script_run_id:
+                connection.execute(
+                    "UPDATE organization_schedule_runs SET status=?, detail=?, "
+                    "finished_at=?, script_run_id=? WHERE run_id=?",
+                    (status, detail, _now(), script_run_id, run_id),
+                )
+                return
             connection.execute(
                 "UPDATE organization_schedule_runs SET status=?, detail=?, finished_at=? "
                 "WHERE run_id=?",
@@ -804,14 +824,63 @@ class OrganizationControlStore:
                 raise OrganizationControlError("定时任务不存在")
             self._bump(connection, organization_id, "schedules_revision")
 
+    @staticmethod
+    def _run_filters(
+        organization_id: str,
+        schedule_key: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> tuple[str, List[Any]]:
+        """Build the shared WHERE clause; the organization is never optional."""
+        clauses = ["r.organization_id=?"]
+        params: List[Any] = [organization_id]
+        if schedule_key:
+            clauses.append("s.schedule_key=?")
+            params.append(str(schedule_key))
+        if status:
+            if status not in RUN_STATUSES:
+                raise OrganizationControlError("定时任务运行状态无效")
+            clauses.append("r.status=?")
+            params.append(status)
+        return " WHERE " + " AND ".join(clauses), params
+
     def list_schedule_runs(
-        self, organization_id: str, limit: int = 100
+        self,
+        organization_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        schedule_key: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        where, params = self._run_filters(organization_id, schedule_key, status)
         with self.database.read() as connection:
             rows = connection.execute(
-                "SELECT r.*, s.schedule_key FROM organization_schedule_runs r "
-                "JOIN organization_schedules s ON s.schedule_id=r.schedule_id "
-                "WHERE r.organization_id=? ORDER BY r.started_at DESC LIMIT ?",
-                (organization_id, max(1, min(int(limit), 500))),
+                "SELECT r.*, s.schedule_key, s.action_json "
+                "FROM organization_schedule_runs r "
+                "JOIN organization_schedules s ON s.schedule_id=r.schedule_id"
+                + where
+                + " ORDER BY r.started_at DESC LIMIT ? OFFSET ?",
+                (*params, max(1, min(int(limit), 500)), max(0, int(offset))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            action = _loads(item.pop("action_json", "{}"), {})
+            item["action_type"] = str(action.get("type") or "")
+            item["script_id"] = str(action.get("script_id") or "")
+            items.append(item)
+        return items
+
+    def count_schedule_runs(
+        self,
+        organization_id: str,
+        schedule_key: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> int:
+        where, params = self._run_filters(organization_id, schedule_key, status)
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM organization_schedule_runs r "
+                "JOIN organization_schedules s ON s.schedule_id=r.schedule_id" + where,
+                tuple(params),
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0

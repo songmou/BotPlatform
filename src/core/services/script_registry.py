@@ -180,6 +180,14 @@ class ExternalScriptRegistry:
             if name in values
         }
 
+    def global_values(self) -> Dict[str, str]:
+        """Load the platform-managed global environment values (0600 checked).
+
+        Used as the global layer by :class:`EnvResolver`; organization values
+        override these per tenant at runtime.
+        """
+        return self._load_env()
+
     def _load_env(self) -> Dict[str, str]:
         if not self.env_path.exists():
             return {}

@@ -24,7 +24,22 @@ APPROVAL_TOOLS = {
     "knowledge_index_file",
     "knowledge_delete",
     "drive_delete_file",
+    "db_execute",
 }
+
+
+#: Read-only datasource tools.  These are granted implicitly to any agent that
+#: has at least one datasource bound — the "数据源" tab is the single entry
+#: point, so they are never listed in the built-in tool picker.
+DATASOURCE_READONLY_TOOLS = (
+    "db_list_tables",
+    "db_describe_table",
+    "db_query",
+)
+
+#: Every datasource-scoped tool, read-only plus write.  Used to hide db_* from
+#: the built-in tool pickers and to enforce the datasource binding at runtime.
+DATASOURCE_TOOLS = DATASOURCE_READONLY_TOOLS + ("db_execute",)
 
 
 def _object_schema(
@@ -260,13 +275,17 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ),
     },
     "list_script_schedules": {
-        "description": "列出当前用户已创建的无人值守脚本定时计划。",
+        "description": (
+            "列出当前空间/组织已配置的定时任务（含 Web 面板配置的任务）。"
+            "返回每条任务的编号、是否启用、cron 时间、动作类型与脚本信息。"
+        ),
         "parameters": _object_schema(),
     },
     "manage_script_schedule": {
         "description": (
-            "创建、更新、启用、停用或删除当前用户的无人值守脚本计划。"
-            "所有变更都需要用户确认；创建或重新启用时会固定当前脚本版本。"
+            "创建、更新、启用、停用或删除当前空间/组织的定时任务。"
+            "所有变更都需要用户确认；只有组织所有者或管理员可以修改。"
+            "新建或更新只能操作脚本（script）类型的任务。"
         ),
         "parameters": _object_schema(
             {
@@ -274,17 +293,25 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "enum": ["create", "update", "enable", "disable", "delete"],
                 },
-                "schedule_id": {"type": "string"},
-                "script_id": {"type": "string"},
+                "schedule_id": {
+                    "type": "string",
+                    "description": "任务编号；新建时即为新任务的编号",
+                },
+                "script_id": {
+                    "type": "string",
+                    "description": "脚本任务引用的平台脚本 ID（仅 script 类型需要）",
+                },
                 "parameters": {
                     "type": "object",
                     "additionalProperties": True,
+                    "description": "传递给脚本的参数",
                 },
                 "crons": {
                     "type": "array",
                     "items": {"type": "string"},
                     "minItems": 1,
                     "maxItems": 8,
+                    "description": "五段 cron 表达式，如 ['50 9 * * *', '50 17 * * *']",
                 },
                 "enabled": {"type": "boolean"},
             },
@@ -330,5 +357,74 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "drive_delete_file": {
         "description": "删除当前用户个人网盘中的文件或空目录，需要用户确认。",
         "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
+    },
+    "db_list_tables": {
+        "description": "列出当前智能体已授权数据源中的所有可查询表。请先使用此工具了解可用数据。",
+        "parameters": _object_schema(
+            {
+                "datasource_id": {
+                    "type": "string",
+                    "description": "数据源 ID，请从系统提示词中查找可用的数据源。",
+                },
+            },
+            ["datasource_id"],
+        ),
+    },
+    "db_describe_table": {
+        "description": "查看指定表的字段名、类型、注释与主键信息。表名来自 db_list_tables 返回结果。",
+        "parameters": _object_schema(
+            {
+                "datasource_id": {"type": "string"},
+                "table": {"type": "string", "description": "表名"},
+            },
+            ["datasource_id", "table"],
+        ),
+    },
+    "db_query": {
+        "description": (
+            "对已授权数据源执行只读 SELECT 查询。"
+            "仅允许单条 SELECT 语句，结果自动限制行数与字节数。"
+            "请先在系统提示词或 db_describe_table 中确认表结构后再编写 SQL。"
+        ),
+        "parameters": _object_schema(
+            {
+                "datasource_id": {"type": "string"},
+                "sql": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "要执行的 SELECT 语句",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "限制返回行数，默认使用数据源配置的上限",
+                },
+            },
+            ["datasource_id", "sql"],
+        ),
+    },
+    "db_execute": {
+        "description": (
+            "对已开启写权限的数据源执行单条 INSERT/UPDATE/DELETE 操作，需用户确认。"
+            "UPDATE 和 DELETE 必须包含 WHERE 条件。"
+            "请提供执行原因。"
+        ),
+        "parameters": _object_schema(
+            {
+                "datasource_id": {"type": "string"},
+                "sql": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "要执行的 INSERT/UPDATE/DELETE 语句",
+                },
+                "reason": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "执行原因，供用户审批时了解",
+                },
+            },
+            ["datasource_id", "sql", "reason"],
+        ),
     },
 }

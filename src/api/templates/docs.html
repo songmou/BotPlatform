@@ -64,7 +64,7 @@
             </div>
 
             <div class="doc-item">
-                <h4>文件管理</h4>
+                <h4>文件库</h4>
                 <p>管理公共文件区与租户独立文件区，支持文件夹、上传下载、预览、移动和操作审计。</p>
             </div>
 
@@ -87,6 +87,18 @@
                     <li><strong>角色权限</strong>：查看与编辑各角色的权限（点击角色行弹窗编辑）；内置 admin 角色拥有全部权限且不可修改。</li>
                 </ul>
             </div>
+        </section>
+
+        <section class="doc-card">
+            <h3>环境变量、组织变量与集成凭据</h3>
+            <p>部分运维脚本、插件与定时任务在运行时需要外部配置（如服务地址、超时、特性开关）。平台把“声明变量”和“填值”分开，并提供两层变量 + 集成凭据机制：</p>
+            <ul>
+                <li><strong>声明（作者侧）</strong>：脚本作者在 <code>src/core/jobs/&lt;目录&gt;/script.json</code> 的 <code>env_allowlist</code>、插件作者在 <code>plugin.json</code> 的 <code>env_allowlist</code> 中声明所需变量名（大写字母/数字/下划线，每行一个）。声明后，对应弹窗才会展示这些变量的“绑定”情况。</li>
+                <li><strong>填值（平台 / 组织侧）</strong>：变量值不在脚本/插件弹窗内编辑，而是填在两处——<strong>全局环境变量</strong>（平台统一维护，与 <code>model.env</code> 同一套全局机制）与<strong>组织变量</strong>（在「组织管理」组织/租户详情页的“组织环境变量”卡片中按组织填写，存于组织数据库 <code>tenant_env</code> 表，明文存于权限 <code>0600</code> 的 SQLite，适合按组织区分的<strong>非敏感</strong>配置）。</li>
+                <li><strong>运行时合并</strong>：对脚本/插件声明的变量名，运行时优先使用<strong>组织变量值</strong>，<strong>覆盖</strong>全局环境变量值（组织 &gt; 全局）。脚本以独立子进程运行，环境按白名单重建、不继承进程环境；插件在进程内运行，经 <code>PluginContext.env()</code> 注入，避免跨租户泄漏。</li>
+                <li><strong>保留名保护</strong>：<code>PATH</code>、<code>HOME</code>、<code>LANG</code>、<code>AUTOGEN_ENV_FILE</code> 等系统变量，以及 <code>ILINKBOT_</code> 等运行时注入前缀被禁止声明，避免污染或越权。</li>
+                <li><strong>敏感凭据走集成凭据</strong>：账户、密码等通过 <code>/integration setup &lt;ctsehr|ctsoa|autogen&gt;</code> 配置，密文只存于权限 <code>0600</code> 的受限凭据文件，任何列表/详情/日志都不会返回明文。<strong>不要把密码塞进组织环境变量</strong>。在“执行脚本”与“新建/编辑脚本计划”弹窗中，会直接显示所选脚本的集成凭据（账户 + 密钥链）是否就绪；未配置时明确提示先执行 <code>/integration setup</code>。</li>
+            </ul>
         </section>
 
         <section class="doc-card">

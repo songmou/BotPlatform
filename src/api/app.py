@@ -22,6 +22,7 @@ from src.api.routers import (
     chat,
     connections,
     content_v2,
+    datasources,
     drive,
     knowledge,
     models,
@@ -34,6 +35,7 @@ from src.api.routers import (
     tenants,
     model_analytics,
     v2,
+    tenant_env,
 )
 
 API_DIR = Path(__file__).resolve().parent
@@ -49,12 +51,14 @@ def create_app(config, model_router, registry, conversation_store,
                admin_auth=None, admin_user_store=None, admin_role_store=None,
                script_service=None, script_registry=None,
                script_schedule_service=None,
+               settings_store=None, env_resolver=None,
                drive_service=None, drive_audit_store=None,
                channel_statuses=None,
                organization_store=None, resource_store=None,
                organization_control_store=None,
                credential_service=None,
                notification_service=None,
+               datasource_service=None,
                secure_cookies=False, owns_services=True) -> FastAPI:
     if organization_store is None:
         from src.core.storage.organizations import OrganizationStore
@@ -65,26 +69,8 @@ def create_app(config, model_router, registry, conversation_store,
         and getattr(getattr(organization_store, "database", None), "path", None)
         == getattr(getattr(admin_user_store, "database", None), "path", None)
     )
-    platform_owner = None
     if unified_database:
         organization_store.sync_users(admin_user_store)
-        users = admin_user_store.list_users()
-        if admin_role_store is not None:
-            for user in users:
-                try:
-                    if admin_role_store.get(user.role_id).code == "admin":
-                        platform_owner = user
-                        break
-                except Exception:  # noqa: BLE001 - migration must not block startup
-                    continue
-        if platform_owner is not None:
-            legacy_root = getattr(registry, "system_root", None)
-            if isinstance(legacy_root, Path):
-                organization_store.migrate_legacy_web_conversations(
-                    legacy_root / "web_conversations.json",
-                    platform_owner.user_id,
-                    platform_owner.username,
-                )
     if resource_store is None:
         from src.core.services.resources import ScopedResourceStore
 
@@ -118,43 +104,18 @@ def create_app(config, model_router, registry, conversation_store,
                 storage_path=credential_root / "integration_credentials.json"
             ),
         )
-    if platform_owner is not None:
+    if scheduler is not None:
         try:
-            legacy_script_schedules = (
-                script_schedule_service.store.list()
-                if script_schedule_service is not None
-                else []
+            reload_scripts = getattr(scheduler, "reload_script_schedules", None)
+            if callable(reload_scripts):
+                reload_scripts()
+            reload_organizations = getattr(
+                scheduler, "reload_organization_schedules", None
             )
-            if config.channels or config.schedules or legacy_script_schedules:
-                default_organization_id = organization_store.active_organization(
-                    platform_owner.user_id
-                ) or organization_store.ensure_debug_organization(
-                    platform_owner.user_id, platform_owner.username
-                )
-                if config.channels:
-                    organization_control_store.migrate_legacy_channels(
-                        default_organization_id,
-                        config.channels,
-                        platform_owner.user_id,
-                        credential_service,
-                    )
-                organization_control_store.migrate_legacy_schedules(
-                    default_organization_id,
-                    config.schedules,
-                    legacy_script_schedules,
-                    platform_owner.user_id,
-                )
-            if scheduler is not None:
-                reload_scripts = getattr(scheduler, "reload_script_schedules", None)
-                if callable(reload_scripts):
-                    reload_scripts()
-                reload_organizations = getattr(
-                    scheduler, "reload_organization_schedules", None
-                )
-                if callable(reload_organizations):
-                    reload_organizations()
+            if callable(reload_organizations):
+                reload_organizations()
         except Exception:
-            # Migration errors are surfaced by organization management pages;
+            # Reload errors are surfaced by organization management pages;
             # startup must remain available for corrective administration.
             pass
 
@@ -199,9 +160,12 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.script_service = script_service
     app.state.script_registry = script_registry
     app.state.script_schedule_service = script_schedule_service
+    app.state.settings_store = settings_store
+    app.state.env_resolver = env_resolver
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
     app.state.wechat_login_managers = {}
+    app.state.datasource_service = datasource_service
     app.state.channel_statuses = channel_statuses
     app.state.organization_store = organization_store
     app.state.resource_store = resource_store
@@ -306,8 +270,10 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(skills.router)
     app.include_router(scripts.router)
     app.include_router(mcp.router)
+    app.include_router(datasources.router)
     app.include_router(tenants.router)
     app.include_router(admins.router)
+    app.include_router(tenant_env.router)
     app.include_router(v2.router)
 
     return app

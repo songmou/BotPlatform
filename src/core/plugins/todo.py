@@ -93,16 +93,6 @@ def normalize_todo_id(value: Optional[str]) -> str:
     return todo_id
 
 
-def new_store(now: datetime) -> Dict[str, Any]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "next_id": 1,
-        "updated_at": isoformat(now),
-        "items": [],
-        "archived_items": [],
-    }
-
-
 def validate_item(raw: object, archived: bool) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise TodoError("待办项必须是 JSON 对象")
@@ -185,6 +175,7 @@ def validate_store(raw: object) -> Dict[str, Any]:
 
 
 class SqliteTodoStore:
+
     """Transactional tenant todo repository."""
 
     def __init__(

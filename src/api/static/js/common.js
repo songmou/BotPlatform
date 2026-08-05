@@ -26,8 +26,23 @@ document.addEventListener("click", function (evt) {
 document.addEventListener("click", function (evt) {
     var toggle = evt.target.closest && evt.target.closest(".nav-group-toggle");
     if (!toggle) return;
+    // Prevent the <a href> default navigation so collapsing the group does not
+    // trigger a full page reload that would re-expand it via server-rendered `active`.
+    evt.preventDefault();
     var group = toggle.closest(".nav-group");
-    if (group) group.classList.toggle("open");
+    if (!group) return;
+    var wasOpen = group.classList.contains("open");
+    group.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", group.classList.contains("open") ? "true" : "false");
+    // When the group was collapsed (i.e. we are on a different page), navigate to
+    // its primary page so the header still works as an entry point. Otherwise the
+    // click is a pure expand/collapse toggle and no navigation should happen.
+    if (!wasOpen) {
+        var href = toggle.getAttribute("href");
+        if (href && href !== location.pathname) {
+            window.location.href = href;
+        }
+    }
 });
 
 function showToast(message, type) {

@@ -151,6 +151,12 @@ body {
     display: none !important;
 }
 
+#page-content-root {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
 .scoped-empty-page .scope-empty-state {
     margin-top: 24px;
     padding: 48px 24px;
@@ -1067,9 +1073,11 @@ a.btn-primary {
     animation: fadeIn 0.15s ease;
 }
 
-/* The confirm dialog must stack above any open modal that triggers it. */
-#confirm-overlay {
-    z-index: 1600;
+/* Global confirm dialog must sit above any page-level modal */
+#confirm-overlay,
+#form-dialog-overlay,
+#notice-dialog-overlay {
+    z-index: 2000;
 }
 
 .modal {
@@ -3297,3 +3305,34 @@ textarea:disabled {
     .governance-page-header { align-items: stretch; flex-direction: column; }
     .governance-page-header button { align-self: flex-start; }
 }
+
+/* Environment variable binding panels (scripts / plugins / schedules / tenants) */
+.env-bindings { margin-top: 6px; }
+.env-empty { color: #6b7280; font-size: 13px; padding: 4px 0; }
+.env-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 13px; }
+.env-table th, .env-table td {
+    text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb;
+}
+.env-table th { color: #6b7280; font-weight: 600; }
+.env-table code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.env-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #374151; }
+.env-table tr.env-missing td { color: #b45309; }
+.env-table tr.env-ok td.env-value { color: #047857; }
+.tenant-env-list { margin-bottom: 8px; }
+
+.cred-section { margin-top: 6px; }
+.cred-empty { color: #6b7280; font-size: 13px; padding: 4px 0; }
+.cred-heading { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+.cred-badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.cred-badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; border: 1px solid transparent;
+}
+.cred-badge.cred-ok { color: #047857; background: #ecfdf5; border-color: #a7f3d0; }
+.cred-badge.cred-missing { color: #b45309; background: #fffbeb; border-color: #fde68a; }
+.cred-readiness { margin-bottom: 4px; }
+.cred-hint { font-size: 13px; color: #6b7280; margin: 4px 0 0; }
+.cred-hint code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tenant-env-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tenant-env-form input { flex: 1 1 160px; min-width: 120px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }

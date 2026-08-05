@@ -166,11 +166,13 @@ class AgentService:
         return self.active_agent.image_prompt or self.app_config.image_prompt
 
     def _tools_enabled(self, preset: AgentPreset, model: ModelSession) -> bool:
-        return bool(
-            self.tool_runtime
-            and (preset.tools or preset.mcp_servers)
-            and model.capabilities.tools
+        has_tools = bool(
+            preset.tools
+            or preset.mcp_servers
+            or getattr(preset, "plugin_tools", None)
+            or getattr(preset, "datasources", None)
         )
+        return bool(self.tool_runtime and has_tools and model.capabilities.tools)
 
     def _current_time_context(self) -> str:
         """Build an authoritative, per-request local time snapshot for the model."""
@@ -754,6 +756,7 @@ class AgentService:
                 total_calls=0,
                 thinking_parts=thinking_parts,
                 model=model,
+                datasource_ids=list(getattr(preset, "datasources", []) or []),
             )
 
     def _parse_call(
@@ -844,8 +847,14 @@ class AgentService:
         total_calls: int,
         thinking_parts: List[str],
         model: ModelSession,
+        datasource_ids: Optional[List[str]] = None,
     ) -> AgentOutcome:
         assert self.tool_runtime is not None
+        # Re-assert the datasource grant on the current thread: schemas() and
+        # execute() both consult it, and an approval may resume elsewhere.
+        binder = getattr(self.tool_runtime, "bind_agent_datasources", None)
+        if binder is not None:
+            binder(list(datasource_ids or []))
         max_rounds = self.tool_runtime.config.max_tool_rounds
         max_calls = self.tool_runtime.config.max_total_tool_calls
         schemas = self.tool_runtime.schemas(tool_names)
@@ -919,6 +928,9 @@ class AgentService:
                     thinking_parts=list(thinking_parts),
                     model_mode=model.mode,
                     model_profile_id=model.profile_id,
+                    datasource_ids=list(
+                        getattr(self.tool_runtime, "bound_datasources", None) or []
+                    ),
                 )
                 self._approvals.put(user_id, pending)
                 return self._approval_outcome(pending)
@@ -986,6 +998,10 @@ class AgentService:
         pending = self._approvals.take(user_id, approval_id)
         resolved_calls: List[PreparedToolCall] = []
         assert self.tool_runtime is not None
+        # Restore the paused agent's datasource grant before replaying calls.
+        binder = getattr(self.tool_runtime, "bind_agent_datasources", None)
+        if binder is not None:
+            binder(list(getattr(pending, "datasource_ids", []) or []))
         for call in pending.calls:
             if not call.requires_approval:
                 resolved_calls.append(call)
@@ -1024,6 +1040,7 @@ class AgentService:
             total_calls=pending.total_calls,
             thinking_parts=list(pending.thinking_parts),
             model=model,
+            datasource_ids=list(getattr(pending, "datasource_ids", []) or []),
         )
 
     def generate(self, agent_id: str, prompt: str) -> str:

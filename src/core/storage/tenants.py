@@ -505,6 +505,39 @@ class SettingsStore:
                 (tenant_id, mode),
             )
 
+    def env(self, tenant_id: str) -> Dict[str, str]:
+        """Return the organization-scoped environment variables for a tenant.
+
+        Values are returned as plain text (the database file is already
+        protected with 0600 permissions). Sensitive credentials should use
+        the KeychainService instead of this store.
+        """
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT env_json FROM tenant_env WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+        if not row or not row["env_json"]:
+            return {}
+        try:
+            data = json.loads(row["env_json"])
+        except (ValueError, TypeError):
+            return {}
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+    def set_env(self, tenant_id: str, values: "Mapping[str, str]") -> None:
+        """Persist the organization-scoped environment variables for a tenant.
+
+        Stored in the dedicated ``tenant_env`` table so they never clobber
+        other tenant settings.
+        """
+        payload = json.dumps({str(k): str(v) for k, v in values.items()})
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO tenant_env(tenant_id, env_json) VALUES (?, ?) "
+                "ON CONFLICT(tenant_id) DO UPDATE SET env_json=excluded.env_json",
+                (tenant_id, payload),
+            )
+
 
 class ScheduleStore:
     def __init__(self, registry: TenantRegistry) -> None:
@@ -535,21 +568,6 @@ class ScheduleStore:
                 (task_id,),
             ).fetchall()
         return [TenantRegistry._from_row(row) for row in rows]
-
-    def claim_attempt(self, tenant_id: str, task_id: str, interaction_at: str) -> bool:
-        with self.registry.database.transaction(immediate=True) as connection:
-            row = connection.execute(
-                "SELECT interaction_at FROM schedule_attempts WHERE tenant_id=? AND task_id=?",
-                (tenant_id, task_id),
-            ).fetchone()
-            if row and row["interaction_at"] == interaction_at:
-                return False
-            connection.execute(
-                "INSERT INTO schedule_attempts(tenant_id, task_id, interaction_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(tenant_id, task_id) DO UPDATE SET interaction_at=excluded.interaction_at",
-                (tenant_id, task_id, interaction_at),
-            )
-            return True
 
 
 class IntegrationStore:

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}文件管理 - BotPlatform{% endblock %}
+{% block title %}文件库 - BotPlatform{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="/static/css/drive.css">
 {% endblock %}
@@ -8,7 +8,7 @@
     <div class="page-header">
         <div class="page-header-row">
             <div>
-                <h2>文件管理</h2>
+                <h2>文件库</h2>
                 <p class="page-desc">{% if resource_mode == 'organization' %}管理当前组织共享文件，并只读浏览平台公共文件{% else %}管理平台公共文件区：支持多级文件夹、上传下载、重命名、移动与删除，所有操作留有审计日志{% endif %}</p>
             </div>
             <div id="drive-usage" class="text-muted" aria-live="polite"></div>

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}组织工作台 - BotPlatform{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/organization-module.css?v=20260804f"><link rel="stylesheet" href="/static/css/agents.css?v=20260803d"><link rel="stylesheet" href="/static/css/schedules.css">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/organization-module.css?v=20260804b"><link rel="stylesheet" href="/static/css/agents.css?v=20260805a"><link rel="stylesheet" href="/static/css/schedules.css">{% endblock %}
 {% block content %}
 <div class="organization-page" id="organization-page" data-module="{{ module }}">
     <div class="page-header organization-page-header">
@@ -14,9 +14,48 @@
             <button id="organization-refresh" class="btn-secondary" type="button">刷新</button>
         </div>
     </div>
+    {% if module == 'schedules' %}
+    <div class="tab-bar organization-schedule-tabs" role="tablist">
+        <button class="tab-btn active" type="button" data-schedule-tab="schedules">定时任务</button>
+        <button class="tab-btn" type="button" data-schedule-tab="runs">执行记录</button>
+    </div>
+    {% endif %}
     <div id="organization-module-notice" class="status-card" hidden></div>
     <div id="organization-module-summary" class="organization-summary"></div>
     <div id="organization-module-list" class="organization-grid" aria-live="polite"></div>
+    {% if module == 'schedules' %}
+    <div id="organization-runs-panel" class="organization-runs-panel" hidden>
+        <div class="organization-runs-toolbar">
+            <select id="organization-runs-status" aria-label="执行状态">
+                <option value="">全部状态</option>
+                <option value="running">运行中</option>
+                <option value="succeeded">成功</option>
+                <option value="failed">失败</option>
+                <option value="skipped">已跳过</option>
+            </select>
+        </div>
+        <div class="table-scroll">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>开始时间</th>
+                        <th>任务</th>
+                        <th>类型</th>
+                        <th>状态</th>
+                        <th>详情</th>
+                        <th>结束时间</th>
+                    </tr>
+                </thead>
+                <tbody id="organization-runs-body" aria-live="polite"></tbody>
+            </table>
+        </div>
+        <div class="organization-pager">
+            <button id="organization-runs-prev" class="btn-secondary" type="button">上一页</button>
+            <span id="organization-runs-page"></span>
+            <button id="organization-runs-next" class="btn-secondary" type="button">下一页</button>
+        </div>
+    </div>
+    {% endif %}
 </div>
 
 <div id="organization-agent-modal" class="modal-overlay" style="display:none">
@@ -33,6 +72,16 @@
         </div>
         <form id="organization-agent-form" class="modal-body">
             <div class="form-group" id="organization-agent-template-group"><label for="organization-agent-template">创建来源</label><select id="organization-agent-template"><option value="">空白智能体</option></select><small>选择平台模板后会载入该版本快照，保存后由组织独立维护。</small></div>
+            <div class="tab-bar organization-agent-tabs" role="tablist">
+                <button class="tab-btn active" type="button" data-org-agent-tab="basic">基础信息</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="model">模型与提示词</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="builtin">内置工具</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="plugin">插件工具</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="skill">Skill</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="mcp">MCP</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="datasource">数据源</button>
+                <button class="tab-btn" type="button" data-org-agent-tab="knowledge">知识库</button>
+            </div>
             <div class="organization-agent-panel" data-org-agent-panel="basic">
                 <div class="form-group"><label for="organization-agent-id">智能体 ID</label><input id="organization-agent-id" required pattern="^[a-z][a-z0-9_]{0,63}$"><small id="organization-agent-id-help">小写字母开头，可含数字和下划线</small></div>
                 <div class="form-group"><label for="organization-agent-name">名称</label><input id="organization-agent-name" required></div>
@@ -52,6 +101,7 @@
             <div class="organization-agent-panel" data-org-agent-panel="plugin"><div class="tool-plugin-groups" id="organization-agent-plugin-tools"></div></div>
             <div class="organization-agent-panel" data-org-agent-panel="skill"><div class="tool-checkboxes" id="organization-agent-skills"></div></div>
             <div class="organization-agent-panel" data-org-agent-panel="mcp"><div class="tool-checkboxes" id="organization-agent-mcp"></div></div>
+            <div class="organization-agent-panel" data-org-agent-panel="datasource"><div class="tool-checkboxes" id="organization-agent-datasources"></div></div>
             <div class="organization-agent-panel" data-org-agent-panel="knowledge"><div class="tool-checkboxes" id="organization-agent-knowledge"></div></div>
             <div class="modal-footer"><button type="button" id="organization-agent-modal-cancel" class="btn-secondary">取消</button><button type="submit" class="btn-primary">保存</button></div>
         </form>

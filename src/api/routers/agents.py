@@ -34,6 +34,7 @@ def _to_out(agent) -> AgentOut:
         plugin_tools={key: list(value) for key, value in agent.plugin_tools.items()},
         skills=list(agent.skills),
         mcp_servers=list(agent.mcp_servers),
+        datasources=list(getattr(agent, "datasources", []) or []),
         model=agent.model,
         greeting=agent.greeting,
         greeting_hints=list(agent.greeting_hints),
@@ -57,6 +58,7 @@ def _agent_to_dict(agent) -> dict:
         },
         "skills": list(agent.skills),
         "mcp_servers": list(agent.mcp_servers),
+        "datasources": list(getattr(agent, "datasources", []) or []),
         "enabled": agent.enabled,
     }
     if agent.model:
@@ -70,6 +72,38 @@ def _agent_to_dict(agent) -> dict:
     if agent.max_tokens is not None:
         data["max_tokens"] = agent.max_tokens
     return data
+
+
+def _validate_datasources(config, requested) -> list:
+    """Return a de-duplicated list of enabled datasource ids, or raise 400."""
+    if not requested:
+        return []
+    available = {
+        entry.get("id"): entry
+        for entry in getattr(config, "datasources", []) or []
+        if isinstance(entry, dict) and entry.get("id")
+    }
+    seen: set = set()
+    result: list = []
+    for ds_id in requested:
+        if not isinstance(ds_id, str) or not ds_id.strip():
+            raise HTTPException(status_code=400, detail="数据源 ID 必须是非空字符串")
+        ds_id = ds_id.strip()
+        if ds_id in seen:
+            continue
+        entry = available.get(ds_id)
+        if entry is None:
+            raise HTTPException(
+                status_code=400, detail="数据源不存在：{}".format(ds_id)
+            )
+        if not entry.get("enabled", True):
+            raise HTTPException(
+                status_code=400,
+                detail="数据源已停用，无法绑定：{}".format(entry.get("name") or ds_id),
+            )
+        seen.add(ds_id)
+        result.append(ds_id)
+    return result
 
 
 def _save_agent_file(agent_id: str, data: dict) -> None:
@@ -190,6 +224,7 @@ def create_agent(
         plugin_tools=body.plugin_tools,
         skills=body.skills,
         mcp_servers=body.mcp_servers,
+        datasources=_validate_datasources(config, body.datasources),
         model=body.model or None,
         greeting=body.greeting or None,
         greeting_hints=body.greeting_hints or [],
@@ -235,6 +270,11 @@ def update_agent(
         ),
         skills=body.skills if body.skills is not None else existing.skills,
         mcp_servers=body.mcp_servers if body.mcp_servers is not None else existing.mcp_servers,
+        datasources=(
+            _validate_datasources(config, body.datasources)
+            if body.datasources is not None
+            else list(getattr(existing, "datasources", []) or [])
+        ),
         model=(body.model or None) if body.model is not None else existing.model,
         greeting=(body.greeting or None) if body.greeting is not None else existing.greeting,
         greeting_hints=body.greeting_hints if body.greeting_hints is not None else existing.greeting_hints,
