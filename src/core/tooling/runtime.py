@@ -27,7 +27,13 @@ from src.core.plugins.base import PlatformPlugin, PluginError
 from .commands import CommandRunner
 # APPROVAL_TOOLS/TOOL_DEFINITIONS are re-exported here for backward
 # compatibility: existing callers import them from ``runtime``.
-from .definitions import APPROVAL_TOOLS, TOOL_DEFINITIONS, _object_schema  # noqa: F401
+from .definitions import (  # noqa: F401
+    APPROVAL_TOOLS,
+    DATASOURCE_READONLY_TOOLS,
+    DATASOURCE_TOOLS,
+    TOOL_DEFINITIONS,
+    _object_schema,
+)
 from .models import ToolAuditContext, ToolError, ToolResult
 from src.core.storage.tenants import TenantContext, TenantRegistry
 
@@ -35,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.core.services.script import ScriptService
-    from src.core.services.script_schedule import ScriptScheduleService
+    from src.core.services.organization_schedule_tool import (
+        OrganizationScheduleToolService,
+    )
     from src.core.services.knowledge import KnowledgeService
     from src.core.services.drive import DriveService
     from src.core.tooling.mcp_client import McpClientManager
@@ -61,7 +69,9 @@ class ToolRuntime:
         tool_audit_store: Optional[Any] = None,
         tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
         mcp_manager: Optional["McpClientManager"] = None,
-        script_schedule_service: Optional["ScriptScheduleService"] = None,
+        organization_schedule_service: Optional[
+            "OrganizationScheduleToolService"
+        ] = None,
         drive_service: Optional["DriveService"] = None,
         drive_audit_store: Optional[Any] = None,
         resource_store: Optional["ScopedResourceStore"] = None,
@@ -81,7 +91,7 @@ class ToolRuntime:
         self._binding = threading.local()
         self.audit_logger = audit_logger
         self.script_service = script_service
-        self.script_schedule_service = script_schedule_service
+        self.organization_schedule_service = organization_schedule_service
         self.tenant_registry = tenant_registry
         self.knowledge_service = knowledge_service
         self.plugin_manager = plugin_manager
@@ -148,6 +158,39 @@ class ToolRuntime:
     def _audit_context(self, value: ToolAuditContext) -> None:
         self._binding.audit_context = value
 
+    @property
+    def bound_datasources(self) -> Optional[List[str]]:
+        """Datasource ids the current thread's agent may touch.
+
+        ``None`` means "no agent has declared a binding on this thread" and is
+        treated as deny-all by :meth:`_require_datasource` (fail-closed).
+        """
+        return getattr(self._binding, "datasources", None)
+
+    def bind_agent_datasources(self, datasource_ids: Optional[Iterable[str]]) -> None:
+        """Restrict db_* tools to the datasources bound to the running agent.
+
+        Must be called on the same thread that will later invoke
+        :meth:`schemas` / :meth:`execute`.  Web requests hand tool execution to
+        an anyio worker thread, so the binding is re-applied inside the
+        streaming generator.
+        """
+        if datasource_ids is None:
+            self._binding.datasources = None
+            return
+        self._binding.datasources = [
+            str(value).strip() for value in datasource_ids if str(value).strip()
+        ]
+
+    def _require_datasource(self, datasource_id: str) -> str:
+        """Fail-closed check that the running agent may use this datasource."""
+        bound = self.bound_datasources
+        if not bound:
+            raise ToolError("当前智能体未绑定任何数据源，无法访问数据库")
+        if datasource_id not in bound:
+            raise ToolError("当前智能体无权访问数据源：{}".format(datasource_id))
+        return datasource_id
+
     def is_tool_enabled(self, name: str) -> bool:
         state = self._tool_states.get(name)
         if state is not None and not state.get("enabled", True):
@@ -200,6 +243,9 @@ class ToolRuntime:
 
     def bind_tenant(self, tenant: TenantContext) -> None:
         """Fail-closed binding of all filesystem and script tools to one tenant."""
+        # Switching tenant invalidates any datasource grant left behind by a
+        # previous agent on this pooled thread.
+        self._binding.datasources = None
         if self.tenant_registry is None:
             return
         registered = self.tenant_registry.get(tenant.tenant_id)
@@ -254,7 +300,7 @@ class ToolRuntime:
         }:
             return self.script_service is not None
         if name in {"list_script_schedules", "manage_script_schedule"}:
-            return self.script_schedule_service is not None
+            return self.organization_schedule_service is not None
         if name.startswith("knowledge_"):
             return self.knowledge_service is not None
         return True
@@ -313,11 +359,17 @@ class ToolRuntime:
                 )
                 if catalog:
                     description = "{}可用脚本：{}。".format(description, catalog)
-            if name.startswith("db_") and self.datasource_service is not None:
+            if name in DATASOURCE_TOOLS and self.datasource_service is not None:
                 configs = self.datasource_service.list_configs()
                 ds_ids = [c["id"] for c in configs if c.get("enabled", True)]
-                if ds_ids and "datasource_id" in parameters.get("properties", {}):
-                    parameters["properties"]["datasource_id"]["enum"] = ds_ids
+                # Only advertise the datasources bound to the running agent.
+                bound = self.bound_datasources
+                allowed = [ds_id for ds_id in ds_ids if ds_id in (bound or [])]
+                if not allowed:
+                    # Fail-closed: an unbound agent gets no db_* tool at all.
+                    continue
+                if "datasource_id" in parameters.get("properties", {}):
+                    parameters["properties"]["datasource_id"]["enum"] = allowed
             schemas.append(
                 {
                     "type": "function",
@@ -560,10 +612,10 @@ class ToolRuntime:
             )
         if name == "manage_script_schedule":
             tenant = self._require_tenant()
-            if tenant is None or self.script_schedule_service is None:
-                raise ToolError("脚本计划服务不可用")
+            if tenant is None or self.organization_schedule_service is None:
+                raise ToolError("组织定时任务服务不可用")
             try:
-                return self.script_schedule_service.preview(tenant, arguments)
+                return self.organization_schedule_service.preview(tenant, arguments)
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
         if name == "knowledge_add_text":
@@ -759,20 +811,20 @@ class ToolRuntime:
         self, _arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
         tenant = self._require_tenant()
-        if tenant is None or self.script_schedule_service is None:
-            raise ToolError("脚本计划服务不可用")
+        if tenant is None or self.organization_schedule_service is None:
+            raise ToolError("组织定时任务服务不可用")
         return {
-            "schedules": self.script_schedule_service.list_for_tenant(tenant)
+            "schedules": self.organization_schedule_service.list_for_tenant(tenant)
         }
 
     def _tool_manage_script_schedule(
         self, arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
         tenant = self._require_tenant()
-        if tenant is None or self.script_schedule_service is None:
-            raise ToolError("脚本计划服务不可用")
+        if tenant is None or self.organization_schedule_service is None:
+            raise ToolError("组织定时任务服务不可用")
         try:
-            return self.script_schedule_service.manage(
+            return self.organization_schedule_service.manage(
                 tenant, arguments, authorized_by="chat"
             )
         except ValueError as exc:
@@ -1271,7 +1323,7 @@ class ToolRuntime:
     def _tool_db_list_tables(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if self.datasource_service is None:
             raise ToolError("数据源服务未配置")
-        ds_id = self._string(arguments, "datasource_id")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
         tables = self.datasource_service.schema_snapshot(ds_id)
         return {"tables": [{"schema": t["schema"], "name": t["name"],
                             "description": t.get("description", ""),
@@ -1281,7 +1333,7 @@ class ToolRuntime:
     def _tool_db_describe_table(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if self.datasource_service is None:
             raise ToolError("数据源服务未配置")
-        ds_id = self._string(arguments, "datasource_id")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
         table_name = self._string(arguments, "table")
         tables = self.datasource_service.schema_snapshot(ds_id)
         matched = [t for t in tables if t["name"] == table_name]
@@ -1294,7 +1346,7 @@ class ToolRuntime:
     def _tool_db_query(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if self.datasource_service is None:
             raise ToolError("数据源服务未配置")
-        ds_id = self._string(arguments, "datasource_id")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
         sql = self._string(arguments, "sql")
         limit = self._integer(arguments, "limit", 0, 0, 500) or None
         return self.datasource_service.query(ds_id, sql, limit=limit)
@@ -1302,7 +1354,7 @@ class ToolRuntime:
     def _tool_db_execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if self.datasource_service is None:
             raise ToolError("数据源服务未配置")
-        ds_id = self._string(arguments, "datasource_id")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
         sql = self._string(arguments, "sql")
         return self.datasource_service.execute_write(ds_id, sql)
 

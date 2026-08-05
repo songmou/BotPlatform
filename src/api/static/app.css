@@ -151,6 +151,12 @@ body {
     display: none !important;
 }
 
+#page-content-root {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
 .scoped-empty-page .scope-empty-state {
     margin-top: 24px;
     padding: 48px 24px;

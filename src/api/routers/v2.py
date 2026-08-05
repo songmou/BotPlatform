@@ -40,7 +40,7 @@ from src.core.messaging.errors import MessagingError
 from src.core.config.loader import ChannelConfig
 from src.core.services.drive import MAX_PREVIEW_BYTES, MAX_UPLOAD_BYTES
 from src.core.plugins.registry import default_catalog
-from src.core.tooling.definitions import TOOL_DEFINITIONS
+from src.core.tooling.definitions import DATASOURCE_TOOLS, TOOL_DEFINITIONS
 
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
@@ -1115,7 +1115,7 @@ _FOUNDATION_TYPES = {"models", "tools", "skills", "plugins", "mcp", "scripts"}
 _CAPABILITY_SAFE_FIELDS = {
     "agents": {
         "id", "name", "role", "description", "system_prompt", "capabilities", "tools",
-        "plugin_tools", "skills", "mcp_servers", "model", "greeting",
+        "plugin_tools", "skills", "mcp_servers", "datasources", "model", "greeting",
         "greeting_hints", "enabled", "temperature", "max_tokens",
     },
     "models": {
@@ -1284,9 +1284,30 @@ def organization_agent_editor_options(
     }
     builtin = []
     for name, definition in TOOL_DEFINITIONS.items():
+        # db_* tools are granted exclusively through the 数据源 tab; never let
+        # them be picked à la carte from the built-in tool list.
+        if name in DATASOURCE_TOOLS:
+            continue
         builtin.append({
             "name": str(name),
             "description": str(definition.get("description") or ""),
+        })
+    config = getattr(request.app.state, "config", None)
+    datasource_options = []
+    for entry in (getattr(config, "datasources", None) or []):
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        if not entry.get("enabled", True):
+            continue
+        tables = entry.get("tables") or []
+        datasource_options.append({
+            "id": str(entry.get("id")),
+            "name": str(entry.get("name") or entry.get("id")),
+            "engine": str(entry.get("engine") or ""),
+            "database": str(entry.get("database") or ""),
+            "description": str(entry.get("description") or ""),
+            "read_only": bool(entry.get("read_only", True)),
+            "table_count": len(tables) if isinstance(tables, list) else 0,
         })
     return {
         "templates": [
@@ -1297,6 +1318,7 @@ def organization_agent_editor_options(
             if bool((item.get("payload") or {}).get("enabled", True))
         ],
         "builtin_tools": builtin,
+        "datasources": datasource_options,
         "plugins": _enabled_plugin_options(request),
         "skills": [
             _safe_catalog_item("skills", item) for item in public["skills"]

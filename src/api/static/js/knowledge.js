@@ -37,7 +37,7 @@ function initKnowledge() {
             "knowledge-category-add", "knowledge-category-edit", "knowledge-category-delete",
             "knowledge-add-text-btn", "knowledge-from-drive-btn", "knowledge-upload-btn",
             "knowledge-refresh-selected", "knowledge-move-selected", "knowledge-move-target",
-            "knowledge-delete-selected", "knowledge-reindex-btn"
+            "knowledge-delete-selected", "knowledge-reindex-btn", "knowledge-select-all"
         ].forEach(function (id) {
             var element = document.getElementById(id);
             if (element) element.disabled = disabled;
@@ -224,7 +224,9 @@ function initKnowledge() {
             var error = source.last_error ? ' title="' + escapeHtml(source.last_error) + '"' : "";
             return '<tr>' +
                 '<td><input type="checkbox" class="knowledge-row-check" data-id="' +
-                escapeHtml(source.source_id) + '"' + (state.selected[source.source_id] ? " checked" : "") + '></td>' +
+                escapeHtml(source.source_id) + '"' +
+                (state.selected[source.source_id] ? " checked" : "") +
+                (readOnlyScope() ? " disabled" : "") + '></td>' +
                 "<td>" + escapeHtml(source.name) + "</td>" +
                 "<td>" + sourceCell + "</td>" +
                 '<td><span class="knowledge-status-badge ' + escapeHtml(source.status) + '"' + error + ">" +

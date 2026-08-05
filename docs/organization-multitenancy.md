@@ -93,7 +93,7 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 
 - `/api/v2/me`：账号、平台权限和组织成员关系列表，不返回当前或所选组织；
 - `/api/v2/catalog/*`：可见公共目录；
-- `/api/v2/platform/knowledge/*`、`/api/v2/platform/drive/*`：平台公共知识与公共文件管理；
+- `/api/v2/platform/knowledge/*`、`/api/v2/platform/drive/*`：平台公共知识与公共文件；
 - `/api/v2/orgs/{organization_id}/agents|channels|schedules|knowledge|drive|members|analytics|audit`：类型化组织能力；
 - `/api/v2/platform/catalog/{type}/{id}/draft|publish|rollback|activation`：平台目录版本与激活；
 - `/api/v2/platform/*`：组织管理和平台审计。
@@ -104,7 +104,7 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 自动补全 URL；多个组织且 URL 未指定时显示选择状态，不会静默选择首项。无权访问
 URL 中的组织直接返回 403。旧页面地址只进行 308 跳转。
 
-知识库与文件管理采用双入口：`/platform/knowledge`、`/platform/drive` 管理公共内容，
+知识库与文件库采用双入口：`/platform/knowledge`、`/platform/drive` 管理公共内容，
 `/organization/knowledge`、`/organization/drive` 管理 URL 指定组织的共享内容。
 组织成员可在组织页面浏览公共知识和公共文件，但公共内容始终只读；平台管理员需要
 代管具体组织时也必须通过带 `organization_id` 的组织页面进入并留下代管审计。

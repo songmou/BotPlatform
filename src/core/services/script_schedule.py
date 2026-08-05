@@ -1,4 +1,16 @@
-"""Tenant-isolated script schedule persistence and approval-time validation."""
+"""Tenant-isolated script schedule persistence and approval-time validation.
+
+.. deprecated::
+    Superseded by ``organization_schedules`` (system C), the production store
+    for unattended tasks managed from the Web panel. The
+    ``tenant_script_schedules`` table has never been populated in production,
+    so this service registers zero scheduler jobs. It is kept only because
+    ``SchedulerService`` still wires it for backward compatibility; the chat
+    ``list/manage`` tools now read/write through
+    ``OrganizationScheduleToolService`` instead. Delete this module together
+    with its Web API (``src/api/routers/scripts.py`` ``*script-schedule*``
+    endpoints) and the scheduler integration in a dedicated cleanup pass.
+"""
 
 from __future__ import annotations
 

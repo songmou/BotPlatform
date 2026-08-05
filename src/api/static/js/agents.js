@@ -60,14 +60,15 @@ function initAgents() {
         mcp: document.getElementById("tools-mcp")
     };
     var toolKinds = ["builtin", "plugin", "skill", "mcp"];
-    var capabilityKinds = toolKinds.concat(["knowledge"]);
+    var capabilityKinds = toolKinds.concat(["knowledge", "datasource"]);
     var knowledgeContainer = document.getElementById("tools-knowledge");
+    var datasourceContainer = document.getElementById("tools-datasource");
     var bulkSelectionButtons = document.querySelectorAll(".agent-tool-toggle-selection");
 
     function toolContainer(kind) {
-        return kind === "knowledge"
-            ? knowledgeContainer
-            : toolContainers[kind];
+        if (kind === "knowledge") return knowledgeContainer;
+        if (kind === "datasource") return datasourceContainer;
+        return toolContainers[kind];
     }
 
     function updateBulkSelectionControl(kind) {
@@ -96,6 +97,7 @@ function initAgents() {
             });
             boxes.forEach(function (box) { box.checked = selectAll; });
             if (kind === "knowledge") updateKnowledgeCount();
+            else if (kind === "datasource") updateDatasourceCount();
             else updateCount(kind);
             updateBulkSelectionControl(kind);
         });
@@ -149,6 +151,46 @@ function initAgents() {
             checked ? "（已选 " + checked + "）" : "";
     }
 
+    /* ===== Datasource binding ===== */
+    function datasourceDescription(item) {
+        var parts = [];
+        if (item.engine) parts.push(String(item.engine).toUpperCase());
+        if (item.database) parts.push(item.database);
+        var tableCount = (item.tables || []).length;
+        parts.push(tableCount ? "授权 " + tableCount + " 张表" : "未限定表（授权范围为整库）");
+        if (item.driver_ready === false) parts.push("驱动未安装");
+        return parts.join(" · ");
+    }
+
+    function renderDatasources(items) {
+        var usable = (items || []).filter(function (item) {
+            return item && item.id && item.enabled !== false;
+        });
+        if (!usable.length) {
+            datasourceContainer.innerHTML =
+                '<div class="tool-empty">暂无已启用的数据源，请先在「系统工具 → 数据库」中新增并启用。</div>';
+            return;
+        }
+        datasourceContainer.innerHTML =
+            '<div class="tool-hint">绑定后，该智能体在对话中会自动获得只读检索能力' +
+            '（db_list_tables / db_describe_table / db_query），并把授权表结构注入系统提示词。' +
+            '写操作（db_execute）不会被自动开启。</div>' +
+            usable.map(function (item) {
+                return toolCardHtml(
+                    item.id,
+                    item.name || item.id,
+                    datasourceDescription(item),
+                    "datasource"
+                );
+            }).join("");
+    }
+
+    function updateDatasourceCount() {
+        var checked = datasourceContainer.querySelectorAll("input:checked").length;
+        document.getElementById("tools-datasource-count").textContent =
+            checked ? "（已选 " + checked + "）" : "";
+    }
+
     function loadToolOptions() {
         return Promise.all([
             fetch("/api/tools").then(function (r) { return r.json(); }),
@@ -157,13 +199,17 @@ function initAgents() {
             fetch("/api/mcp").then(function (r) { return r.json(); }),
             fetch("/api/knowledge/categories").then(function (r) {
                 return r.ok ? r.json() : { categories: [] };
-            })
+            }),
+            fetch("/api/datasources").then(function (r) {
+                return r.ok ? r.json() : [];
+            }).catch(function () { return []; })
         ]).then(function (results) {
             var builtinTools = results[0] || [];
             var plugins = results[1] || [];
             var skills = results[2] || [];
             var servers = results[3] || [];
             var categories = (results[4] && results[4].categories) || [];
+            var datasources = results[5] || [];
 
             renderCheckboxes(toolContainers.builtin, builtinTools.map(function (t) {
                 return { value: t.name, label: t.name, description: t.description };
@@ -201,8 +247,11 @@ function initAgents() {
                     }).join("") + "</div></div>";
             }).join("") : '<div class="tool-empty">暂无知识库</div>';
 
+            renderDatasources(datasources);
+
             toolKinds.forEach(updateCount);
             updateKnowledgeCount();
+            updateDatasourceCount();
             capabilityKinds.forEach(updateBulkSelectionControl);
         });
     }
@@ -216,6 +265,10 @@ function initAgents() {
     knowledgeContainer.addEventListener("change", function () {
         updateKnowledgeCount();
         updateBulkSelectionControl("knowledge");
+    });
+    datasourceContainer.addEventListener("change", function () {
+        updateDatasourceCount();
+        updateBulkSelectionControl("datasource");
     });
     toolKinds.forEach(function (kind) {
         toolContainers[kind].addEventListener("change", function () {
@@ -292,7 +345,27 @@ function initAgents() {
             box.checked = !!categorySet[box.value];
         });
         updateKnowledgeCount();
+        setDatasourceSelection(agent.datasources || []);
         capabilityKinds.forEach(updateBulkSelectionControl);
+    }
+
+    function setDatasourceSelection(datasourceIds) {
+        var bound = {};
+        (datasourceIds || []).forEach(function (id) { bound[id] = true; });
+        var known = {};
+        datasourceContainer.querySelectorAll("input").forEach(function (box) {
+            known[box.value] = true;
+            box.checked = !!bound[box.value];
+        });
+        var missing = (datasourceIds || []).filter(function (id) { return !known[id]; });
+        if (missing.length) {
+            datasourceContainer.insertAdjacentHTML(
+                "beforeend",
+                '<div class="tool-warning">以下已绑定的数据源当前不可用（已停用或已删除），保存后会自动解除绑定：' +
+                escapeHtml(missing.join("、")) + "</div>"
+            );
+        }
+        updateDatasourceCount();
     }
 
     function collectSelection() {
@@ -314,10 +387,15 @@ function initAgents() {
         knowledgeContainer.querySelectorAll("input:checked").forEach(function (b) {
             knowledgeCategories.push(b.value);
         });
+        var datasources = [];
+        datasourceContainer.querySelectorAll("input:checked").forEach(function (b) {
+            datasources.push(b.value);
+        });
         return {
             tools: tools, plugin_tools: pluginTools,
             skills: skills, mcp_servers: mcpServers,
-            knowledge_category_ids: knowledgeCategories
+            knowledge_category_ids: knowledgeCategories,
+            datasources: datasources
         };
     }
 
@@ -384,6 +462,9 @@ function initAgents() {
         var counts = "工具 " + ((a.tools || []).length + pluginToolCount) +
             " · 技能 " + (a.skills || []).length +
             " · MCP " + (a.mcp_servers || []).length;
+        if ((a.datasources || []).length) {
+            counts += " · 数据源 " + a.datasources.length;
+        }
 
         var actions = '<div class="model-card-footer agent-card-actions">';
         if (!isDefault) {
@@ -512,6 +593,7 @@ function initAgents() {
             plugin_tools: selection.plugin_tools,
             skills: selection.skills,
             mcp_servers: selection.mcp_servers,
+            datasources: selection.datasources,
             capabilities: []
         };
 

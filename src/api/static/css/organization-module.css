@@ -123,6 +123,44 @@
     margin-top: 14px;
 }
 
+/* Schedule runs tab. The hidden attribute loses to author display rules, so
+   restore it explicitly; the selectors stay scoped so other .tab-bar pages
+   keep their current behaviour. */
+.organization-schedule-tabs {
+    margin-bottom: 16px;
+}
+
+.organization-schedule-tabs[hidden],
+.organization-grid[hidden],
+.organization-runs-panel[hidden] {
+    display: none;
+}
+
+.organization-runs-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 0 0 10px;
+}
+
+.organization-runs-toolbar select {
+    min-height: 36px;
+}
+
+.organization-pager {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 10px;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.organization-runs-detail {
+    max-width: 360px;
+    overflow-wrap: anywhere;
+}
+
 @media (max-width: 760px) {
     .organization-page { padding: 18px; }
     .organization-page-header { flex-direction: column; }

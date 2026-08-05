@@ -23,7 +23,12 @@ function initOrganizationModule(requestedModule) {
     var list = document.getElementById("organization-module-list");
     var summary = document.getElementById("organization-module-summary");
     var primary = document.getElementById("organization-primary-action");
+    var notice = document.getElementById("organization-module-notice");
+    var runsPanel = document.getElementById("organization-runs-panel");
+    var scheduleTabs = document.querySelector(".organization-schedule-tabs");
     var state = { data: null, agentOptions: null, scheduleOptions: null };
+    // Only the schedules module renders sub tabs; other modules keep tab "schedules".
+    var runs = { tab: "schedules", limit: 20, offset: 0, total: 0, primaryAllowed: false };
     var definitions = {
         overview: ["组织概览", "查看当前 URL 指定组织的成员与运行概览。", ""],
         agents: ["智能体", "管理组织自有智能体；平台模板复制后独立维护。", "新建智能体"],
@@ -35,7 +40,7 @@ function initOrganizationModule(requestedModule) {
         scripts: ["运维脚本", "平台发布的脚本只读展示，可用于已确认的组织定时任务。", ""],
         members: ["成员与设置", "管理组织成员、角色与邀请。", "邀请成员"],
         knowledge: ["知识库", "组织成员共享的知识内容。", "添加文本"],
-        drive: ["文件管理", "组织成员共享的文件空间。", "上传文件"]
+        drive: ["文件库", "组织成员共享的文件空间。", "上传文件"]
     };
 
     function request(url, options) {
@@ -72,6 +77,51 @@ function initOrganizationModule(requestedModule) {
                 escapeHtml(item.label || item.name || value) + '</span><span class="tool-desc">' +
                 escapeHtml(item.description || "") + '</span></span></label>';
         }).join("") : '<div class="tool-empty">暂无可选项</div>';
+    }
+
+    function datasourceDescription(item) {
+        var parts = [];
+        if (item.engine) parts.push(String(item.engine).toUpperCase());
+        if (item.database) parts.push(item.database);
+        if (item.table_count) parts.push("授权 " + item.table_count + " 张表");
+        else parts.push("未限定表（授权范围为整库）");
+        if (item.description) parts.push(item.description);
+        return parts.join(" · ");
+    }
+
+    function renderAgentDatasources(options, selectedIds) {
+        var container = document.getElementById("organization-agent-datasources");
+        if (!container) return;
+        var selected = {};
+        (selectedIds || []).forEach(function (value) { selected[value] = true; });
+        var items = (options || []).filter(function (item) { return item && item.id; });
+        agentCheckboxes(container, items.map(function (item) {
+            return {
+                value: item.id,
+                label: item.name || item.id,
+                description: datasourceDescription(item)
+            };
+        }), "datasource", selected);
+        if (!items.length) {
+            container.innerHTML = '<div class="tool-empty">平台暂未开放可用数据源，请联系平台管理员在「系统工具 → 数据库」中新增并启用。</div>';
+            return;
+        }
+        container.insertAdjacentHTML(
+            "afterbegin",
+            '<div class="tool-hint">绑定后，该智能体在对话中会自动获得只读检索能力' +
+            '（db_list_tables / db_describe_table / db_query），并把授权表结构注入系统提示词。' +
+            '写操作不会被自动开启。</div>'
+        );
+        var known = {};
+        items.forEach(function (item) { known[item.id] = true; });
+        var missing = (selectedIds || []).filter(function (value) { return !known[value]; });
+        if (missing.length) {
+            container.insertAdjacentHTML(
+                "beforeend",
+                '<div class="tool-warning">以下已绑定的数据源当前不可用（已停用或已删除），保存后会自动解除绑定：' +
+                escapeHtml(missing.join("、")) + "</div>"
+            );
+        }
     }
 
     function selectedAgentValues(container) {
@@ -135,6 +185,7 @@ function initOrganizationModule(requestedModule) {
             }).join("") || '<div class="tool-empty">暂无可选插件工具</div>';
             agentCheckboxes(document.getElementById("organization-agent-skills"), (data.skills || []).map(function (item) { var p = item.payload || {}; return { value: item.resource_id, label: p.name || item.resource_id, description: p.description }; }), "skill", skills);
             agentCheckboxes(document.getElementById("organization-agent-mcp"), (data.mcp || []).map(function (item) { var p = item.payload || {}; return { value: item.resource_id, label: p.name || item.resource_id, description: p.description }; }), "mcp", mcp);
+            renderAgentDatasources(data.datasources, payload.datasources || []);
             var knowledge = {}; (current.knowledge_category_ids || []).forEach(function (value) { knowledge[value] = true; });
             var knowledgeRequest = creating ? Promise.resolve({ category_ids: [] }) : request(organizationApi("/agents/" + encodeURIComponent(payload.id || current.resource_id) + "/knowledge-categories"));
             return knowledgeRequest.then(function (bindings) {
@@ -151,7 +202,7 @@ function initOrganizationModule(requestedModule) {
                         var selected = (options.templates || []).filter(function (item) { return item.id === templateSelect.value; })[0];
                         if (selected) {
                             var selectedPayload = selected.payload || {};
-                            ["name", "role", "description", "enabled", "model", "system_prompt", "greeting", "greeting_hints", "temperature", "max_tokens", "tools", "plugin_tools", "skills", "mcp_servers"].forEach(function () {
+                            ["name", "role", "description", "enabled", "model", "system_prompt", "greeting", "greeting_hints", "temperature", "max_tokens", "tools", "plugin_tools", "skills", "mcp_servers", "datasources"].forEach(function () {
                                 /* The form is refreshed through the same opening path below. */
                             });
                             fillAgentFromPayload(selectedPayload, options);
@@ -187,7 +238,8 @@ function initOrganizationModule(requestedModule) {
                                 tools: selectedAgentValues(document.getElementById("organization-agent-builtin-tools")),
                                 plugin_tools: pluginTools,
                                 skills: selectedAgentValues(document.getElementById("organization-agent-skills")),
-                                mcp_servers: selectedAgentValues(document.getElementById("organization-agent-mcp"))
+                                mcp_servers: selectedAgentValues(document.getElementById("organization-agent-mcp")),
+                                datasources: selectedAgentValues(document.getElementById("organization-agent-datasources"))
                             },
                             base_resource_id: creating ? (templateSelect.value || null) : (current.base_resource_id || null),
                             knowledge_category_ids: selectedAgentValues(document.getElementById("organization-agent-knowledge"))
@@ -214,6 +266,7 @@ function initOrganizationModule(requestedModule) {
         document.querySelectorAll('#organization-agent-skills input').forEach(function (box) { box.checked = (payload.skills || []).indexOf(box.value) >= 0; });
         document.querySelectorAll('#organization-agent-mcp input').forEach(function (box) { box.checked = (payload.mcp_servers || []).indexOf(box.value) >= 0; });
         document.querySelectorAll('#organization-agent-plugin-tools input').forEach(function (box) { box.checked = ((payload.plugin_tools || {})[box.getAttribute("data-plugin-id")] || []).indexOf(box.value) >= 0; });
+        renderAgentDatasources((options || {}).datasources, payload.datasources || []);
     }
 
     function channelDialog(current, creating) {
@@ -364,7 +417,10 @@ function initOrganizationModule(requestedModule) {
                     [
                         scope === "organization" ? "组织智能体" : "公共模板",
                         enabled ? "已启用" : "已暂停",
-                        data.default_agent_id === item.resource_id ? "默认" : ""
+                        data.default_agent_id === item.resource_id ? "默认" : "",
+                        (payload.datasources || []).length
+                            ? "数据源 " + payload.datasources.length
+                            : ""
                     ].filter(Boolean),
                     actions
                 );
@@ -412,7 +468,6 @@ function initOrganizationModule(requestedModule) {
     function loadSchedules() {
         return request(organizationApi("/schedules")).then(function (data) {
             state.data = data;
-            var notice = document.getElementById("organization-module-notice");
             notice.hidden = false;
             notice.textContent = "平台统一时区：" + data.timezone + "；无有效收件人时任务会安全跳过。";
             setItems(data.items || [], function (item) {
@@ -426,6 +481,115 @@ function initOrganizationModule(requestedModule) {
                     [item.enabled ? "已启用" : "已暂停", item.action.type, item.target], actions);
             });
         });
+    }
+
+    /* ---- schedule runs tab ---- */
+
+    var RUN_STATUS_LABELS = {
+        running: "运行中", succeeded: "成功", failed: "失败", skipped: "已跳过"
+    };
+    var RUN_STATUS_BADGES = {
+        running: "badge-warning", succeeded: "badge-success",
+        failed: "badge-danger", skipped: "badge-muted"
+    };
+    var RUN_ACTION_LABELS = {
+        text: "文本消息", agent_prompt: "智能体生成",
+        script: "平台脚本", plugin: "平台插件工具"
+    };
+
+    // Timestamps are stored as datetime.now(timezone.utc).isoformat(); the
+    // six-digit microseconds are not standard ES, so fall back to raw text.
+    function runTime(value) {
+        if (!value) return "—";
+        var date = new Date(value);
+        if (isNaN(date.getTime())) return String(value);
+        return date.toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function runsCell(row, text, className) {
+        var cell = document.createElement("td");
+        cell.textContent = text;
+        if (className) cell.className = className;
+        row.appendChild(cell);
+        return cell;
+    }
+
+    function renderRuns(items) {
+        var body = document.getElementById("organization-runs-body");
+        body.innerHTML = "";
+        if (!items.length) {
+            var emptyRow = document.createElement("tr");
+            var emptyCell = document.createElement("td");
+            emptyCell.colSpan = 6;
+            emptyCell.textContent = "暂无执行记录";
+            emptyRow.appendChild(emptyCell);
+            body.appendChild(emptyRow);
+            return;
+        }
+        items.forEach(function (item) {
+            var row = document.createElement("tr");
+            runsCell(row, runTime(item.started_at));
+            runsCell(row, item.schedule_key || "—");
+            runsCell(row, RUN_ACTION_LABELS[item.action_type] || item.action_type || "—");
+            var statusCell = runsCell(row, "");
+            var badge = document.createElement("span");
+            badge.className = "badge " + (RUN_STATUS_BADGES[item.status] || "badge-muted");
+            badge.textContent = RUN_STATUS_LABELS[item.status] || item.status || "—";
+            statusCell.appendChild(badge);
+            runsCell(row, item.detail || "—", "organization-runs-detail");
+            runsCell(row, runTime(item.finished_at));
+            body.appendChild(row);
+        });
+    }
+
+    function loadScheduleRuns() {
+        if (!runsPanel) return Promise.resolve();
+        var status = document.getElementById("organization-runs-status").value;
+        var url = organizationApi("/schedule-runs") + "?limit=" + runs.limit +
+            "&offset=" + runs.offset +
+            (status ? "&status=" + encodeURIComponent(status) : "");
+        return request(url).then(function (data) {
+            runs.total = data.total || 0;
+            renderRuns(data.items || []);
+            var page = Math.floor(runs.offset / runs.limit) + 1;
+            var pages = Math.max(1, Math.ceil(runs.total / runs.limit));
+            document.getElementById("organization-runs-page").textContent =
+                "第 " + page + " / " + pages + " 页，共 " + runs.total + " 条";
+            document.getElementById("organization-runs-prev").disabled = runs.offset <= 0;
+            document.getElementById("organization-runs-next").disabled =
+                runs.offset + runs.limit >= runs.total;
+        }).catch(function (error) {
+            renderRuns([]);
+            showToast(error.message, "error");
+        });
+    }
+
+    // Keep the schedule widgets and the runs panel mutually exclusive. The
+    // primary button also depends on permissions, so never force it visible.
+    function applyScheduleTab() {
+        if (!runsPanel) return;
+        var runsMode = runs.tab === "runs";
+        runsPanel.hidden = !runsMode;
+        summary.hidden = runsMode;
+        list.hidden = runsMode;
+        notice.hidden = runsMode || !notice.textContent;
+        primary.hidden = runsMode || !runs.primaryAllowed;
+    }
+
+    function activateScheduleTab(button) {
+        var target = button.getAttribute("data-schedule-tab");
+        Array.prototype.forEach.call(
+            scheduleTabs.querySelectorAll(".tab-btn"),
+            function (item) { item.classList.toggle("active", item === button); }
+        );
+        runs.tab = target;
+        applyScheduleTab();
+        if (target !== "runs") {
+            refresh();
+            return;
+        }
+        runs.offset = 0;
+        loadScheduleRuns();
     }
 
     function loadCapabilities(type) {
@@ -518,7 +682,8 @@ function initOrganizationModule(requestedModule) {
         return agentDialog({
             id: "", name: "", role: "assistant", description: "",
             system_prompt: "你是一个有帮助的助手。", capabilities: [],
-            tools: [], plugin_tools: {}, skills: [], mcp_servers: [], enabled: true
+            tools: [], plugin_tools: {}, skills: [], mcp_servers: [],
+            datasources: [], enabled: true
         }, true).then(function (payload) {
             if (!payload) return null;
             return request(organizationApi("/agents/" + encodeURIComponent(payload.payload.id)), {
@@ -691,7 +856,37 @@ function initOrganizationModule(requestedModule) {
         promise.then(refresh).catch(function (error) { showToast(error.message, "error"); });
     });
 
-    document.getElementById("organization-refresh").addEventListener("click", refresh);
+    if (scheduleTabs) {
+        Array.prototype.forEach.call(
+            scheduleTabs.querySelectorAll(".tab-btn"),
+            function (tab) {
+                tab.addEventListener("click", function () { activateScheduleTab(tab); });
+            }
+        );
+        document.getElementById("organization-runs-status").addEventListener("change", function () {
+            runs.offset = 0;
+            loadScheduleRuns();
+        });
+        document.getElementById("organization-runs-prev").addEventListener("click", function () {
+            if (runs.offset < runs.limit) return;
+            runs.offset -= runs.limit;
+            loadScheduleRuns();
+        });
+        document.getElementById("organization-runs-next").addEventListener("click", function () {
+            if (runs.offset + runs.limit >= runs.total) return;
+            runs.offset += runs.limit;
+            loadScheduleRuns();
+        });
+    }
+
+    // Refresh follows the active sub tab; other modules keep runs.tab default.
+    document.getElementById("organization-refresh").addEventListener("click", function () {
+        if (runs.tab === "runs") {
+            loadScheduleRuns();
+            return;
+        }
+        refresh();
+    });
     primary.addEventListener("click", function () {
         primaryAction().catch(function (error) { showToast(error.message, "error"); });
     });
@@ -706,6 +901,8 @@ function initOrganizationModule(requestedModule) {
                 "加入或选择组织后，可管理该组织的" + definition[0] + "。";
             primary.hidden = true;
             document.getElementById("organization-refresh").disabled = true;
+            // Without an organization there is no data source behind the tabs.
+            if (scheduleTabs) scheduleTabs.hidden = true;
             summary.textContent = "";
             list.innerHTML = '<div class="organization-empty">当前账号尚未加入组织。请联系组织管理员邀请你加入。</div>';
             return;
@@ -716,6 +913,9 @@ function initOrganizationModule(requestedModule) {
         document.getElementById("organization-name").textContent = organization ? organization.name : "组织工作台";
         if (definition[2] &&
                 (module === "members" ? canManageOrganization() : canWriteOrganization())) {
+            // Remember the permission fact so tab switches can restore the
+            // button without re-deriving it.
+            runs.primaryAllowed = true;
             primary.hidden = false;
             primary.textContent = definition[2];
         }

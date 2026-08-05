@@ -194,6 +194,44 @@ def update_datasource(
     raise HTTPException(status_code=404, detail="数据源不存在")
 
 
+def _datasource_references(request: Request, datasource_id: str) -> list:
+    """List agents that still bind the datasource (platform presets + orgs).
+
+    Startup validation only warns about dangling bindings, so deletion is the
+    place where we still hold enough context to stop the user politely.
+    """
+    labels = []
+    config = getattr(request.app.state, "config", None)
+    for agent_id, agent in (getattr(config, "agents", None) or {}).items():
+        if datasource_id in (getattr(agent, "datasources", None) or []):
+            labels.append("平台智能体 {}".format(agent_id))
+    try:
+        from src.core.storage.database import Database
+
+        with Database().read() as connection:
+            rows = connection.execute(
+                "SELECT organization_id, agent_id, payload_json "
+                "FROM organization_agents"
+            ).fetchall()
+    except Exception as exc:  # storage unavailable → never block on a guess
+        logger.warning("检查数据源引用时读取组织智能体失败：%s", exc)
+        return labels
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if datasource_id in (payload.get("datasources") or []):
+            labels.append(
+                "组织 {} 的智能体 {}".format(
+                    row["organization_id"], row["agent_id"]
+                )
+            )
+    return labels
+
+
 @router.delete("/{datasource_id}")
 def delete_datasource(
     datasource_id: str,
@@ -204,6 +242,15 @@ def delete_datasource(
     filtered = [e for e in entries if e["id"] != datasource_id]
     if len(filtered) == len(entries):
         raise HTTPException(status_code=404, detail="数据源不存在")
+    references = _datasource_references(request, datasource_id)
+    if references:
+        preview = "、".join(references[:5])
+        if len(references) > 5:
+            preview += " 等 {} 处".format(len(references))
+        raise HTTPException(
+            status_code=409,
+            detail="该数据源仍被以下智能体绑定，请先解除绑定再删除：{}".format(preview),
+        )
     delete_password(datasource_id)
     _sync(request, filtered)
     return {"status": "ok"}

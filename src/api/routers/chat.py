@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Generator, List, Optional
 
@@ -78,12 +79,29 @@ def _agent_from_payload(resource_id: str, payload: dict) -> AgentPreset:
         plugin_tools=dict(payload.get("plugin_tools") or {}),
         skills=list(payload.get("skills") or []),
         mcp_servers=list(payload.get("mcp_servers") or []),
+        datasources=list(payload.get("datasources") or []),
         model=payload.get("model"),
         greeting=payload.get("greeting"),
         greeting_hints=list(payload.get("greeting_hints") or []),
         temperature=payload.get("temperature"),
         max_tokens=payload.get("max_tokens"),
     )
+
+
+def _bind_agent_scope(tool_runtime, tenant, agent) -> None:
+    """Bind tenant workspace and the agent's datasource grant on this thread.
+
+    ``bind_tenant`` deliberately clears any previous datasource grant, so the
+    two must always be applied together.  Web requests execute tools on anyio
+    worker threads, which is why this is re-applied before every execute().
+    """
+    if tool_runtime is None:
+        return
+    if tenant is not None:
+        tool_runtime.bind_tenant(tenant)
+    binder = getattr(tool_runtime, "bind_agent_datasources", None)
+    if binder is not None:
+        binder(list(getattr(agent, "datasources", []) or []))
 
 
 def _effective_agents(request: Request, organization_id: str) -> dict:
@@ -195,7 +213,9 @@ def _run_agent(
     knowledge_service=None,
     return_knowledge: bool = False,
 ):
-    messages = [CanonicalMessage("system", build_system_prompt(agent, skills))]
+    messages = [
+        CanonicalMessage("system", build_system_prompt(agent, skills, tool_runtime))
+    ]
     knowledge_hits = []
     if knowledge_service is not None and tenant is not None:
         try:
@@ -239,7 +259,7 @@ def _run_agent(
     tool_schemas = []
     if tool_runtime and tenant and tool_names and session.capabilities.tools:
         try:
-            tool_runtime.bind_tenant(tenant)
+            _bind_agent_scope(tool_runtime, tenant, agent)
             tool_schemas = tool_runtime.schemas(tool_names)
         except Exception as exc:
             raise ModelError(
@@ -324,7 +344,7 @@ def _run_agent(
                             ).format(tool_name),
                         }
                     else:
-                        tool_runtime.bind_tenant(tenant)
+                        _bind_agent_scope(tool_runtime, tenant, agent)
                         if tool_name == "knowledge_search":
                             tool_result = tool_runtime.execute(
                                 tool_name,
@@ -614,6 +634,10 @@ def chat(
     if conversation.get("status") == "archived":
         raise HTTPException(status_code=409, detail="会话已归档，请先恢复后再继续")
     tenant = organizations.registry.get(organization_id)
+    # Tools that mutate organization state need the acting member, not just
+    # the tenant. member_user_id is compare=False, so bind_tenant's equality
+    # check stays valid after this replace().
+    tenant = replace(tenant, member_user_id=principal.user.user_id)
     tenant_id = tenant.tenant_id
     user_id = principal.user.user_id
     session_key = "organization:{}".format(conv_id)
@@ -685,21 +709,16 @@ def chat(
             or next(iter(agents_by_id.values()))
         )
 
+    tool_runtime = getattr(request.app.state, "tool_runtime", None)
+    system_prompt = build_system_prompt(agent, effective_skills, tool_runtime)
+
     if body.regenerate:
         if history and history[-1].role == "assistant":
             history = history[:-1]
-        messages = [
-            CanonicalMessage(
-                role="system", content=build_system_prompt(agent, effective_skills)
-            )
-        ]
+        messages = [CanonicalMessage(role="system", content=system_prompt)]
         messages.extend(history)
     else:
-        messages = [
-            CanonicalMessage(
-                role="system", content=build_system_prompt(agent, effective_skills)
-            )
-        ]
+        messages = [CanonicalMessage(role="system", content=system_prompt)]
         messages.extend(history)
         messages.append(CanonicalMessage(role="user", content=body.message))
 
@@ -728,12 +747,11 @@ def chat(
         max_tokens=getattr(agent, "max_tokens", None),
     )
 
-    tool_runtime = getattr(request.app.state, "tool_runtime", None)
     agent_tools = resolve_tool_names(agent, tool_runtime)
     tool_schemas = []
     if tool_runtime and agent_tools:
         try:
-            tool_runtime.bind_tenant(tenant)
+            _bind_agent_scope(tool_runtime, tenant, agent)
             tool_schemas = tool_runtime.schemas(agent_tools)
         except Exception:
             tool_schemas = []
@@ -826,7 +844,7 @@ def chat(
                         yield sse_tool_call(tool_name, tool_args)
 
                         try:
-                            tool_runtime.bind_tenant(tenant)
+                            _bind_agent_scope(tool_runtime, tenant, agent)
                             if tool_name == "knowledge_search":
                                 result = tool_runtime.execute(
                                     tool_name,

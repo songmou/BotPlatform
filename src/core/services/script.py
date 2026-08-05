@@ -348,7 +348,76 @@ class ScriptService:
                 pass
         if tenant_id and tenant_id not in ids:
             ids.append(tenant_id)
+        # The same natural person can own several tenants once a channel is
+        # re-bound (the ``organization-channel:`` prefix mints a fresh tenant),
+        # stranding credentials that were configured under a previous one.
+        # Probe sibling tenants that share the exact channel identity and treat
+        # them as extra credential candidates. Matching is strict (both
+        # platform and external_user_id must match, prefix-stripped) and the
+        # result is only ever used to READ secrets -- never to write.
+        for sibling in self._sibling_channel_tenants(ids):
+            if sibling not in ids:
+                ids.append(sibling)
         return ids
+
+    @staticmethod
+    def _strip_channel_prefix(value: str) -> str:
+        """Normalize platform-scoped identities to the bare external id.
+
+        A re-bound channel may store ``wechat_ilink:o9cq...`` while an older
+        tenant stored the same person as ``o9cq...``. Stripping the optional
+        ``<scope>:`` prefix lets the two match as one natural person.
+        """
+        marker = value.find(":")
+        if 0 < marker < len(value) - 1 and value[:marker].replace("_", "").isalnum():
+            return value[marker + 1 :]
+        return value
+
+    def _sibling_channel_tenants(self, ids: List[str]) -> List[str]:
+        """Return tenants sharing the exact channel identity of ``ids``.
+
+        Used only to broaden credential lookup for the same person; never for
+        authorization or writes. Returns [] on any database error so credential
+        resolution can never fail because of the probe.
+        """
+        if not ids:
+            return []
+        try:
+            with self.tenant_registry.database.read() as connection:
+                rows = connection.execute(
+                    "SELECT tenant_id, platform, external_user_id "
+                    "FROM channel_identities WHERE tenant_id IN ({})".format(
+                        ",".join("?" for _ in ids)
+                    ),
+                    tuple(ids),
+                ).fetchall()
+            if not rows:
+                return []
+            pairs = {
+                (
+                    str(row["platform"]),
+                    self._strip_channel_prefix(str(row["external_user_id"])),
+                )
+                for row in rows
+            }
+            conditions = []
+            params: List[str] = []
+            for platform, external in pairs:
+                conditions.append("(platform=? AND external_user_id=?)")
+                params.extend([platform, external])
+            with self.tenant_registry.database.read() as connection:
+                siblings = connection.execute(
+                    "SELECT DISTINCT tenant_id FROM channel_identities WHERE "
+                    + " OR ".join(conditions),
+                    tuple(params),
+                ).fetchall()
+            return [
+                str(row["tenant_id"])
+                for row in siblings
+                if str(row["tenant_id"]) not in set(ids)
+            ]
+        except Exception:
+            return []
 
     def _resolve_integration_metadata(
         self,

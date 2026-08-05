@@ -59,6 +59,9 @@ from src.core.services.script import ScriptService
 from src.core.services.script_registry import ExternalScriptRegistry
 from src.core.services.env_resolver import EnvResolver
 from src.core.services.script_schedule import ScriptScheduleService
+from src.core.services.organization_schedule_tool import (
+    OrganizationScheduleToolService,
+)
 from src.core.storage.tenants import (
     SettingsStore,
     IntegrationStore,
@@ -209,6 +212,15 @@ def build_bot_runtime(
             script_service,
             project_config.app.timezone,
         )
+        # Chat-facing bridge to organization_schedules (system C). The
+        # SchedulerService keeps its own ScriptScheduleService reference for
+        # the legacy tenant_script_schedules table; this one is only for the
+        # list/manage chat tools.
+        organization_schedule_service = OrganizationScheduleToolService(
+            services.organization_control_store,
+            services.organization_store,
+            project_config,
+        )
         plugin_context = PluginContext(
             project_root=PROJECT_ROOT,
             tenant_registry=tenant_registry,
@@ -242,13 +254,13 @@ def build_bot_runtime(
                 project_config.app.timezone,
                 audit_logger=log_tool_call,
                 script_service=script_service,
-                script_schedule_service=script_schedule_service,
                 tenant_registry=tenant_registry,
                 knowledge_service=services.knowledge_service,
                 plugin_manager=plugin_manager,
                 mcp_manager=mcp_manager,
                 tool_audit_store=tool_audit_store,
                 tool_states=tool_states,
+                organization_schedule_service=organization_schedule_service,
                 drive_service=services.drive_service,
                 drive_audit_store=drive_audit_store,
                 resource_store=services.resource_store,

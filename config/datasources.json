@@ -17,7 +17,16 @@
       "pool_size": 3,
       "max_rows": 200,
       "max_result_bytes": 262144,
-      "tables": [],
+      "tables": [
+        {
+          "schema": "public",
+          "name": "AiTaskImages"
+        },
+        {
+          "schema": "public",
+          "name": "AiTaskVideos"
+        }
+      ],
       "prompt_injection": {}
     }
   ]

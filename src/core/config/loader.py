@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,9 @@ from src.core.plugins.registry import (
 )
 from src.core.plugins.manifest import PLUGIN_ID_PATTERN
 from src.core.services.env_resolver import normalize_allowlist
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(RuntimeError):
@@ -1846,10 +1850,14 @@ def load_project_config(config_dir: Path) -> ProjectConfig:
             )
         unknown_datasources = sorted(set(agent.datasources) - datasource_ids)
         if unknown_datasources:
-            raise ConfigError(
-                "Agent {} 引用了未知数据源：{}".format(
-                    agent.id, "、".join(unknown_datasources)
-                )
+            # Deliberately non-fatal: deleting a datasource that some agent
+            # still references must not take the whole platform down.  The
+            # stale ids are simply ignored at runtime (see
+            # ToolRuntime.bind_agent_datasources / prompt_block).
+            logger.warning(
+                "Agent %s 引用了未知数据源，已忽略：%s",
+                agent.id,
+                "、".join(unknown_datasources),
             )
     if app.default_agent not in agents:
         raise ConfigError(

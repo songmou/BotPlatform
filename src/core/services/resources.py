@@ -132,6 +132,7 @@ def _agent_from_payload(resource_id: str, payload: Dict[str, Any]) -> AgentPrese
         },
         skills=list(payload.get("skills") or []),
         mcp_servers=list(payload.get("mcp_servers") or []),
+        datasources=list(payload.get("datasources") or []),
         model=payload.get("model"),
         greeting=payload.get("greeting"),
         greeting_hints=list(payload.get("greeting_hints") or []),
@@ -811,6 +812,32 @@ class ScopedResourceStore:
             raise ResourceError(
                 "智能体引用了不存在的内置工具：{}".format("、".join(unknown_tools))
             )
+        datasources = payload.get("datasources") or []
+        if not isinstance(datasources, list):
+            raise ResourceError("数据源绑定必须是数组")
+        if datasources:
+            available = {
+                entry.get("id"): entry
+                for entry in (getattr(self.bootstrap_config, "datasources", []) or [])
+                if isinstance(entry, dict) and entry.get("id")
+            }
+            seen: set = set()
+            for raw_id in datasources:
+                ds_id = str(raw_id or "").strip()
+                if not ds_id:
+                    raise ResourceError("数据源 ID 不能为空")
+                if ds_id in seen:
+                    raise ResourceError("数据源绑定不能重复：{}".format(ds_id))
+                seen.add(ds_id)
+                entry = available.get(ds_id)
+                if entry is None:
+                    raise ResourceError("智能体引用了不存在的数据源：{}".format(ds_id))
+                if not entry.get("enabled", True):
+                    raise ResourceError(
+                        "智能体引用的数据源已停用：{}".format(
+                            entry.get("name") or ds_id
+                        )
+                    )
         plugin_tools = payload.get("plugin_tools") or {}
         if not isinstance(plugin_tools, dict):
             raise ResourceError("插件工具绑定必须是 JSON 对象")

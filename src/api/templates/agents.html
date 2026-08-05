@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}智能体管理 - BotPlatform{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/agents.css">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/agents.css?v=20260805a">{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
@@ -29,6 +29,7 @@
             <button class="tab-btn" type="button" data-agent-tab="plugin" role="tab" aria-selected="false" aria-controls="agent-plugin-panel">插件工具 <span id="tools-plugin-count" class="tool-count"></span></button>
             <button class="tab-btn" type="button" data-agent-tab="skill" role="tab" aria-selected="false" aria-controls="agent-skill-panel">Skill 技能 <span id="tools-skill-count" class="tool-count"></span></button>
             <button class="tab-btn" type="button" data-agent-tab="mcp" role="tab" aria-selected="false" aria-controls="agent-mcp-panel">MCP 服务 <span id="tools-mcp-count" class="tool-count"></span></button>
+            <button class="tab-btn" type="button" data-agent-tab="datasource" role="tab" aria-selected="false" aria-controls="agent-datasource-panel">数据源 <span id="tools-datasource-count" class="tool-count"></span></button>
             <button class="tab-btn" type="button" data-agent-tab="knowledge" role="tab" aria-selected="false" aria-controls="agent-knowledge-panel">知识库授权 <span id="tools-knowledge-count" class="tool-count"></span></button>
         </div>
         <form id="agent-form" class="modal-body">
@@ -122,6 +123,14 @@
                     <div id="tools-mcp" class="tool-checkboxes"></div>
                 </div>
             </div>
+            <div id="agent-datasource-panel" class="agent-tab-panel" data-agent-panel="datasource" role="tabpanel" hidden>
+                <div class="agent-tools-section">
+                    <div class="agent-tool-bulk-actions">
+                        <button class="btn-secondary btn-sm agent-tool-toggle-selection" type="button" data-tool-kind="datasource">全选</button>
+                    </div>
+                    <div id="tools-datasource" class="tool-checkboxes"></div>
+                </div>
+            </div>
             <div id="agent-knowledge-panel" class="agent-tab-panel" data-agent-panel="knowledge" role="tabpanel" hidden>
                 <div class="agent-tools-section">
                     <div class="agent-tool-bulk-actions">
@@ -140,6 +149,6 @@
 
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/agents.js"></script>
+<script src="/static/js/agents.js?v=20260805a"></script>
 <script>initAgents();</script>
 {% endblock %}

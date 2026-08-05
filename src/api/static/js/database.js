@@ -28,6 +28,7 @@ function initDatabase() {
         navigator.clipboard.writeText(text).then(function () { showToast('已复制配置', 'success'); });
     });
     document.getElementById('ds-schema-refresh').addEventListener('click', loadSchema);
+    document.getElementById('ds-schema-fetch').addEventListener('click', fetchRemoteTables);
     document.getElementById('ds-query-run').addEventListener('click', runQuery);
 
     /* Engine selector (like MCP transport selector) */
@@ -227,13 +228,135 @@ function initDatabase() {
             .then(function (data) {
                 var tables = data.tables || [];
                 if (!tables.length) {
-                    el.innerHTML = '<div class="empty-state">未配置授权表。请在编辑中通过「拉取远端表」功能选择需要授权的表。</div>';
+                    el.innerHTML = '<div class="empty-state">暂无已授权表。点击上方「拉取远端表」从数据库中选择需要授权的表。</div>';
                     return;
                 }
                 el.innerHTML = tables.map(renderSchemaTable).join('');
             })
             .catch(function (err) {
                 el.innerHTML = '<div class="empty-state">加载表结构失败：' + escapeHtml(err.message) + '</div>';
+            });
+    }
+
+    /* ===== Fetch remote tables & authorize ===== */
+    function fetchRemoteTables() {
+        if (!currentDs) return;
+        var el = document.getElementById('ds-schema-list');
+        el.innerHTML = '<div class="empty-state">正在拉取远端表…</div>';
+        fetch(API + '/' + encodeURIComponent(currentDs.id) + '/tables?refresh=true', { cache: 'no-store' })
+            .then(function (r) { if (!r.ok) throw new Error('请求失败'); return r.json(); })
+            .then(function (data) {
+                var tables = data.tables || [];
+                if (!tables.length) {
+                    el.innerHTML = '<div class="empty-state">远端数据库没有表</div>';
+                    return;
+                }
+                /* Build a set of currently authorised table keys for pre-checking */
+                var authorised = {};
+                (currentDs.tables || []).forEach(function (t) {
+                    var key = (t.schema || currentDs.database) + '.' + t.name;
+                    authorised[key.toLowerCase()] = true;
+                });
+                renderTableSelector(el, tables, authorised);
+            })
+            .catch(function (err) {
+                el.innerHTML = '<div class="empty-state">拉取远端表失败：' + escapeHtml(err.message) + '</div>';
+            });
+    }
+
+    function renderTableSelector(container, tables, authorised) {
+        var rows = tables.map(function (t, idx) {
+            var key = (t.schema || '') + '.' + t.name;
+            var checked = authorised[key.toLowerCase()] ? ' checked' : '';
+            var label = escapeHtml(t.name);
+            if (t.schema && t.schema !== currentDs.database) label += ' (' + escapeHtml(t.schema) + ')';
+            var desc = '';
+            if (t.comment) desc += escapeHtml(t.comment);
+            if (t.estimated_rows) desc += (desc ? ' · ' : '') + '~' + t.estimated_rows + ' 行';
+            return '<label class="ds-table-pick">' +
+                '<input type="checkbox" class="ds-table-check" data-idx="' + idx + '"' + checked + '>' +
+                '<div class="ds-table-label">' +
+                    '<span class="ds-table-name">' + label + '</span>' +
+                    (desc ? '<span class="ds-table-desc">' + desc + '</span>' : '') +
+                '</div>' +
+                '<input type="text" class="ds-table-alias" placeholder="备注（可选）" data-idx="' + idx + '"' +
+                ' value="' + (function () {
+                    var a = (currentDs.tables || []).find(function (x) {
+                        return (x.schema || '').toLowerCase() === (t.schema || '').toLowerCase() &&
+                            x.name.toLowerCase() === t.name.toLowerCase();
+                    });
+                    return a && a.description ? escapeHtml(a.description) : '';
+                })() + '">' +
+            '</label>';
+        }).join('');
+
+        container.innerHTML =
+            '<div class="ds-table-picker">' +
+                '<div class="ds-table-picker-toolbar">' +
+                    '<label class="checkbox-label"><input type="checkbox" id="ds-table-all"> 全选</label>' +
+                    '<span class="text-muted ds-table-count">已选 0 张</span>' +
+                    '<div class="ds-table-picker-btns">' +
+                        '<button type="button" class="btn-secondary btn-sm" id="ds-table-cancel">取消</button>' +
+                        '<button type="button" class="btn-primary btn-sm" id="ds-table-save">保存授权</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="ds-table-picker-list">' + rows + '</div>' +
+            '</div>';
+
+        /* Wire up events */
+        var countEl = container.querySelector('.ds-table-count');
+        var checkEls = container.querySelectorAll('.ds-table-check');
+        var allCheck = document.getElementById('ds-table-all');
+
+        function updateCount() {
+            var n = Array.prototype.filter.call(checkEls, function (c) { return c.checked; }).length;
+            countEl.textContent = '已选 ' + n + ' 张';
+            allCheck.checked = n === checkEls.length;
+        }
+
+        checkEls.forEach(function (cb) { cb.addEventListener('change', updateCount); });
+        allCheck.addEventListener('change', function () {
+            checkEls.forEach(function (cb) { cb.checked = allCheck.checked; });
+            updateCount();
+        });
+        updateCount();
+
+        document.getElementById('ds-table-cancel').addEventListener('click', loadSchema);
+        document.getElementById('ds-table-save').addEventListener('click', function () {
+            saveAuthorizedTables(tables, checkEls, container);
+        });
+    }
+
+    function saveAuthorizedTables(tables, checkEls, container) {
+        var selected = [];
+        checkEls.forEach(function (cb) {
+            if (!cb.checked) return;
+            var idx = parseInt(cb.getAttribute('data-idx'), 10);
+            var tbl = tables[idx];
+            var aliasEl = container.querySelector('.ds-table-alias[data-idx="' + idx + '"]');
+            var entry = { schema: tbl.schema || '', name: tbl.name };
+            if (aliasEl && aliasEl.value.trim()) entry.description = aliasEl.value.trim();
+            selected.push(entry);
+        });
+
+        var saveBtn = document.getElementById('ds-table-save');
+        saveBtn.disabled = true;
+        saveBtn.textContent = '保存中…';
+        fetch(API + '/' + encodeURIComponent(currentDs.id), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tables: selected }),
+        })
+            .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail || '保存失败'); }); return r.json(); })
+            .then(function () {
+                showToast('已授权 ' + selected.length + ' 张表', 'success');
+                /* Refresh currentDs to reflect the updated tables list */
+                openDetail(currentDs.id);
+            })
+            .catch(function (err) {
+                showToast(String(err.message || err), 'error');
+                saveBtn.disabled = false;
+                saveBtn.textContent = '保存授权';
             });
     }
 

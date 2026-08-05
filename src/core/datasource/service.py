@@ -32,12 +32,20 @@ class DataSourceService:
     Thread-safe.  Designed to be created once and held on app.state.
     """
 
+    #: Cooldown (seconds) before retrying schema introspection for a
+    #: datasource that just failed.  Prevents every chat turn from paying the
+    #: full TCP/auth timeout when a database is down.
+    SCHEMA_FAILURE_COOLDOWN = 60.0
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._configs: Dict[str, Dict[str, Any]] = {}
         self._drivers: Dict[str, DatabaseDriver] = {}
         self._pools: Dict[str, ConnectionPool] = {}
         self._schema_cache = SchemaCache(ttl_seconds=900)
+        # datasource_id -> monotonic deadline until which prompt injection
+        # should skip this datasource without attempting a connection.
+        self._schema_failures: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Config management
@@ -62,6 +70,7 @@ class DataSourceService:
             self._drivers = new_drivers
             self._pools = {}
             self._schema_cache.clear()
+            self._schema_failures.clear()
         for pool in old_pools.values():
             try:
                 pool.drain()
@@ -174,14 +183,31 @@ class DataSourceService:
     # Schema snapshot (authorised tables only)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _columns_cache_key(datasource_id: str) -> str:
+        return "cols:{}".format(datasource_id)
+
     def schema_snapshot(
-        self, datasource_id: str
+        self, datasource_id: str, refresh: bool = False
     ) -> List[Dict[str, Any]]:
-        """Return column metadata for the authorised tables of a datasource."""
+        """Return column metadata for the authorised tables of a datasource.
+
+        Results are TTL-cached (see ``SchemaCache``) so prompt injection and
+        ``db_describe_table`` do not open a database connection on every turn.
+        Cache is cleared wholesale by :meth:`reload`, which runs whenever the
+        datasource configuration changes.
+        """
+        cache_key = self._columns_cache_key(datasource_id)
+        if not refresh:
+            cached = self._schema_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         driver, cfg = self._get_driver_and_cfg(datasource_id)
         authorised = cfg.get("tables") or []
 
         if not authorised:
+            self._schema_cache.set(cache_key, [])
             return []
 
         # Build (schema, name) tuples from config.
@@ -195,6 +221,7 @@ class DataSourceService:
                 target_tables.append((schema, name))
 
         if not target_tables:
+            self._schema_cache.set(cache_key, [])
             return []
 
         pool = self._get_pool(datasource_id)
@@ -254,16 +281,45 @@ class DataSourceService:
                     "columns": tbl_cols,
                 }
             )
+        self._schema_cache.set(cache_key, result)
         return result
 
     # ------------------------------------------------------------------
     # Prompt injection block
     # ------------------------------------------------------------------
 
-    def prompt_block(self, datasource_ids: List[str]) -> str:
+    def _prompt_cooldown_active(self, datasource_id: str) -> bool:
+        with self._lock:
+            deadline = self._schema_failures.get(datasource_id)
+            if deadline is None:
+                return False
+            if time.monotonic() >= deadline:
+                self._schema_failures.pop(datasource_id, None)
+                return False
+            return True
+
+    def _mark_prompt_failure(self, datasource_id: str) -> None:
+        with self._lock:
+            self._schema_failures[datasource_id] = (
+                time.monotonic() + self.SCHEMA_FAILURE_COOLDOWN
+            )
+
+    def _clear_prompt_failure(self, datasource_id: str) -> None:
+        with self._lock:
+            self._schema_failures.pop(datasource_id, None)
+
+    def prompt_block(
+        self, datasource_ids: List[str], *, allow_write: bool = False
+    ) -> str:
         """Build a compact system-prompt block summarising authorised tables.
 
         Respects prompt_injection limits from each datasource config.
+
+        This runs on the hot path of every chat turn, so it is defensive by
+        design: any failure (driver missing, connection refused, auth error,
+        timeout) degrades to skipping that datasource rather than propagating
+        and breaking the whole request.  A short cooldown avoids paying the
+        connect timeout again on the very next turn.
         """
         if not datasource_ids:
             return ""
@@ -271,8 +327,19 @@ class DataSourceService:
         for ds_id in datasource_ids:
             try:
                 _, cfg = self._get_driver_and_cfg(ds_id)
-            except DataSourceError:
+            except DataSourceError as exc:
+                logger.warning("跳过数据源提示词注入 %s：%s", ds_id, exc)
                 continue
+            except Exception:
+                logger.warning(
+                    "读取数据源配置失败，跳过提示词注入 %s", ds_id, exc_info=True
+                )
+                continue
+
+            if self._prompt_cooldown_active(ds_id):
+                logger.debug("数据源 %s 处于失败冷却期，跳过提示词注入", ds_id)
+                continue
+
             pi = cfg.get("prompt_injection") or {}
             max_tables = int(pi.get("max_tables", 20))
             max_columns = int(pi.get("max_columns_per_table", 40))
@@ -281,8 +348,16 @@ class DataSourceService:
 
             try:
                 tables = self.schema_snapshot(ds_id)
-            except DataSourceError:
+            except Exception:
+                self._mark_prompt_failure(ds_id)
+                logger.warning(
+                    "数据源 %s 表结构读取失败，本轮跳过提示词注入（%.0f 秒内不再重试）",
+                    ds_id,
+                    self.SCHEMA_FAILURE_COOLDOWN,
+                    exc_info=True,
+                )
                 continue
+            self._clear_prompt_failure(ds_id)
 
             engine = cfg.get("engine", "")
             database = cfg.get("database", "")
@@ -321,7 +396,15 @@ class DataSourceService:
             return ""
         prompt = "\n\n".join(parts)
         if prompt:
-            prompt += "\n\n规则：只能用 db_query 执行单条 SELECT；表名仅限上表；写操作必须用 db_execute，需用户确认。"
+            rule = (
+                "\n\n规则：只能用 db_query 执行单条 SELECT；表名仅限上表；"
+                "需要更多表结构时用 db_list_tables / db_describe_table。"
+            )
+            if allow_write:
+                rule += "写操作必须用 db_execute，需用户确认。"
+            else:
+                rule += "本智能体仅有只读权限，不能执行任何写操作。"
+            prompt += rule
         return prompt
 
     # ------------------------------------------------------------------

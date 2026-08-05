@@ -141,6 +141,7 @@ class AgentOut(BaseModel):
     plugin_tools: Dict[str, List[str]] = {}
     skills: List[str] = []
     mcp_servers: List[str] = []
+    datasources: List[str] = []
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: List[str] = []
@@ -165,6 +166,7 @@ class AgentCreate(BaseModel):
     plugin_tools: Dict[str, List[str]] = {}
     skills: List[str] = []
     mcp_servers: List[str] = []
+    datasources: List[str] = []
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: List[str] = []
@@ -183,6 +185,7 @@ class AgentUpdate(BaseModel):
     plugin_tools: Optional[Dict[str, List[str]]] = None
     skills: Optional[List[str]] = None
     mcp_servers: Optional[List[str]] = None
+    datasources: Optional[List[str]] = None
     model: Optional[str] = None
     greeting: Optional[str] = None
     greeting_hints: Optional[List[str]] = None

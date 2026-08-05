@@ -278,17 +278,17 @@ class PostgresDriver(DatabaseDriver):
         tables: List[Dict[str, Any]] = []
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT table_schema, table_name, "
-                "obj_description((table_schema||'.'||table_name)::regclass, 'pg_class') AS comment, "
+                "SELECT n.nspname, c.relname, "
+                "COALESCE(obj_description(c.oid, 'pg_class'), '') AS comment, "
                 "COALESCE("
-                "  (SELECT n_live_tup FROM pg_stat_user_tables "
-                "   WHERE schemaname = c.table_schema AND relname = c.table_name), 0"
+                "  (SELECT s.n_live_tup FROM pg_stat_user_tables s "
+                "   WHERE s.schemaname = n.nspname AND s.relname = c.relname), 0"
                 ") AS estimated_rows "
-                "FROM information_schema.tables c "
-                "WHERE table_schema NOT IN ('pg_catalog', 'information_schema') "
-                "AND table_type = 'BASE TABLE' "
-                "AND table_catalog = current_database() "
-                "ORDER BY table_name"
+                "FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') "
+                "AND c.relkind IN ('r', 'p') "
+                "ORDER BY c.relname"
             )
             for row in cur.fetchall():
                 tables.append(
@@ -316,9 +316,9 @@ class PostgresDriver(DatabaseDriver):
                 "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, "
                 "c.is_nullable, "
                 "CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS is_pk, "
-                "pg_catalog.col_description("
-                "  (table_schema||'.'||table_name)::regclass, c.ordinal_position"
-                ") AS comment, "
+                "COALESCE(pg_catalog.col_description("
+                "  to_regclass(c.table_schema||'.'||c.table_name), c.ordinal_position"
+                "), '') AS comment, "
                 "CASE WHEN c.column_default IS NOT NULL "
                 "  THEN pg_get_expr(pg_node_tree(c.column_default), 0) ELSE NULL END AS default_value, "
                 "c.ordinal_position "

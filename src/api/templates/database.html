@@ -2,7 +2,7 @@
 {% block title %}数据库 - BotPlatform{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="/static/css/tools.css">
-<link rel="stylesheet" href="/static/css/database.css?v=20260804b">
+<link rel="stylesheet" href="/static/css/database.css?v=20260804c">
 {% endblock %}
 {% block content %}
 <div class="page-container">
@@ -57,7 +57,10 @@
         <div id="ds-detail-schema" class="mcp-detail-section" style="display:none">
             <div class="ds-schema-head">
                 <h3 class="section-title">已授权表结构</h3>
-                <button id="ds-schema-refresh" class="btn-secondary btn-sm" type="button">刷新缓存</button>
+                <div class="ds-schema-actions">
+                    <button id="ds-schema-fetch" class="btn-primary btn-sm" type="button">拉取远端表</button>
+                    <button id="ds-schema-refresh" class="btn-secondary btn-sm" type="button">刷新缓存</button>
+                </div>
             </div>
             <div id="ds-schema-list"></div>
         </div>
@@ -185,6 +188,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/database.js?v=20260804e"></script>
+<script src="/static/js/database.js?v=20260804f"></script>
 <script>initDatabase();</script>
 {% endblock %}
