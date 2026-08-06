@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}我的连接 - BotPlatform{% endblock %}
+{% block content %}
+<div class="organization-page" id="connections-page">
+    <div class="page-header organization-page-header">
+        <div>
+            <div class="organization-eyebrow" id="organization-name">组织工作台</div>
+            <h2 id="connections-title">我的连接</h2>
+            <p class="page-desc" id="connections-description">个人专属的微信登录与企业微信 Bot 连接，各自独立在线；经连接进入的消息归属到你创建时选择的组织。</p>
+        </div>
+        <div class="organization-actions">
+            <button id="connections-create-btn" class="btn-primary">+ 新建连接</button>
+        </div>
+    </div>
+    <div id="connections-summary" class="organization-summary"></div>
+    <div id="connections-list" class="organization-grid"></div>
+</div>
+
+<div id="connection-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="connection-modal-title">新建连接</h3>
+            <button id="connection-modal-close" class="modal-close-btn" type="button">&times;</button>
+        </div>
+        <div class="tab-bar connection-modal-tabs">
+            <button type="button" class="tab-btn active" data-conn-tab="form">新建连接</button>
+            <button type="button" class="tab-btn" data-conn-tab="bind">绑定凭证</button>
+        </div>
+        <form id="connection-form" class="modal-body">
+            <div id="connection-form-panel">
+                <div class="form-group">
+                    <label for="connection-platform">连接平台</label>
+                    <select id="connection-platform">
+                        <option value="wechat">微信（扫码登录）</option>
+                        <option value="wecom">企业微信智能机器人</option>
+                        <option value="feishu">飞书</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="connection-organization">归属组织</label>
+                    <select id="connection-organization" required></select>
+                    <small>经该连接进入的消息将使用该组织的智能体与知识。</small>
+                </div>
+                <div class="form-group">
+                    <label for="connection-agent">接待智能体</label>
+                    <select id="connection-agent" required></select>
+                </div>
+                <p class="page-desc">下一步将根据所选平台绑定连接凭证。</p>
+            </div>
+            <div id="connection-bind-panel" style="display:none">
+                <div id="connection-bind-wechat" style="display:none">
+                    <div id="connection-wechat-qr-area" class="wechat-connect" data-role="connection-wechat-area">
+                        <div class="tool-empty">连接已创建，正在生成二维码…</div>
+                    </div>
+                    <p class="page-desc">同一个微信号同一时间只能挂在一个连接上，后扫码者将顶替先登录者。</p>
+                </div>
+                <div id="connection-bind-wecom" style="display:none">
+                    <div class="form-group">
+                        <label for="connection-bot-id">Bot ID</label>
+                        <input id="connection-bot-id" placeholder="企业微信智能机器人 Bot ID">
+                    </div>
+                    <div class="form-group">
+                        <label for="connection-secret">Secret</label>
+                        <input id="connection-secret" type="password" placeholder="机器人 Secret">
+                    </div>
+                    <p class="page-desc">在企微后台为智能机器人开启「API 模式 - 长连接」后填入凭证；保存前会进行真实校验。</p>
+                </div>
+                <div id="connection-bind-feishu" style="display:none">
+                    <p class="page-desc">飞书渠道暂未开放，敬请期待。</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="connection-modal-cancel" class="btn-secondary">取消</button>
+                <button type="button" id="connection-step-back" class="btn-secondary" style="display:none">上一步</button>
+                <button type="button" id="connection-step-next" class="btn-primary">下一步</button>
+                <button type="submit" id="connection-bind-save" class="btn-primary" style="display:none">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/connections.js?v=20260805l"></script>
+<script>initConnections();</script>
+{% endblock %}

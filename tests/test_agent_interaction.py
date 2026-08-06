@@ -21,9 +21,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from src.core.config.loader import load_project_config, ScriptDefinition, ScriptParameter
+from src.core.config.loader import load_project_config, ScriptDefinition
 from src.core.services.agent import AgentService
-from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
+from src.core.services.agent_tools import build_system_prompt
 from src.core.datasource.gateway import compile_readonly, DataSourceError
 from src.core.integrations.ilink import Credentials
 from src.core.modeling import (

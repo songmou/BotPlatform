@@ -15,9 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-import httpx
 
-from src.core.config.loader import ModelProfile
 from src.core.modeling import (
     CanonicalMessage,
     GenerationOptions,

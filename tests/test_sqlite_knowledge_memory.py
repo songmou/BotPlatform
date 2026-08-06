@@ -5,7 +5,6 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.core.services.knowledge import KnowledgeService

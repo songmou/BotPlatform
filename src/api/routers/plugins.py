@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -28,7 +28,7 @@ from src.api.schemas import (
     PluginUpdate,
     ToolStateUpdate,
 )
-from src.core.paths import CONFIG_DIR, DATA_DIR, PROJECT_ROOT, SYSTEM_DATA_DIR
+from src.core.paths import CONFIG_DIR, DATA_DIR, SYSTEM_DATA_DIR
 from src.core.plugins.base import PluginError
 from src.core.plugins.manifest import (
     PLUGIN_ID_PATTERN,

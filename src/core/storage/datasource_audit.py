@@ -43,7 +43,6 @@ class DatasourceQueryAuditStore:
         sql_text is sanitised by replacing long string literals (>32 chars)
         with placeholders before storage.
         """
-        import sqlite3
         import re
 
         # Sanitise long string literals in SQL to avoid storing sensitive data.
@@ -87,7 +86,6 @@ class DatasourceQueryAuditStore:
         order_desc: bool = True,
     ) -> list[Dict[str, Any]]:
         """Return a page of audit records."""
-        import sqlite3
 
         where = ""
         params: list = []

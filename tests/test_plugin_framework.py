@@ -200,7 +200,7 @@ class PluginManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = root / "external" / "quiet"
-            path = write_manifest(package, plugin_id="quiet")
+            write_manifest(package, plugin_id="quiet")
             marker = root / "imported"
             (package / "plugin.py").write_text(
                 "from pathlib import Path\n"

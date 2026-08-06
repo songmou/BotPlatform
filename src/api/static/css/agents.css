@@ -104,6 +104,13 @@
     gap: 10px;
     padding: 12px;
 }
+#agent-form .agent-tools-section > .tool-checkboxes,
+#agent-form .agent-tools-section > .tool-plugin-groups,
+#organization-agent-form .organization-agent-panel > .tool-checkboxes,
+#organization-agent-form .organization-agent-panel > .tool-plugin-groups {
+    max-height: min(52vh, 520px);
+    overflow-y: auto;
+}
 .tool-checkboxes.tool-checkboxes-nested {
     padding: 0;
 }
@@ -197,6 +204,10 @@
 /* ===== Agent modal sub-tabs ===== */
 .agent-modal-tabs {
     margin: 12px 24px 0;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
 }
 .agent-tab-panel[hidden] {
     display: none;

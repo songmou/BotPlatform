@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+
+from src.core.integrations.wecom_verify import (
+    WeComVerifyError,
+    verify_wecom_credentials,
+)
+from src.core.services.wechat_login import WeChatLoginManager
 
 from src.api.deps import (
     get_admin_role_store,
@@ -107,7 +114,7 @@ def _require_content_manager(
     resource_type: str,
     resource_key: str,
 ) -> None:
-    if context.role in {"owner", "admin", "member"} or context.platform_delegation:
+    if context.role in {"owner", "admin"} or context.platform_delegation:
         return
     with get_organization_store(request).database.read() as connection:
         row = connection.execute(
@@ -115,8 +122,11 @@ def _require_content_manager(
             "WHERE organization_id=? AND resource_type=? AND resource_key=?",
             (context.organization_id, resource_type, resource_key),
         ).fetchone()
+    # Content without an ownership record (created before tracking shipped)
+    # is restricted to organization admins to keep members from deleting
+    # uploads they did not create.
     if row is None or row["creator_user_id"] != context.user_id:
-        raise HTTPException(status_code=403, detail="只有创建者或组织管理员可以执行该操作")
+        raise HTTPException(status_code=403, detail="只有内容创建者或组织管理员可以执行该操作")
 
 
 def _move_content_ownership(
@@ -842,11 +852,14 @@ def list_organization_conversations(
     principal=Depends(get_principal),
 ):
     context = _organization_context(request, principal, organization_id)
-    return get_organization_store(request).list_conversations(
+    items = get_organization_store(request).list_conversations(
         context.user_id,
         organization_id,
         allow_delegation=context.platform_delegation,
     )
+    # Channel-bound conversations are stored for audit, not shown in the
+    # chat page; only web conversations are managed there.
+    return [item for item in items if str(item.get("source") or "") != "channel"]
 
 
 @router.post("/orgs/{organization_id}/conversations", status_code=201)
@@ -1102,6 +1115,22 @@ def remove_organization_member(
         get_credential_service(request).delete_personal(
             organization_id, member_user_id
         )
+        controls = get_organization_control_store(request)
+        with get_organization_store(request).database.read() as connection:
+            rows = connection.execute(
+                "SELECT c.channel_id FROM organization_channels c "
+                "JOIN personal_channel_connections p "
+                "ON p.channel_instance_id = c.channel_instance_id "
+                "WHERE c.organization_id=? AND p.user_id=?",
+                (organization_id, member_user_id),
+            ).fetchall()
+        for row in rows:
+            try:
+                controls.set_channel_enabled(
+                    organization_id, str(row["channel_id"]), False, context.user_id
+                )
+            except OrganizationControlError:
+                pass
         get_organization_store(request).remove_member(
             organization_id, member_user_id
         )
@@ -1490,9 +1519,6 @@ def set_typed_organization_agent_status(
     context = _organization_context(request, principal, organization_id)
     enabled = bool(body.get("enabled"))
     try:
-        current = get_resource_store(request).get_effective(
-            organization_id, "agents", agent_id
-        )
         if not enabled:
             enabled_agents = get_resource_store(request).effective_agent_presets(
                 organization_id
@@ -1596,6 +1622,25 @@ def delete_typed_organization_agent(
     return {"deleted": True}
 
 
+def _personal_channel_ids(request: Request, organization_id: str) -> set:
+    with get_organization_store(request).database.read() as connection:
+        rows = connection.execute(
+            "SELECT c.channel_id FROM organization_channels c "
+            "JOIN personal_channel_connections p "
+            "ON p.channel_instance_id = c.channel_instance_id "
+            "WHERE c.organization_id=?",
+            (organization_id,),
+        ).fetchall()
+    return {str(row["channel_id"]) for row in rows}
+
+
+def _reject_personal_channel(request: Request, organization_id: str, channel_id: str) -> None:
+    if channel_id in _personal_channel_ids(request, organization_id):
+        raise HTTPException(
+            status_code=400, detail="个人连接请在「我的连接」中管理"
+        )
+
+
 @router.get("/orgs/{organization_id}/channels")
 def list_typed_organization_channels(
     organization_id: str,
@@ -1604,6 +1649,8 @@ def list_typed_organization_channels(
 ):
     _organization_context(request, principal, organization_id)
     items = get_organization_control_store(request).list_channels(organization_id)
+    personal = _personal_channel_ids(request, organization_id)
+    items = [item for item in items if item["id"] not in personal]
     registry = getattr(request.app.state, "channel_statuses", None)
     for item in items:
         status = registry.get(item["channel_instance_id"]) if registry else None
@@ -1611,6 +1658,20 @@ def list_typed_organization_channels(
             "disabled" if not item["enabled"] else "pending_runtime"
         )
         item["detail"] = status.detail if status else ""
+        item["bot_account_id"] = ""
+        if item.get("credential_configured"):
+            try:
+                raw = json.loads(
+                    get_credential_service(request).secret_for_resource(
+                        organization_id,
+                        "channels",
+                        item["channel_instance_id"],
+                    )
+                )
+                if isinstance(raw, dict):
+                    item["bot_account_id"] = str(raw.get("bot_id") or "")
+            except (CredentialError, ValueError, TypeError):
+                pass
     return {
         "items": items,
         "providers": [
@@ -1634,6 +1695,7 @@ def upsert_typed_organization_channel(
     principal=Depends(get_principal),
 ):
     context = _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
     try:
         return get_organization_control_store(request).upsert_channel(
             organization_id, channel_id, body, context.user_id
@@ -1651,6 +1713,7 @@ def set_typed_organization_channel_status(
     principal=Depends(get_principal),
 ):
     context = _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
     try:
         return get_organization_control_store(request).set_channel_enabled(
             organization_id, channel_id, bool(body.get("enabled")), context.user_id
@@ -1668,12 +1731,34 @@ def put_typed_organization_channel_credentials(
     principal=Depends(get_principal),
 ):
     context = _organization_context(request, principal, organization_id, "admin")
+    _reject_personal_channel(request, organization_id, channel_id)
     try:
         channel = get_organization_control_store(request).get_channel(
             organization_id, channel_id
         )
+        raw_credentials = dict(body.get("credentials") or {})
+        if channel["type"] == "wecom_aibot":
+            bot_id = str(raw_credentials.get("bot_id") or "").strip()
+            secret = str(raw_credentials.get("secret") or "").strip()
+            if not bot_id or not secret:
+                raise CredentialError("请填写 Bot ID 和 Secret")
+            current = None
+            try:
+                current = json.loads(
+                    get_credential_service(request).secret_for_resource(
+                        organization_id, "channels", channel["channel_instance_id"]
+                    )
+                )
+            except CredentialError:
+                pass
+            if not (
+                current
+                and str(current.get("bot_id") or "") == bot_id
+                and str(current.get("secret") or "") == secret
+            ):
+                verify_wecom_credentials(bot_id, secret)
         credentials = channel_provider(channel["type"]).validate_credentials(
-            dict(body.get("credentials") or {})
+            raw_credentials
         )
         return get_credential_service(request).put(
             organization_id,
@@ -1686,8 +1771,127 @@ def put_typed_organization_channel_credentials(
             secret=json.dumps(credentials, ensure_ascii=False),
             allow_platform_delegation=context.platform_delegation,
         )
+    except WeComVerifyError as exc:
+        raise HTTPException(
+            status_code=400, detail="企业微信凭证校验失败：{}".format(exc)
+        ) from exc
     except (OrganizationControlError, CredentialError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _organization_wechat_manager(
+    request: Request,
+    organization_id: str,
+    channel: Dict[str, Any],
+    actor_user_id: int,
+) -> WeChatLoginManager:
+    managers = request.app.state.wechat_login_managers
+    manager_key = "org-channel:{}".format(channel["id"])
+    with threading.Lock():
+        manager = managers.get(manager_key)
+        if manager is not None:
+            return manager
+
+        holder: Dict[str, Any] = {}
+
+        def save(credentials: Any, _path: Any) -> None:
+            # Stage credentials after a successful scan; they are persisted
+            # only when the user confirms on the channel dialog.
+            holder["pending"] = credentials.to_dict()
+
+        def connected() -> bool:
+            try:
+                item = get_organization_control_store(request).get_channel(
+                    organization_id, channel["id"]
+                )
+            except OrganizationControlError:
+                return False
+            return bool(item.get("credential_configured"))
+
+        manager = WeChatLoginManager(
+            channel_id=channel["channel_instance_id"],
+            credentials_saver=save,
+            connected_checker=connected,
+        )
+        manager.pending_holder = holder
+        managers[manager_key] = manager
+        return manager
+
+
+@router.get("/orgs/{organization_id}/channels/{channel_id}/wechat/status")
+def organization_channel_wechat_status(
+    organization_id: str,
+    channel_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
+    channel = get_organization_control_store(request).get_channel(
+        organization_id, channel_id
+    )
+    if channel["type"] != "wechat_ilink":
+        raise HTTPException(status_code=400, detail="该渠道不是微信渠道")
+    manager = _organization_wechat_manager(
+        request, organization_id, channel, principal.user.user_id
+    )
+    return manager.status()
+
+
+@router.post("/orgs/{organization_id}/channels/{channel_id}/wechat/login")
+def organization_channel_wechat_login(
+    organization_id: str,
+    channel_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
+    channel = get_organization_control_store(request).get_channel(
+        organization_id, channel_id
+    )
+    if channel["type"] != "wechat_ilink":
+        raise HTTPException(status_code=400, detail="该渠道不是微信渠道")
+    manager = _organization_wechat_manager(
+        request, organization_id, channel, principal.user.user_id
+    )
+    return manager.start()
+
+
+@router.post("/orgs/{organization_id}/channels/{channel_id}/wechat/confirm")
+def organization_channel_wechat_confirm(
+    organization_id: str,
+    channel_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
+    channel = get_organization_control_store(request).get_channel(
+        organization_id, channel_id
+    )
+    if channel["type"] != "wechat_ilink":
+        raise HTTPException(status_code=400, detail="该渠道不是微信渠道")
+    manager = _organization_wechat_manager(
+        request, organization_id, channel, principal.user.user_id
+    )
+    holder = getattr(manager, "pending_holder", None)
+    pending = holder.get("pending") if holder else None
+    if not pending:
+        raise HTTPException(status_code=400, detail="尚未完成微信扫码")
+    get_credential_service(request).put(
+        organization_id,
+        "channel:{}".format(channel_id),
+        actor_user_id=principal.user.user_id,
+        scope="organization",
+        resource_type="channels",
+        resource_id=channel["channel_instance_id"],
+        label="{} 微信登录".format(channel_id),
+        secret=json.dumps(pending, ensure_ascii=False),
+        allow_platform_delegation=True,
+    )
+    get_organization_control_store(request).bump_channels_revision(organization_id)
+    return {"ok": True}
 
 
 @router.post("/orgs/{organization_id}/channels/{channel_id}/test")
@@ -1699,6 +1903,7 @@ def test_typed_organization_channel(
 ):
     _organization_context(request, principal, organization_id)
     store = get_organization_control_store(request)
+    _reject_personal_channel(request, organization_id, channel_id)
     try:
         channel = store.get_channel(organization_id, channel_id)
         secret = get_credential_service(request).secret_for_resource(
@@ -1756,6 +1961,7 @@ def delete_typed_organization_channel(
     principal=Depends(get_principal),
 ):
     context = _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
     try:
         instance_id = get_organization_control_store(request).delete_channel(
             organization_id, channel_id
@@ -2352,6 +2558,16 @@ def set_organization_agent_knowledge(
     principal=Depends(get_principal),
 ):
     context = _organization_context(request, principal, organization_id)
+    resources = get_resource_store(request)
+    known_agent_ids = {
+        str(item.get("resource_id"))
+        for item in (
+            list(resources.list_organization_agents(organization_id))
+            + list(resources.list_public("agents"))
+        )
+    }
+    if agent_id not in known_agent_ids:
+        raise HTTPException(status_code=404, detail="智能体不存在")
     category_ids = list(dict.fromkeys(body.get("category_ids") or []))
     service = getattr(request.app.state, "knowledge_service", None)
     if service is None:

@@ -21,7 +21,7 @@ from src.core.datasource.drivers import (
 from src.core.datasource.errors import DataSourceError
 from src.core.datasource.gateway import compile_readonly, compile_write
 from src.core.datasource.introspect import SchemaCache
-from src.core.datasource.pool import ConnectionPool, PoolItem
+from src.core.datasource.pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 

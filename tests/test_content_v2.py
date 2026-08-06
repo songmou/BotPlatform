@@ -192,3 +192,229 @@ class ContentV2ApiTest(WebApiTestBase):
         audit = owner.get(f"/api/v2/orgs/{organization_id}/drive/audit")
         self.assertEqual(audit.status_code, 200, audit.text)
         self.assertGreaterEqual(audit.json()["total"], 1)
+
+    def _invite_member(self, owner: TestClient, organization_id: str, suffix: str):
+        invitation = owner.post(
+            f"/api/v2/orgs/{organization_id}/invitations", json={"role": "member"}
+        )
+        self.assertEqual(invitation.status_code, 201, invitation.text)
+        member = TestClient(self.app)
+        accepted = member.post(
+            "/api/v2/invitations/accept",
+            json={
+                "token": invitation.json()["invitation_token"],
+                "username": "cm_" + suffix,
+                "password": "password-" + suffix,
+            },
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        login = member.post(
+            "/api/auth/login",
+            json={"username": "cm_" + suffix, "password": "password-" + suffix},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        return member
+
+    def test_organization_drive_and_sources_are_creator_managed(self):
+        organization_id, owner = self._create_owner("creator")
+        creator = self._invite_member(owner, organization_id, "creator")
+        other = self._invite_member(owner, organization_id, "other")
+
+        uploaded = creator.post(
+            f"/api/v2/orgs/{organization_id}/drive/upload",
+            files={"file": ("note.txt", b"creator file", "text/plain")},
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        denied_delete = other.delete(
+            f"/api/v2/orgs/{organization_id}/drive/entries",
+            params={"path": "note.txt"},
+        )
+        self.assertEqual(denied_delete.status_code, 403, denied_delete.text)
+        deleted = creator.delete(
+            f"/api/v2/orgs/{organization_id}/drive/entries",
+            params={"path": "note.txt"},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+        category = creator.post(
+            f"/api/v2/orgs/{organization_id}/knowledge/categories",
+            json={"name": "创建者库"},
+        )
+        self.assertEqual(category.status_code, 201, category.text)
+        category_id = category.json()["category_id"]
+
+        legacy = creator.post(
+            f"/api/v2/orgs/{organization_id}/drive/upload",
+            files={"file": ("legacy.txt", b"legacy file", "text/plain")},
+        )
+        self.assertEqual(legacy.status_code, 200, legacy.text)
+        with self.app.state.organization_store.database.transaction(
+            immediate=True
+        ) as connection:
+            connection.execute(
+                "DELETE FROM organization_content_ownership "
+                "WHERE organization_id=? AND resource_type='drive_entry' "
+                "AND resource_key='legacy.txt'",
+                (organization_id,),
+            )
+        denied_legacy = other.delete(
+            f"/api/v2/orgs/{organization_id}/drive/entries",
+            params={"path": "legacy.txt"},
+        )
+        self.assertEqual(denied_legacy.status_code, 403, denied_legacy.text)
+        owner_legacy = owner.delete(
+            f"/api/v2/orgs/{organization_id}/drive/entries",
+            params={"path": "legacy.txt"},
+        )
+        self.assertEqual(owner_legacy.status_code, 200, owner_legacy.text)
+
+        added = creator.post(
+            f"/api/v2/orgs/{organization_id}/knowledge/text",
+            json={"name": "创建者条目", "content": "内容"},
+        )
+        self.assertEqual(added.status_code, 200, added.text)
+        source_id = added.json()["source_id"]
+        denied_move = other.patch(
+            f"/api/v2/orgs/{organization_id}/knowledge/sources/move",
+            json={"source_ids": [source_id], "target_category_id": category_id},
+        )
+        self.assertEqual(denied_move.status_code, 403, denied_move.text)
+        denied_refresh = other.post(
+            f"/api/v2/orgs/{organization_id}/knowledge/refresh",
+            json={"source_ids": [source_id]},
+        )
+        self.assertEqual(denied_refresh.status_code, 403, denied_refresh.text)
+        owner_deleted = owner.delete(
+            f"/api/v2/orgs/{organization_id}/knowledge/sources/{source_id}"
+        )
+        self.assertEqual(owner_deleted.status_code, 200, owner_deleted.text)
+
+    def test_v1_knowledge_and_drive_are_public_only_for_non_admins(self):
+        import json as _json
+
+        with self.admin_roles.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO admin_roles(code, name, permissions, builtin) "
+                "VALUES (?, ?, ?, 0)",
+                (
+                    "content_curator",
+                    "内容编辑",
+                    _json.dumps(
+                        [
+                            "panel.read",
+                            "knowledge.read",
+                            "knowledge.manage",
+                            "drive.read",
+                            "drive.manage",
+                        ]
+                    ),
+                ),
+            )
+        role = self.admin_roles.get_by_code("content_curator")
+        self.admin_users.create("curator", "password12345", role.role_id)
+        curator = self._login("curator")
+
+        organization_id, owner = self._create_owner("v1guard")
+        org_source = owner.post(
+            f"/api/v2/orgs/{organization_id}/knowledge/text",
+            json={"name": "组织条目", "content": "组织内容"},
+        )
+        self.assertEqual(org_source.status_code, 200, org_source.text)
+        org_source_id = org_source.json()["source_id"]
+
+        public_category = self.client.post(
+            "/api/v2/platform/knowledge/categories", json={"name": "公共库守卫"}
+        ).json()
+        public_source = self.client.post(
+            "/api/v2/platform/knowledge/text",
+            json={
+                "category_id": public_category["category_id"],
+                "name": "公共条目",
+                "content": "所有人可见",
+            },
+        ).json()["source_id"]
+
+        denied_list = curator.get(
+            "/api/knowledge", params={"tenant_id": organization_id}
+        )
+        self.assertEqual(denied_list.status_code, 403, denied_list.text)
+        denied_search = curator.get(
+            "/api/knowledge/search",
+            params={"tenant_id": organization_id, "q": "组织"},
+        )
+        self.assertEqual(denied_search.status_code, 403, denied_search.text)
+        denied_tenants = curator.get("/api/knowledge/tenants")
+        self.assertEqual(denied_tenants.status_code, 403, denied_tenants.text)
+        denied_delete = curator.delete(f"/api/knowledge/{org_source_id}")
+        self.assertEqual(denied_delete.status_code, 403, denied_delete.text)
+        denied_drive = curator.get(
+            "/api/drive/entries",
+            params={"scope": "tenant", "tenant_id": organization_id, "path": ""},
+        )
+        self.assertEqual(denied_drive.status_code, 403, denied_drive.text)
+
+        categories = curator.get("/api/knowledge/categories")
+        self.assertEqual(categories.status_code, 200, categories.text)
+        listed = {item["category_id"] for item in categories.json()["categories"]}
+        self.assertIn(public_category["category_id"], listed)
+        preview = curator.get(f"/api/knowledge/source-preview/{public_source}")
+        self.assertEqual(preview.status_code, 200, preview.text)
+        public_drive = curator.get(
+            "/api/drive/entries", params={"scope": "public", "path": ""}
+        )
+        self.assertEqual(public_drive.status_code, 200, public_drive.text)
+
+    def test_cross_organization_knowledge_access_is_denied(self):
+        org_a, owner_a = self._create_owner("cross-a")
+        org_b, owner_b = self._create_owner("cross-b")
+        cat_b = owner_b.post(
+            f"/api/v2/orgs/{org_b}/knowledge/categories", json={"name": "B 组织库"}
+        )
+        self.assertEqual(cat_b.status_code, 201, cat_b.text)
+        cat_b_id = cat_b.json()["category_id"]
+        src_b = owner_b.post(
+            f"/api/v2/orgs/{org_b}/knowledge/text",
+            json={"name": "B 条目", "content": "机密内容"},
+        )
+        self.assertEqual(src_b.status_code, 200, src_b.text)
+        src_b_id = src_b.json()["source_id"]
+
+        denied_sources = owner_a.get(
+            f"/api/v2/orgs/{org_a}/knowledge/sources",
+            params={"category_id": cat_b_id},
+        )
+        self.assertEqual(denied_sources.status_code, 404, denied_sources.text)
+        search = owner_a.get(
+            f"/api/v2/orgs/{org_a}/knowledge/search",
+            params={"q": "机密内容", "category_ids": cat_b_id},
+        )
+        self.assertEqual(search.status_code, 200, search.text)
+        self.assertEqual(search.json()["results"], [])
+        denied_preview = owner_a.get(
+            f"/api/v2/orgs/{org_a}/knowledge/sources/{src_b_id}"
+        )
+        self.assertEqual(denied_preview.status_code, 404, denied_preview.text)
+        denied_delete = owner_a.delete(
+            f"/api/v2/orgs/{org_a}/knowledge/sources/{src_b_id}"
+        )
+        self.assertEqual(denied_delete.status_code, 404, denied_delete.text)
+
+        binding = owner_a.put(
+            f"/api/v2/orgs/{org_a}/agents/general/knowledge-categories",
+            json={"category_ids": [cat_b_id]},
+        )
+        self.assertEqual(binding.status_code, 400, binding.text)
+        unknown_agent = owner_a.put(
+            f"/api/v2/orgs/{org_a}/agents/no_such_agent/knowledge-categories",
+            json={"category_ids": []},
+        )
+        self.assertEqual(unknown_agent.status_code, 404, unknown_agent.text)
+
+        denied_b_categories = owner_a.get(
+            f"/api/v2/orgs/{org_b}/knowledge/categories"
+        )
+        self.assertEqual(denied_b_categories.status_code, 403, denied_b_categories.text)
+        denied_b_drive = owner_a.get(
+            f"/api/v2/orgs/{org_b}/drive/entries", params={"path": ""}
+        )
+        self.assertEqual(denied_b_drive.status_code, 403, denied_b_drive.text)

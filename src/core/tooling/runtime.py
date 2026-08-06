@@ -253,7 +253,10 @@ class ToolRuntime:
             raise ToolError("租户身份不匹配")
         workspace = self.tenant_registry.tenant_root(tenant.tenant_id) / "workspace"
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(str(workspace), 0o700)
+        # POSIX permission bits are meaningless on Windows (it uses ACLs) and
+        # chmod there can even raise WinError 5; only enforce on POSIX.
+        if os.name != "nt":
+            os.chmod(str(workspace), 0o700)
         default_directory = workspace.resolve()
         config = replace(
             self.base_config,
