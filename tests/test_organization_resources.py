@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+import unittest.mock as _mock_um
 import json
 import sqlite3
 from contextlib import closing
@@ -989,11 +990,19 @@ class OrganizationResourceApiTest(WebApiTestBase):
         return channel.json()["channel_instance_id"]
 
     def _configure_channel_credentials(self, org_id, owner):
-        saved = owner.put(
-            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
-            json={"credentials": {"bot_id": "bot", "secret": "test-secret" + org_id}},
-        )
-        self.assertEqual(saved.status_code, 200, saved.text)
+        with _mock_um.patch(
+            "src.api.routers.v2.verify_wecom_credentials"
+        ):
+            saved = owner.put(
+                "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+                json={
+                    "credentials": {
+                        "bot_id": "bot",
+                        "secret": "test-secret" + org_id,
+                    }
+                },
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
 
     def test_channel_test_without_credentials_returns_400(self):
         org_id, owner = self._create_owner("channel-test-nocred")
