@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+import unittest.mock as _mock_um
 import json
 import sqlite3
 from contextlib import closing
@@ -11,7 +12,6 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from src.core.modeling import CanonicalMessage
 from src.core.storage.organizations import OrganizationError
 from src.core.tooling.runtime import ToolRuntime
 from tests._web_api_base import WebApiTestBase
@@ -239,7 +239,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
 
     def test_public_agent_is_read_only_and_copy_is_a_snapshot(self):
         org_id, owner = self._create_owner("override")
-        public = self._publish_catalog(
+        self._publish_catalog(
             "agents",
             "shared_helper",
             {
@@ -264,7 +264,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(copied.status_code, 201, copied.text)
 
-        updated = self._publish_catalog(
+        self._publish_catalog(
             "agents",
             "shared_helper",
             {
@@ -539,10 +539,12 @@ class OrganizationResourceApiTest(WebApiTestBase):
             channel_a.json()["channel_instance_id"],
             channel_b.json()["channel_instance_id"],
         )
-        saved = owner_a.put(
-            "/api/v2/orgs/{}/channels/main/credentials".format(org_a),
-            json={"credentials": {"bot_id": "bot", "secret": "never-echo"}},
-        )
+        import unittest.mock as _um
+        with _um.patch("src.api.routers.v2.verify_wecom_credentials"):
+            saved = owner_a.put(
+                "/api/v2/orgs/{}/channels/main/credentials".format(org_a),
+                json={"credentials": {"bot_id": "bot", "secret": "never-echo"}},
+            )
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertNotIn("never-echo", saved.text)
         listed = owner_a.get(
@@ -601,7 +603,9 @@ class OrganizationResourceApiTest(WebApiTestBase):
         shared = owner_a.get(
             "/api/v2/orgs/{}/conversations".format(org_a)
         ).json()
-        self.assertEqual(shared[0]["source"], "channel")
+        # Channel-bound conversations are stored for audit but not shown in
+        # the chat page conversation list.
+        self.assertEqual(shared, [])
 
     def test_member_collaborates_but_sensitive_governance_stays_restricted(self):
         org_id, owner = self._create_owner("controls")
@@ -715,7 +719,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(cannot_pause.status_code, 400, cannot_pause.text)
 
-    def test_shared_organization_content_is_collaboratively_managed(self):
+    def test_organization_knowledge_is_creator_managed(self):
         from src.core.services.knowledge import KnowledgeService
 
         self.app.state.knowledge_service = KnowledgeService(
@@ -724,20 +728,32 @@ class OrganizationResourceApiTest(WebApiTestBase):
         org_id, owner = self._create_owner("content")
         creator = self._invite_member(owner, org_id, "content-creator")
         other = self._invite_member(owner, org_id, "content-other")
+        org_admin = self._invite_member(owner, org_id, "content-admin", role="admin")
         added = creator.post(
             "/api/v2/orgs/{}/knowledge/text".format(org_id),
-            json={"name": "共享规则", "content": "组织知识"},
+            json={"name": "创建者规则", "content": "组织知识"},
         )
         self.assertEqual(added.status_code, 200, added.text)
         source_id = added.json()["source_id"]
-        deleted = other.delete(
+        denied = other.delete(
+            "/api/v2/orgs/{}/knowledge/sources/{}".format(org_id, source_id)
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        deleted = creator.delete(
             "/api/v2/orgs/{}/knowledge/sources/{}".format(org_id, source_id)
         )
         self.assertEqual(deleted.status_code, 200, deleted.text)
-        missing = creator.delete(
-            "/api/v2/orgs/{}/knowledge/sources/{}".format(org_id, source_id)
+        added_again = creator.post(
+            "/api/v2/orgs/{}/knowledge/text".format(org_id),
+            json={"name": "管理员可清理", "content": "组织知识"},
         )
-        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertEqual(added_again.status_code, 200, added_again.text)
+        admin_deleted = org_admin.delete(
+            "/api/v2/orgs/{}/knowledge/sources/{}".format(
+                org_id, added_again.json()["source_id"]
+            )
+        )
+        self.assertEqual(admin_deleted.status_code, 200, admin_deleted.text)
 
     def test_web_conversations_are_shared_but_lifecycle_is_restricted(self):
         org_id, owner = self._create_owner("chat")
@@ -831,15 +847,17 @@ class OrganizationResourceApiTest(WebApiTestBase):
             },
         )
         self.assertEqual(channel.status_code, 200, channel.text)
-        saved = owner.put(
-            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
-            json={
-                "credentials": {
-                    "bot_id": "credential-bot",
-                    "secret": "top-secret-value",
-                }
-            },
-        )
+        import unittest.mock as _um
+        with _um.patch("src.api.routers.v2.verify_wecom_credentials"):
+            saved = owner.put(
+                "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+                json={
+                    "credentials": {
+                        "bot_id": "credential-bot",
+                        "secret": "top-secret-value",
+                    }
+                },
+            )
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertTrue(saved.json()["configured"])
         self.assertNotIn("secret", saved.text)
@@ -900,10 +918,12 @@ class OrganizationResourceApiTest(WebApiTestBase):
             },
         )
         self.assertEqual(channel.status_code, 200, channel.text)
-        saved = owner.put(
-            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
-            json={"credentials": {"bot_id": "bot", "secret": "delete-after-backup-secret"}},
-        )
+        import unittest.mock as _um
+        with _um.patch("src.api.routers.v2.verify_wecom_credentials"):
+            saved = owner.put(
+                "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+                json={"credentials": {"bot_id": "bot", "secret": "delete-after-backup-secret"}},
+            )
         self.assertEqual(saved.status_code, 200, saved.text)
         legacy_keychain = (
             self.app.state.credential_service.legacy_integration_keychain
@@ -1031,11 +1051,19 @@ class OrganizationResourceApiTest(WebApiTestBase):
         return channel.json()["channel_instance_id"]
 
     def _configure_channel_credentials(self, org_id, owner):
-        saved = owner.put(
-            "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
-            json={"credentials": {"bot_id": "bot", "secret": "test-secret" + org_id}},
-        )
-        self.assertEqual(saved.status_code, 200, saved.text)
+        with _mock_um.patch(
+            "src.api.routers.v2.verify_wecom_credentials"
+        ):
+            saved = owner.put(
+                "/api/v2/orgs/{}/channels/main/credentials".format(org_id),
+                json={
+                    "credentials": {
+                        "bot_id": "bot",
+                        "secret": "test-secret" + org_id,
+                    }
+                },
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
 
     def test_channel_test_without_credentials_returns_400(self):
         org_id, owner = self._create_owner("channel-test-nocred")

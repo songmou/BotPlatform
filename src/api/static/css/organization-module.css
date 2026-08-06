@@ -50,6 +50,7 @@
 .organization-card h3 {
     margin-bottom: 7px;
     font-size: 15px;
+    overflow-wrap: anywhere;
 }
 
 .organization-card p {
@@ -108,8 +109,12 @@
 }
 
 .organization-agent-tabs {
-    margin: 0 -4px 18px;
+    margin: 12px 24px 0;
     overflow-x: auto;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
 }
 
 .organization-agent-tabs .tab-btn {
@@ -169,4 +174,63 @@
 @media (max-width: 760px) {
     .organization-page { padding: 18px; }
     .organization-page-header { flex-direction: column; }
+}
+
+.wecom-qr-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    width: 180px;
+    height: 180px;
+    margin: 0 auto 12px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.6;
+    background: var(--bg-secondary);
+}
+.wechat-connect {
+    margin: 12px 0;
+    text-align: left;
+}
+.wechat-connect-status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.wecom-configured {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    text-align: left;
+}
+.wechat-qr {
+    display: block;
+    width: 180px;
+    height: 180px;
+    margin: 0 auto 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.wechat-connect-hint {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 4px 0 8px;
+}
+.wechat-connect-error {
+    font-size: 12px;
+    color: #dc2626;
+    margin: 4px 0 8px;
+}
+.btn-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
 }

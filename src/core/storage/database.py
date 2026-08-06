@@ -133,6 +133,8 @@ class Database:
                         self._migrate_v24(connection)
                     elif version == 28:
                         self._migrate_v28(connection)
+                    elif version == 31:
+                        self._migrate_v31(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -358,6 +360,28 @@ WHERE EXISTS (
 );
 """.format(table=table)
         cls._apply_schema_script(connection, 28, script)
+
+    @classmethod
+    def _migrate_v31(cls, connection: sqlite3.Connection) -> None:
+        """Add script_run_id to schedule runs idempotently.
+
+        Guarded so re-running the migration (e.g. after schema_migrations rows
+        were trimmed during a test or a partial upgrade) does not raise a
+        duplicate-column error.
+        """
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(organization_schedule_runs)"
+            ).fetchall()
+        }
+        script = ""
+        if "script_run_id" not in columns:
+            script += (
+                "ALTER TABLE organization_schedule_runs "
+                "ADD COLUMN script_run_id TEXT;\n"
+            )
+        cls._apply_schema_script(connection, 31, script)
 
     @staticmethod
     def _migrate_v12(connection: sqlite3.Connection) -> None:

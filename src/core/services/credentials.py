@@ -75,7 +75,11 @@ class CredentialService:
     def secret_for_resource(
         self, organization_id: str, resource_type: str, resource_id: str
     ) -> str:
-        """Return a secret to trusted runtime code without exposing it via APIs."""
+        """Return a secret to trusted runtime code without exposing it via APIs.
+
+        Organization-scope credentials take precedence; personal-scope ones
+        (e.g. personal channel connections) are used as a fallback.
+        """
         with self.database.read() as connection:
             row = connection.execute(
                 "SELECT secret_service, secret_account FROM credential_metadata "
@@ -83,6 +87,13 @@ class CredentialService:
                 "AND resource_type=? AND resource_id=?",
                 (organization_id, resource_type, resource_id),
             ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT secret_service, secret_account FROM credential_metadata "
+                    "WHERE organization_id=? AND credential_scope='personal' "
+                    "AND resource_type=? AND resource_id=?",
+                    (organization_id, resource_type, resource_id),
+                ).fetchone()
         if row is None:
             raise CredentialError("尚未配置组织凭据")
         try:

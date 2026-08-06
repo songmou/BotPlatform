@@ -545,6 +545,34 @@ class DriveEntryActionIn(BaseModel):
     target: str
 
 
+class DriveAuditOut(BaseModel):
+    id: int
+    ts: str
+    operator: str
+    source: str
+    scope: str
+    tenant_id: Optional[str] = None
+    action: str
+    path: str
+    target_path: Optional[str] = None
+    size_bytes: int
+    status: str
+    error: Optional[str] = None
+
+
+class PublishAgentIn(BaseModel):
+    agent_id: str
+
+
+class PublishEnabledIn(BaseModel):
+    enabled: bool
+
+
+class WeComConfigIn(BaseModel):
+    bot_id: str
+    secret: str
+
+
 # ------------------------------------------------------------------ Datasource
 
 

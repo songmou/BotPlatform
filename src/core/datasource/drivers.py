@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 # (driver_module, user_hint_message)

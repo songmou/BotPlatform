@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -57,10 +56,41 @@ def _bad_request(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
+def _require_platform_admin(principal) -> None:
+    if not principal.allows("admins.manage"):
+        raise HTTPException(status_code=403, detail="仅平台管理员可访问组织内容")
+
+
+def _require_public_scope(principal, scope: str, tenant_id) -> None:
+    if principal.allows("admins.manage"):
+        return
+    if tenant_id or scope not in ("", "public"):
+        raise HTTPException(status_code=403, detail="仅平台管理员可访问组织内容")
+
+
+def _category_scope(service, category_id: str) -> Optional[str]:
+    try:
+        return service.get_category(category_id)["scope"]
+    except ValueError:
+        return None
+
+
+def _source_scope(service, source_id: str) -> Optional[str]:
+    with service.registry.database.read() as connection:
+        row = connection.execute(
+            "SELECT c.scope AS scope FROM knowledge_sources s "
+            "JOIN knowledge_categories c ON c.category_id = s.category_id "
+            "WHERE s.source_id=?",
+            (source_id,),
+        ).fetchone()
+    return row["scope"] if row else None
+
+
 @router.get("/tenants")
 def list_knowledge_tenants(
     request: Request, principal=Depends(require_permission("knowledge.read"))
 ):
+    _require_platform_admin(principal)
     registry = get_registry(request)
     return [
         {
@@ -80,6 +110,8 @@ def list_categories(
     principal=Depends(require_permission("knowledge.read")),
 ):
     service = _knowledge_service(request)
+    if not principal.allows("admins.manage"):
+        scope, tenant_id = "public", ""
     try:
         return {
             # Lets the page explain why sources stay in pending_embedding.
@@ -98,6 +130,7 @@ def create_category(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
+    _require_public_scope(principal, body.scope, body.tenant_id)
     try:
         return _knowledge_service(request).create_category(
             body.scope, body.name, body.description, body.tenant_id
@@ -113,8 +146,10 @@ def update_category(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
+    service = _knowledge_service(request)
+    _require_public_scope(principal, _category_scope(service, category_id) or "*", "")
     try:
-        return _knowledge_service(request).update_category(
+        return service.update_category(
             category_id, body.name, body.description
         )
     except ValueError as exc:
@@ -127,8 +162,10 @@ def delete_category(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
+    service = _knowledge_service(request)
+    _require_public_scope(principal, _category_scope(service, category_id) or "*", "")
     try:
-        _knowledge_service(request).delete_category(category_id)
+        service.delete_category(category_id)
     except ValueError as exc:
         status = 409 if "仍包含" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
@@ -144,9 +181,11 @@ def list_knowledge(
 ):
     service = _knowledge_service(request)
     if category_id and not tenant_id:
+        _require_public_scope(principal, _category_scope(service, category_id) or "*", "")
         return {"sources": service.list_category(category_id)}
     if not tenant_id:
         raise HTTPException(status_code=400, detail="必须提供租户编号或知识库编号")
+    _require_platform_admin(principal)
     tenant = _tenant(request, tenant_id)
     return {
         "sources": service.list(tenant.tenant_id, category_id or None)
@@ -163,6 +202,7 @@ def search_knowledge(
     category_ids: Optional[List[str]] = Query(default=None),
     principal=Depends(require_permission("knowledge.read")),
 ):
+    _require_platform_admin(principal)
     service = _knowledge_service(request)
     tenant = _tenant(request, tenant_id)
     return {
@@ -186,6 +226,7 @@ def add_knowledge_text(
     try:
         if body.category_id:
             category = service.get_category(body.category_id)
+            _require_public_scope(principal, category["scope"], category.get("tenant_id"))
             if category["scope"] == "tenant":
                 _tenant(request, str(category["tenant_id"]))
                 if body.tenant_id and body.tenant_id != category["tenant_id"]:
@@ -195,6 +236,7 @@ def add_knowledge_text(
             )
         if not body.tenant_id:
             raise ValueError("未指定知识库时必须提供租户编号")
+        _require_platform_admin(principal)
         tenant = _tenant(request, body.tenant_id)
         return service.add_text(
             tenant.tenant_id, body.name, body.content
@@ -232,9 +274,11 @@ def upload_knowledge_file(
     try:
         if category_id:
             category = service.get_category(category_id)
+            _require_public_scope(principal, category["scope"], category.get("tenant_id"))
         else:
             if not tenant_id:
                 raise ValueError("未指定知识库时必须提供租户编号")
+            _require_platform_admin(principal)
             _tenant(request, tenant_id)
             category_id = service.ensure_default_category(tenant_id)
             category = service.get_category(category_id)
@@ -277,6 +321,7 @@ def import_from_drive(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
+    _require_public_scope(principal, body.scope, body.tenant_id)
     if not body.paths or len(body.paths) > 100:
         raise HTTPException(status_code=400, detail="每次请选择 1 到 100 个文件")
     service = _knowledge_service(request)
@@ -300,7 +345,10 @@ def refresh_sources(
 ):
     if not body.source_ids or len(body.source_ids) > 100:
         raise HTTPException(status_code=400, detail="每次请选择 1 到 100 个知识来源")
-    return {"items": _knowledge_service(request).refresh(body.source_ids)}
+    service = _knowledge_service(request)
+    for source_id in body.source_ids:
+        _require_public_scope(principal, _source_scope(service, source_id) or "*", "")
+    return {"items": service.refresh(body.source_ids)}
 
 
 @router.patch("/sources/move")
@@ -309,8 +357,14 @@ def move_sources(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
+    service = _knowledge_service(request)
+    for source_id in body.source_ids:
+        _require_public_scope(principal, _source_scope(service, source_id) or "*", "")
+    _require_public_scope(
+        principal, _category_scope(service, body.target_category_id) or "*", ""
+    )
     try:
-        moved = _knowledge_service(request).move_sources(
+        moved = service.move_sources(
             body.source_ids, body.target_category_id
         )
     except ValueError as exc:
@@ -326,6 +380,7 @@ def drive_links(
     path: str = Query(default=""),
     principal=Depends(require_permission("knowledge.read")),
 ):
+    _require_public_scope(principal, scope, tenant_id)
     try:
         return {
             "links": _knowledge_service(request).drive_links(
@@ -342,8 +397,10 @@ def preview_source(
     request: Request,
     principal=Depends(require_permission("knowledge.read")),
 ):
+    service = _knowledge_service(request)
+    _require_public_scope(principal, _source_scope(service, source_id) or "*", "")
     try:
-        return _knowledge_service(request).preview_source(source_id)
+        return service.preview_source(source_id)
     except ValueError as exc:
         status = 404 if "未找到" in str(exc) or "已删除" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
@@ -379,6 +436,7 @@ def reindex_knowledge(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
+    _require_platform_admin(principal)
     service = _knowledge_service(request)
     tenant = _tenant(request, body.tenant_id)
     try:
@@ -395,6 +453,10 @@ def delete_knowledge(
     principal=Depends(require_permission("knowledge.manage")),
 ):
     service = _knowledge_service(request)
+    if tenant_id:
+        _require_platform_admin(principal)
+    else:
+        _require_public_scope(principal, _source_scope(service, source_id) or "*", "")
     deleted = (
         service.delete(_tenant(request, tenant_id).tenant_id, source_id)
         if tenant_id

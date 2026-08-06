@@ -17,6 +17,7 @@ from src.api.deps import (
     get_principal,
     require_permission,
 )
+from src.api.routers.v2 import _record_content_owner, _require_content_manager
 from src.core.services.authorization import AuthorizationError, AuthorizationService
 from src.core.services.drive import MAX_PREVIEW_BYTES, MAX_UPLOAD_BYTES
 from src.core.services.knowledge import SUPPORTED_SUFFIXES
@@ -502,16 +503,28 @@ def upload_organization_knowledge(
     file: UploadFile = File(...),
     principal=Depends(get_principal),
 ):
-    _organization(request, principal, organization_id)
+    context = _organization(request, principal, organization_id)
     service = _knowledge(request)
     _organization_writable_category(service, category_id, organization_id)
     filename, payload = _clean_upload(file)
+    drive_path = f"workspace/{_KNOWLEDGE_UPLOAD_DIR}/{filename}"
+    if (service.registry.tenant_root(organization_id) / drive_path).exists():
+        _require_content_manager(request, context, "drive_entry", drive_path)
     try:
-        return _save_and_index(
+        result = _save_and_index(
             service, category_id, "tenant", organization_id, filename, payload
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    source_id = str(result.get("source_id") or "")
+    if source_id:
+        _record_content_owner(
+            request, organization_id, "knowledge_source", source_id, context.user_id
+        )
+    _record_content_owner(
+        request, organization_id, "drive_entry", drive_path, context.user_id
+    )
+    return result
 
 
 @router.post("/orgs/{organization_id}/knowledge/from-drive")
@@ -521,7 +534,7 @@ def import_organization_drive_knowledge(
     body: Dict[str, Any] = Body(...),
     principal=Depends(get_principal),
 ):
-    _organization(request, principal, organization_id)
+    context = _organization(request, principal, organization_id)
     service = _knowledge(request)
     category_id = str(body.get("category_id") or "")
     _organization_writable_category(service, category_id, organization_id)
@@ -534,6 +547,15 @@ def import_organization_drive_knowledge(
             result = service.index_drive_file(
                 category_id, "tenant", organization_id, str(path)
             )
+            source_id = str(result.get("source_id") or "")
+            if source_id:
+                _record_content_owner(
+                    request,
+                    organization_id,
+                    "knowledge_source",
+                    source_id,
+                    context.user_id,
+                )
             items.append({"path": path, "ok": True, **result})
         except (OSError, ValueError) as exc:
             items.append({"path": path, "ok": False, "error": str(exc)})
@@ -547,11 +569,13 @@ def refresh_organization_knowledge(
     body: Dict[str, Any] = Body(...),
     principal=Depends(get_principal),
 ):
-    _organization(request, principal, organization_id)
+    context = _organization(request, principal, organization_id)
     service = _knowledge(request)
     source_ids = _validate_sources(
         service, body.get("source_ids") or [], "tenant", organization_id
     )
+    for source_id in source_ids:
+        _require_content_manager(request, context, "knowledge_source", source_id)
     return {"items": service.refresh(source_ids)}
 
 
@@ -562,11 +586,13 @@ def move_organization_knowledge(
     body: Dict[str, Any] = Body(...),
     principal=Depends(get_principal),
 ):
-    _organization(request, principal, organization_id)
+    context = _organization(request, principal, organization_id)
     service = _knowledge(request)
     source_ids = _validate_sources(
         service, body.get("source_ids") or [], "tenant", organization_id
     )
+    for source_id in source_ids:
+        _require_content_manager(request, context, "knowledge_source", source_id)
     target = str(body.get("target_category_id") or "")
     _organization_writable_category(service, target, organization_id)
     try:

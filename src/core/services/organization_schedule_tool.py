@@ -16,7 +16,7 @@ tasks.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from src.core.services.organization_controls import OrganizationControlStore
 from src.core.storage.organizations import OrganizationStore
@@ -184,7 +184,7 @@ class OrganizationScheduleToolService:
         }
 
     def _manage_delete(self, tenant: Any, schedule_id: str) -> Dict[str, Any]:
-        actor = self._require_write_role(tenant)
+        self._require_write_role(tenant)
         self.controls.delete_schedule(tenant.tenant_id, schedule_id)
         return {"deleted": schedule_id, "action": "delete"}
 

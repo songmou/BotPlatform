@@ -20,6 +20,7 @@ from src.api.routers import (
     auth,
     bots,
     chat,
+    connections,
     content_v2,
     datasources,
     drive,
@@ -163,6 +164,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.env_resolver = env_resolver
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
+    app.state.wechat_login_managers = {}
     app.state.datasource_service = datasource_service
     app.state.channel_statuses = channel_statuses
     app.state.organization_store = organization_store
@@ -263,6 +265,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(schedules.router)
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
+    app.include_router(connections.router)
     app.include_router(bots.channels_router)
     app.include_router(skills.router)
     app.include_router(scripts.router)

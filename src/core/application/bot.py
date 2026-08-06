@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -1087,6 +1088,22 @@ class MessageBot:
             error_reply = "处理消息失败：{}。请稍后重试。".format(exc)
             self._reply(endpoint, error_reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, error_reply)
+            return
+        except Exception as exc:  # noqa: BLE001 - never let one message loop forever
+            # Any other error must not propagate: the inbox consumer would
+            # mark it "retry" and re-deliver the same message endlessly. Log
+            # the full traceback, tell the user, and finish this message.
+            traceback.print_exc()
+            print("处理用户消息异常：{}".format(repr(exc)), file=sys.stderr)
+            try:
+                self._reply(endpoint, "处理消息时出现内部错误，请稍后重试。", tenant)
+                self._log(
+                    self._direction("输出", endpoint),
+                    user_id,
+                    "处理消息时出现内部错误，请稍后重试。",
+                )
+            except Exception:  # noqa: BLE001 - best effort on the error reply
+                pass
             return
 
         self._track_approval_outcome(subject, endpoint, outcome)

@@ -6,7 +6,7 @@ Only SELECT / UNION / INTERSECT / EXCEPT / WITH are allowed.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 from src.core.datasource.errors import DataSourceError
 

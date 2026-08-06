@@ -120,10 +120,11 @@ function initTools() {
                     badges += ' <span class="badge badge-muted">来源：' +
                         escapeHtml(tool.source_id || "plugin") + "</span>";
                 }
-                var toggle = '<label class="switch-label">' +
+                var toggle = '<label class="switch-label" title="启用/禁用">' +
                     '<input type="checkbox" class="tool-toggle" data-tool="' + escapeHtml(tool.name) + '"' +
                     (tool.enabled ? " checked" : "") + ">" +
                     '<span class="switch switch-sm"></span>' +
+                    '<span class="text-muted">启用</span>' +
                     "</label>";
                 var approvalToggle = '<label class="switch-label" title="要求审批">' +
                     '<input type="checkbox" class="tool-approval-toggle" data-tool="' +

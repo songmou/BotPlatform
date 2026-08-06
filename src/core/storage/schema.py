@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 32
+LATEST_SCHEMA_VERSION = 33
 
 
 SCHEMA_V1 = r"""
@@ -1431,6 +1431,25 @@ CREATE INDEX IF NOT EXISTS ix_datasource_query_audit_time
 """
 
 
+SCHEMA_V33 = r"""
+CREATE TABLE IF NOT EXISTS personal_channel_connections (
+    connection_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL REFERENCES organizations(organization_id)
+        ON DELETE CASCADE,
+    channel_instance_id TEXT NOT NULL UNIQUE
+        REFERENCES organization_channels(channel_instance_id) ON DELETE CASCADE,
+    platform TEXT NOT NULL CHECK (platform IN ('wechat', 'wecom')),
+    bot_account_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_personal_connections_user
+    ON personal_channel_connections(user_id, created_at DESC);
+"""
+
+
 # Versions applied as plain SQL scripts. Specialized versions with inspection
 # or permission backfills are dispatched through dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
@@ -1464,4 +1483,5 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     30: SCHEMA_V30,
     31: SCHEMA_V31,
     32: SCHEMA_V32,
+    33: SCHEMA_V33,
 }

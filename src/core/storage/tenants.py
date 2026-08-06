@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from src.core.storage.database import Database, DatabaseError
 from src.core.modeling import CanonicalMessage
@@ -497,6 +497,23 @@ class ConversationStore:
                         user_id,
                     ),
                 )
+
+    def clear_contexts_for_bots(self, bot_ids: Iterable[str]) -> int:
+        """Clear short-term context for every tenant under the given bots.
+
+        Used when a channel switches its bound agent so the new agent starts
+        without the previous conversation's memory. Durable transcripts in
+        conversation_events are preserved.
+        """
+        targets = {str(b) for b in bot_ids if b}
+        if not targets:
+            return 0
+        cleared = 0
+        for context in self.registry.list_contexts():
+            if context.bot_id in targets:
+                self.clear_context(context.tenant_id)
+                cleared += 1
+        return cleared
 
 
 class SettingsStore:

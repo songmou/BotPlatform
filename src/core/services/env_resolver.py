@@ -18,7 +18,7 @@ by an author so a script cannot hijack the sandbox environment.
 from __future__ import annotations
 
 import re
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List
 
 _ENV_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 RESERVED_PREFIXES = ("ILINKBOT_", "PYTHON", "LD_", "DYLD_")
