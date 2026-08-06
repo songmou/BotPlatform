@@ -133,6 +133,10 @@ class EmbeddingClient(Protocol):
     def model_id(self) -> str: ...
 
     @property
+    def fingerprint(self) -> str:
+        """Stable identity of the embedding space (profile@model@dimensions)."""
+
+    @property
     def dimensions(self) -> int: ...
 
     def embed(self, texts: List[str]) -> List[List[float]]: ...

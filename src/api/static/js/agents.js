@@ -29,8 +29,7 @@ function initAgents() {
     });
 
     function loadModelOptions() {
-        return fetch("/api/models")
-            .then(function (r) { return r.json(); })
+        return CatalogApi.list("models")
             .then(function (models) {
                 var select = document.getElementById("agent-model");
                 var options = '<option value="">跟随默认模型</option>';
@@ -39,6 +38,9 @@ function initAgents() {
                     options += '<option value="' + m.id + '">' + m.id + "（" + m.model + "）</option>";
                 });
                 select.innerHTML = options;
+            })
+            .catch(function (err) {
+                showToast("加载模型列表失败：" + err.message, "error");
             });
     }
 
@@ -195,8 +197,8 @@ function initAgents() {
         return Promise.all([
             fetch("/api/tools").then(function (r) { return r.json(); }),
             fetch("/api/plugins").then(function (r) { return r.json(); }),
-            fetch("/api/skills").then(function (r) { return r.json(); }),
-            fetch("/api/mcp").then(function (r) { return r.json(); }),
+            CatalogApi.list("skills"),
+            CatalogApi.list("mcp"),
             fetch("/api/knowledge/categories").then(function (r) {
                 return r.ok ? r.json() : { categories: [] };
             }),
@@ -430,8 +432,8 @@ function initAgents() {
 
     function loadAgents() {
         Promise.all([
-            fetch("/api/agents").then(function (r) { return r.json(); }),
-            fetch("/api/agents/active").then(function (r) { return r.json(); })
+            CatalogApi.list("agents"),
+            fetch("/api/v2/platform/agents/active").then(function (r) { return r.json(); })
         ]).then(function (results) {
             var agents = results[0];
             var defaultId = results[1].id;
@@ -498,13 +500,8 @@ function initAgents() {
 
         if (action === "toggle") {
             var nextEnabled = btn.getAttribute("data-enabled") !== "1";
-            fetch("/api/agents/" + id, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ enabled: nextEnabled }),
-            })
-                .then(function (r) {
-                    if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+            CatalogApi.patch("agents", id, { enabled: nextEnabled })
+                .then(function () {
                     showToast((nextEnabled ? "已启用智能体 " : "已禁用智能体 ") + id, "success");
                     loadAgents();
                 })
@@ -514,9 +511,8 @@ function initAgents() {
         if (action === "delete") {
             showConfirm("确定要删除智能体「" + id + "」吗？").then(function (ok) {
                 if (!ok) return;
-                fetch("/api/agents/" + id, { method: "DELETE" })
-                    .then(function (r) {
-                        if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                CatalogApi.remove("agents", id)
+                    .then(function () {
                         showToast("已删除智能体 " + id, "success");
                         loadAgents();
                     })
@@ -525,8 +521,7 @@ function initAgents() {
         }
 
         if (action === "edit") {
-            fetch("/api/agents/" + id)
-                .then(function (r) { return r.json(); })
+            CatalogApi.get("agents", id)
                 .then(function (a) {
                     editingId = id;
                     modalTitle.textContent = "编辑智能体";
@@ -551,7 +546,7 @@ function initAgents() {
                     });
                     Promise.all([
                         loadToolOptions(),
-                        fetch("/api/agents/" + encodeURIComponent(id) + "/knowledge-categories")
+                        fetch("/api/v2/platform/agents/" + encodeURIComponent(id) + "/knowledge-categories")
                             .then(function (r) { return r.ok ? r.json() : { category_ids: [] }; })
                     ]).then(function (results) {
                         setToolSelection(a, results[1].category_ids || []);
@@ -597,27 +592,12 @@ function initAgents() {
             capabilities: []
         };
 
-        var url, method;
-        if (editingId) {
-            url = "/api/agents/" + editingId;
-            method = "PUT";
-        } else {
-            payload.id = document.getElementById("agent-id").value;
-            url = "/api/agents";
-            method = "POST";
-        }
+        var resourceId = editingId || document.getElementById("agent-id").value;
+        if (!editingId) payload.id = resourceId;
 
-        fetch(url, {
-            method: method,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        })
-            .then(function (r) {
-                if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-                return r.json();
-            })
+        CatalogApi.save("agents", resourceId, payload)
             .then(function (saved) {
-                return fetch("/api/agents/" + encodeURIComponent(saved.id) + "/knowledge-categories", {
+                return fetch("/api/v2/platform/agents/" + encodeURIComponent(resourceId) + "/knowledge-categories", {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ category_ids: selection.knowledge_category_ids })

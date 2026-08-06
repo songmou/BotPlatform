@@ -37,7 +37,8 @@ function initKnowledge() {
             "knowledge-category-add", "knowledge-category-edit", "knowledge-category-delete",
             "knowledge-add-text-btn", "knowledge-from-drive-btn", "knowledge-upload-btn",
             "knowledge-refresh-selected", "knowledge-move-selected", "knowledge-move-target",
-            "knowledge-delete-selected", "knowledge-reindex-btn", "knowledge-select-all"
+            "knowledge-delete-selected", "knowledge-reindex-btn", "knowledge-rebuild-btn",
+            "knowledge-select-all"
         ].forEach(function (id) {
             var element = document.getElementById(id);
             if (element) element.disabled = disabled;
@@ -130,10 +131,50 @@ function initKnowledge() {
     function updateEmbeddingNotice() {
         var notice = document.getElementById("knowledge-embedding-notice");
         var reindexBtn = document.getElementById("knowledge-reindex-btn");
+        var rebuildBtn = document.getElementById("knowledge-rebuild-btn");
         notice.style.display = state.embeddingEnabled ? "none" : "";
         reindexBtn.disabled = !state.embeddingEnabled || readOnlyScope();
         reindexBtn.title = state.embeddingEnabled
             ? "" : "向量化服务未启用，无法补齐向量";
+        rebuildBtn.disabled = !state.embeddingEnabled || readOnlyScope();
+        rebuildBtn.title = state.embeddingEnabled
+            ? "用当前向量模型覆盖该库全部向量" : "向量化服务未启用，无法重建向量";
+    }
+
+    function loadEmbeddingHealth() {
+        var banner = document.getElementById("knowledge-health-banner");
+        if (!currentCategoryId() || readOnlyScope()) {
+            banner.style.display = "none";
+            return Promise.resolve();
+        }
+        return jsonFetch(knowledgeUrl("/embedding-health") +
+            "?category_id=" + encodeURIComponent(currentCategoryId())).then(function (data) {
+            if (data.stale && data.stale > 0) {
+                banner.style.display = "";
+                banner.innerHTML = "检测到向量模型已变更，当前知识库有 <strong>" + data.stale +
+                    "</strong> 个分块需重新向量化。" +
+                    '<button id="knowledge-health-rebuild" class="btn-secondary">一键强制重建</button>';
+                var btn = document.getElementById("knowledge-health-rebuild");
+                if (btn) btn.addEventListener("click", rebuildCurrentLibrary);
+            } else {
+                banner.style.display = "none";
+            }
+        }).catch(function () { banner.style.display = "none"; });
+    }
+
+    function rebuildCurrentLibrary() {
+        if (!state.embeddingEnabled) {
+            showToast("向量模型未配置，请先在“模型管理 → 角色绑定”启用向量模型并完整重启服务", "error");
+            return;
+        }
+        jsonFetch(knowledgeUrl("/reindex"), {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ category_ids: [currentCategoryId()], force: true })
+        }).then(function (result) {
+            showToast("已强制重建 " + result.completed + " 个向量" +
+                (result.failed ? "，" + result.failed + " 个失败" : ""), result.failed ? "error" : "success");
+            loadSources();
+        }).catch(function (err) { showToast(err.message, "error"); });
     }
 
     function loadCategories(preferred) {
@@ -194,6 +235,7 @@ function initKnowledge() {
             state.sources = data.sources || data.items || [];
             setStatus("");
             renderSources();
+            loadEmbeddingHealth();
         }).catch(function (err) { setStatus(err.message); });
     }
 
@@ -234,8 +276,14 @@ function initKnowledge() {
                 "<td>" + Number(source.chunks || 0) + "</td>" +
                 "<td>" + escapeHtml((source.updated_at || "").slice(0, 19).replace("T", " ")) + "</td>" +
                 '<td>' + (readOnlyScope() ? '<span class="text-muted">只读</span>' :
+                '<div class="knowledge-row-actions">' +
+                '<button class="btn-secondary btn-small" data-reembed-source="' +
+                escapeHtml(source.source_id) + '"' +
+                (state.embeddingEnabled ? '' : ' disabled title="向量模型未启用"') +
+                '>重新向量化</button>' +
                 '<button class="btn-danger btn-small" data-delete-source="' +
-                escapeHtml(source.source_id) + '">删除</button>') + '</td></tr>';
+                escapeHtml(source.source_id) + '">删除</button>' +
+                '</div>') + '</td></tr>';
         }).join("");
     }
 
@@ -272,6 +320,26 @@ function initKnowledge() {
         if (previewLink) {
             evt.preventDefault();
             previewSource(previewLink.getAttribute("data-preview-source"));
+            return;
+        }
+        var reembedButton = evt.target.closest("[data-reembed-source]");
+        if (reembedButton) {
+            if (!state.embeddingEnabled) {
+                showToast("向量模型未配置，请先在“模型管理 → 角色绑定”启用向量模型并完整重启服务", "error");
+                return;
+            }
+            var reembedId = reembedButton.getAttribute("data-reembed-source");
+            jsonFetch(knowledgeUrl("/reembed"), {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ source_ids: [reembedId] })
+            }).then(function (result) {
+                if (result.failed) {
+                    showToast("重新向量化失败：" + (result.errors[0] || {}).error, "error");
+                } else {
+                    showToast("已重新向量化 " + result.chunks + " 个分块", "success");
+                }
+                loadSources();
+            }).catch(function (err) { showToast(err.message, "error"); });
             return;
         }
         var button = evt.target.closest("[data-delete-source]");
@@ -427,14 +495,20 @@ function initKnowledge() {
             .catch(function (err) { showToast(err.message, "error"); });
     });
     document.getElementById("knowledge-reindex-btn").addEventListener("click", function () {
+        if (!state.embeddingEnabled) {
+            showToast("向量模型未配置，请先在“模型管理 → 角色绑定”启用向量模型并完整重启服务", "error");
+            return;
+        }
         jsonFetch(knowledgeUrl("/reindex"), {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ category_ids: [currentCategoryId()] })
         }).then(function (result) {
-            showToast("已补齐 " + result.completed + " 个向量", "success");
+            showToast("已补齐 " + result.completed + " 个向量" +
+                (result.failed ? "，" + result.failed + " 个失败" : ""), result.failed ? "error" : "success");
             loadSources();
         }).catch(function (err) { showToast(err.message, "error"); });
     });
+    document.getElementById("knowledge-rebuild-btn").addEventListener("click", rebuildCurrentLibrary);
 
     function runSearch() {
         var query = document.getElementById("knowledge-search-input").value.trim();

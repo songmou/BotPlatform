@@ -1,4 +1,11 @@
-"""Integration tests for /api/skills and /api/mcp endpoints."""
+"""Integration tests for the MCP service template catalog.
+
+The template catalog is served by ``platform_runtime`` at
+``/api/v2/platform/mcp/templates`` (and ``/mcp/templates/{key}``). The legacy
+``/api/mcp`` server CRUD routers were removed during the catalog migration;
+server CRUD now lives behind ``/api/v2/platform/catalog/mcp``. These tests
+cover only the read-only template blueprints (no secrets).
+"""
 
 from __future__ import annotations
 
@@ -7,256 +14,80 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import src.api.routers.mcp as mcp_module
-import src.api.routers.skills as skills_module
+import src.api.routers.platform_runtime as platform_runtime_module
 
 from tests._web_api_base import WebApiTestBase
 
 
-class SkillsApiTest(WebApiTestBase):
-    def setUp(self):
-        super().setUp()
-        self._file_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._file_dir.cleanup)
-        self.skills_file = Path(self._file_dir.name) / "skills.json"
-        patcher = patch.object(skills_module, "SKILLS_FILE", self.skills_file)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def _skill(self, skill_id="greeting", **overrides):
-        body = {
-            "id": skill_id,
-            "name": "问候技能",
-            "description": "打招呼",
-            "prompt": "请友好地打招呼",
-            "enabled": True,
-        }
-        body.update(overrides)
-        return body
-
-    def test_list_empty(self):
-        response = self.client.get("/api/skills")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), [])
-
-    def test_create_skill_updates_config_and_file(self):
-        response = self.client.post("/api/skills", json=self._skill())
-        self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(response.json()["id"], "greeting")
-
-        # Live config updated in place and JSON persisted.
-        self.assertEqual(len(self.config.skills), 1)
-        self.assertEqual(self.config.skills[0]["id"], "greeting")
-        saved = json.loads(self.skills_file.read_text(encoding="utf-8"))
-        self.assertEqual(saved["skills"][0]["id"], "greeting")
-
-    def test_create_invalid_id(self):
-        response = self.client.post("/api/skills", json=self._skill("Bad-ID"))
-        self.assertEqual(response.status_code, 400)
-
-    def test_create_duplicate_409(self):
-        self.client.post("/api/skills", json=self._skill())
-        response = self.client.post("/api/skills", json=self._skill())
-        self.assertEqual(response.status_code, 409)
-
-    def test_update_skill(self):
-        self.client.post("/api/skills", json=self._skill())
-        response = self.client.put(
-            "/api/skills/greeting", json={"name": "新名字", "enabled": False}
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        data = response.json()
-        self.assertEqual(data["name"], "新名字")
-        self.assertFalse(data["enabled"])
-        self.assertFalse(self.config.skills[0]["enabled"])
-
-    def test_update_not_found(self):
-        response = self.client.put("/api/skills/nope", json={"name": "x"})
-        self.assertEqual(response.status_code, 404)
-
-    def test_delete_skill(self):
-        self.client.post("/api/skills", json=self._skill())
-        response = self.client.delete("/api/skills/greeting")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.get("/api/skills").json(), [])
-        self.assertEqual(self.config.skills, [])
-
-    def test_delete_not_found(self):
-        response = self.client.delete("/api/skills/nope")
-        self.assertEqual(response.status_code, 404)
-
-
-class McpApiTest(WebApiTestBase):
-    def setUp(self):
-        super().setUp()
-        self._file_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._file_dir.cleanup)
-        self.mcp_file = Path(self._file_dir.name) / "mcp_servers.json"
-        patcher = patch.object(mcp_module, "MCP_FILE", self.mcp_file)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-        self.templates_file = Path(self._file_dir.name) / "mcp_templates.json"
-        self.templates_file.write_text(json.dumps({
-            "templates": [
-                {
-                    "key": "tencent_docs",
-                    "name": "腾讯文档",
-                    "description": "测试模板",
-                    "category": "文档协作",
-                    "transport": "streamablehttp",
-                    "url": "https://docs.qq.com/openapi/mcp",
-                    "auth": {
-                        "kind": "header",
-                        "key": "Authorization",
-                        "label": "Token",
-                        "secret": True,
-                        "help": "获取地址：https://docs.qq.com/open/auth/mcp.html",
-                    },
-                    "help_url": "https://docs.qq.com/open/auth/mcp.html",
-                },
-                {
-                    "key": "notion",
-                    "name": "Notion",
-                    "description": "stdio 模板",
-                    "category": "文档协作",
-                    "transport": "stdio",
-                    "command": "npx",
-                    "args": ["-y", "@notionhq/notion-mcp-server"],
-                    "auth": {
-                        "kind": "env",
-                        "key": "NOTION_TOKEN",
-                        "label": "Integration Token",
-                        "secret": True,
-                    },
-                },
-            ]
-        }, ensure_ascii=False))
-        patcher = patch.object(mcp_module, "MCP_TEMPLATES_FILE", self.templates_file)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def _server(self, server_id="local_fs", **overrides):
-        body = {
-            "id": server_id,
-            "name": "本地文件服务",
+TEMPLATES = {
+    "templates": [
+        {
+            "key": "tencent_docs",
+            "name": "腾讯文档",
+            "description": "测试模板",
+            "category": "文档协作",
+            "transport": "streamablehttp",
+            "url": "https://docs.qq.com/openapi/mcp",
+            "auth": {
+                "kind": "header",
+                "key": "Authorization",
+                "label": "Token",
+                "secret": True,
+                "help": "获取地址：https://docs.qq.com/open/auth/mcp.html",
+            },
+            "help_url": "https://docs.qq.com/open/auth/mcp.html",
+        },
+        {
+            "key": "notion",
+            "name": "Notion",
+            "description": "stdio 模板",
+            "category": "文档协作",
             "transport": "stdio",
-            "command": "mcp-server-fs",
-            "args": [],
-            "env": {},
-            "enabled": True,
-        }
-        body.update(overrides)
-        return body
+            "command": "npx",
+            "args": ["-y", "@notionhq/notion-mcp-server"],
+            "auth": {
+                "kind": "env",
+                "key": "NOTION_TOKEN",
+                "label": "Integration Token",
+                "secret": True,
+            },
+        },
+    ]
+}
 
-    def test_list_empty(self):
-        response = self.client.get("/api/mcp")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), [])
 
-    def test_create_stdio_server(self):
-        response = self.client.post("/api/mcp", json=self._server())
-        self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(response.json()["transport"], "stdio")
-
-        self.assertEqual(len(self.config.mcp_servers), 1)
-        saved = json.loads(self.mcp_file.read_text(encoding="utf-8"))
-        self.assertEqual(saved["servers"][0]["id"], "local_fs")
-
-    def test_create_invalid_id(self):
-        response = self.client.post("/api/mcp", json=self._server("Bad-ID"))
-        self.assertEqual(response.status_code, 400)
-
-    def test_create_invalid_transport(self):
-        response = self.client.post(
-            "/api/mcp", json=self._server(transport="websocket")
+class McpTemplateApiTest(WebApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self._file_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._file_dir.cleanup)
+        self.templates_file = Path(self._file_dir.name) / "mcp_templates.json"
+        self.templates_file.write_text(json.dumps(TEMPLATES, ensure_ascii=False))
+        patcher = patch.object(
+            platform_runtime_module, "MCP_TEMPLATES_FILE", self.templates_file
         )
-        self.assertEqual(response.status_code, 400)
-
-    def test_create_stdio_requires_command(self):
-        response = self.client.post(
-            "/api/mcp", json=self._server(command=None)
-        )
-        self.assertEqual(response.status_code, 400)
-
-    def test_create_sse_requires_url(self):
-        response = self.client.post(
-            "/api/mcp", json=self._server(transport="sse", url=None)
-        )
-        self.assertEqual(response.status_code, 400)
-        response = self.client.post(
-            "/api/mcp",
-            json=self._server(transport="sse", url="http://127.0.0.1:9000/sse"),
-        )
-        self.assertEqual(response.status_code, 201, response.text)
-
-    def test_create_duplicate_409(self):
-        self.client.post("/api/mcp", json=self._server())
-        response = self.client.post("/api/mcp", json=self._server())
-        self.assertEqual(response.status_code, 409)
-
-    def test_update_server(self):
-        self.client.post("/api/mcp", json=self._server())
-        response = self.client.put(
-            "/api/mcp/local_fs", json={"name": "改名", "enabled": False}
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        data = response.json()
-        self.assertEqual(data["name"], "改名")
-        self.assertFalse(data["enabled"])
-
-    def test_update_rejects_bad_transport(self):
-        self.client.post("/api/mcp", json=self._server())
-        response = self.client.put(
-            "/api/mcp/local_fs", json={"transport": "carrier-pigeon"}
-        )
-        self.assertEqual(response.status_code, 400)
-
-    def test_update_not_found(self):
-        response = self.client.put("/api/mcp/nope", json={"name": "x"})
-        self.assertEqual(response.status_code, 404)
-
-    def test_delete_server(self):
-        self.client.post("/api/mcp", json=self._server())
-        response = self.client.delete("/api/mcp/local_fs")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.config.mcp_servers, [])
-
-    def test_delete_not_found(self):
-        response = self.client.delete("/api/mcp/nope")
-        self.assertEqual(response.status_code, 404)
-
-    def test_list_tools_without_runtime(self):
-        self.client.post("/api/mcp", json=self._server())
-        response = self.client.get("/api/mcp/local_fs/tools")
-        self.assertEqual(response.status_code, 200, response.text)
-        data = response.json()
-        self.assertFalse(data["connected"])
-        self.assertEqual(data["tools"], [])
-
-    def test_invoke_tool_without_runtime(self):
-        self.client.post("/api/mcp", json=self._server())
-        response = self.client.post(
-            "/api/mcp/local_fs/tools/echo/invoke", json={"arguments": {}}
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(response.json()["ok"])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_list_templates(self):
-        response = self.client.get("/api/mcp/templates")
+        response = self.client.get("/api/v2/platform/mcp/templates")
         self.assertEqual(response.status_code, 200, response.text)
         keys = [t["key"] for t in response.json()]
         self.assertIn("tencent_docs", keys)
         self.assertIn("notion", keys)
 
     def test_list_templates_empty_when_file_absent(self):
-        with patch.object(mcp_module, "MCP_TEMPLATES_FILE", Path(self._file_dir.name) / "nope.json"):
-            response = self.client.get("/api/mcp/templates")
+        with patch.object(
+            platform_runtime_module,
+            "MCP_TEMPLATES_FILE",
+            Path(self._file_dir.name) / "nope.json",
+        ):
+            response = self.client.get("/api/v2/platform/mcp/templates")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), [])
 
     def test_get_template_by_key(self):
-        response = self.client.get("/api/mcp/templates/tencent_docs")
+        response = self.client.get("/api/v2/platform/mcp/templates/tencent_docs")
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()
         self.assertEqual(data["key"], "tencent_docs")
@@ -265,48 +96,11 @@ class McpApiTest(WebApiTestBase):
         self.assertEqual(data["auth"]["key"], "Authorization")
 
     def test_get_template_not_found(self):
-        response = self.client.get("/api/mcp/templates/missing")
+        response = self.client.get("/api/v2/platform/mcp/templates/missing")
         self.assertEqual(response.status_code, 404)
 
-    def test_create_from_template_header_auth(self):
-        # 模拟前端从模板预填后提交（header 鉴权）
-        body = {
-            "id": "tencent_docs",
-            "name": "腾讯文档",
-            "transport": "streamablehttp",
-            "url": "https://docs.qq.com/openapi/mcp",
-            "headers": {"Authorization": "test-token"},
-            "enabled": True,
-        }
-        response = self.client.post("/api/mcp", json=body)
-        self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(self.config.mcp_servers[0]["id"], "tencent_docs")
 
-    def test_create_from_template_env_auth(self):
-        # 模拟前端从 stdio 模板预填后提交（env 鉴权）
-        body = {
-            "id": "notion",
-            "name": "Notion",
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@notionhq/notion-mcp-server"],
-            "env": {"NOTION_TOKEN": "ntn_test"},
-            "enabled": True,
-        }
-        response = self.client.post("/api/mcp", json=body)
-        self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(self.config.mcp_servers[0]["id"], "notion")
+if __name__ == "__main__":
+    import unittest
 
-    def test_create_from_template_query_auth(self):
-        # 模拟前端从「高德地图」模板预填后提交（query 鉴权：Key 作为 URL 查询参数）
-        body = {
-            "id": "amap",
-            "name": "高德地图",
-            "transport": "streamablehttp",
-            "url": "https://mcp.amap.com/mcp?key=amap_test_key",
-            "enabled": True,
-        }
-        response = self.client.post("/api/mcp", json=body)
-        self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(self.config.mcp_servers[0]["id"], "amap")
-        self.assertEqual(self.config.mcp_servers[0]["url"], "https://mcp.amap.com/mcp?key=amap_test_key")
+    unittest.main()

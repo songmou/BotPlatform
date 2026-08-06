@@ -132,6 +132,25 @@
 .knowledge-status-badge.source_missing,
 .knowledge-status-badge.failed { color: #b91c1c; background: #fee2e2; }
 
+/* Amber banner warning (e.g. stale vectors after a model change). */
+.status-card.status-warn {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #92400e;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.status-card.status-warn strong { color: #92400e; }
+
+.knowledge-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+}
+
 .knowledge-source-cell {
     display: flex;
     align-items: center;

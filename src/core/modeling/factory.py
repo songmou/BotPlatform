@@ -6,6 +6,7 @@ import os
 from typing import Optional
 
 from src.core.config.loader import ModelProfile
+from src.core.config.model_api_keys import get_model_api_key
 
 from .adapters import (
     OllamaAdapter,
@@ -46,10 +47,12 @@ def create_model_client(
     if profile.type == "ollama":
         client: ModelClient = OllamaAdapter(**common)
     elif profile.type == "openai_compatible":
-        api_key = os.getenv(profile.api_key_env or "")
+        api_key = get_model_api_key(profile.id)
+        if not api_key and profile.api_key_env:
+            api_key = os.getenv(profile.api_key_env, "")
         if not api_key:
             raise ModelError(
-                "模型档案 {} 缺少 API Key 环境变量 {}".format(
+                "模型档案 {} 缺少 API Key（请在该模型页面录入，或在 data/system/model.env 配置环境变量 {}）".format(
                     profile.id, profile.api_key_env or "（未配置）"
                 ),
                 provider=profile.provider,
@@ -69,10 +72,12 @@ def create_model_client(
 
 
 def _require_api_key(profile: ModelProfile) -> str:
-    api_key = os.getenv(profile.api_key_env or "")
+    api_key = get_model_api_key(profile.id)
+    if not api_key and profile.api_key_env:
+        api_key = os.getenv(profile.api_key_env, "")
     if not api_key:
         raise ModelError(
-            "模型档案 {} 缺少 API Key 环境变量 {}".format(
+            "模型档案 {} 缺少 API Key（请在该模型页面录入，或在 data/system/model.env 配置环境变量 {}）".format(
                 profile.id, profile.api_key_env or "（未配置）"
             ),
             provider=profile.provider,

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.api.routers.models as models_module
+import src.core.config.model_api_keys as model_api_keys_module
 
 from tests._web_api_base import WebApiTestBase
 from tests.test_web_api import FakeClient
@@ -291,3 +292,121 @@ class ModelsWriteApiTest(WebApiTestBase):
         anonymous = TestClient(self.app)
         response = anonymous.post("/api/models", json=self._model())
         self.assertEqual(response.status_code, 401)
+
+
+class ModelsApiKeyWebTest(WebApiTestBase):
+    """Page-entered API keys: stored in keychain, never echoed as plaintext."""
+
+    def setUp(self):
+        super().setUp()
+        self._file_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._file_dir.cleanup)
+        self.models_file = Path(self._file_dir.name) / "models.json"
+        models_patcher = patch.object(models_module, "MODELS_FILE", self.models_file)
+        models_patcher.start()
+        self.addCleanup(models_patcher.stop)
+        self.app_file = Path(self._file_dir.name) / "app.json"
+        self.app_file.write_text(
+            json.dumps(
+                {
+                    "active_model": "test_model",
+                    "fallback_model": "test_model",
+                    "local_model": "",
+                    "flash_model": "",
+                    "pro_model": "",
+                    "vision_model": "",
+                    "embedding_model": "",
+                    "rerank_model": "",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        app_patcher = patch.object(models_module, "APP_FILE", self.app_file)
+        app_patcher.start()
+        self.addCleanup(app_patcher.stop)
+        self.keys_file = Path(self._file_dir.name) / "model_api_keys.json"
+        keys_patcher = patch.object(
+            model_api_keys_module, "MODEL_API_KEYS_FILE", self.keys_file
+        )
+        keys_patcher.start()
+        self.addCleanup(keys_patcher.stop)
+
+    def _model(self, model_id="keyed_model", **overrides):
+        body = {
+            "id": model_id,
+            "provider": "test",
+            "base_url": "http://127.0.0.1:9000/v1",
+            "model": "keyed-model",
+            "enabled": False,
+        }
+        body.update(overrides)
+        return body
+
+    def test_create_stores_key_without_echoing(self):
+        response = self.client.post(
+            "/api/models", json=self._model(api_key="sk-topsecret")
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        data = response.json()
+        self.assertTrue(data["api_key_set"])
+        self.assertNotIn("api_key", data)
+        # Raw key must not appear in the response body.
+        self.assertNotIn("sk-topsecret", response.text)
+        # Keychain file must hold the secret (not models.json).
+        saved = json.loads(self.models_file.read_text(encoding="utf-8"))
+        self.assertNotIn("api_key", saved["profiles"]["keyed_model"])
+        self.assertTrue(
+            any("sk-topsecret" in v for v in
+                json.loads(self.keys_file.read_text(encoding="utf-8")).values())
+        )
+
+    def test_get_marks_set_but_omits_secret(self):
+        self.client.post("/api/models", json=self._model(api_key="sk-topsecret"))
+        response = self.client.get("/api/models/keyed_model")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["api_key_set"])
+        self.assertNotIn("sk-topsecret", response.text)
+
+    def test_update_keeps_key_when_omitted(self):
+        self.client.post("/api/models", json=self._model(api_key="sk-topsecret"))
+        response = self.client.put(
+            "/api/models/keyed_model", json={"temperature": 0.3}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["api_key_set"])
+        # Keychain still holds the original secret.
+        self.assertTrue(
+            any("sk-topsecret" in v for v in
+                json.loads(self.keys_file.read_text(encoding="utf-8")).values())
+        )
+
+    def test_update_replaces_key(self):
+        self.client.post("/api/models", json=self._model(api_key="sk-topsecret"))
+        response = self.client.put(
+            "/api/models/keyed_model", json={"api_key": "sk-rotated"}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["api_key_set"])
+        self.assertNotIn("sk-topsecret", response.text)
+        self.assertTrue(
+            any("sk-rotated" in v for v in
+                json.loads(self.keys_file.read_text(encoding="utf-8")).values())
+        )
+
+    def test_update_clears_key(self):
+        self.client.post("/api/models", json=self._model(api_key="sk-topsecret"))
+        response = self.client.put(
+            "/api/models/keyed_model", json={"api_key": ""}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["api_key_set"])
+        keys = json.loads(self.keys_file.read_text(encoding="utf-8"))
+        self.assertFalse(any("sk-topsecret" in v for v in keys.values()))
+
+    def test_delete_cleans_key(self):
+        self.client.post("/api/models", json=self._model(api_key="sk-topsecret"))
+        response = self.client.delete("/api/models/keyed_model")
+        self.assertEqual(response.status_code, 200, response.text)
+        keys = json.loads(self.keys_file.read_text(encoding="utf-8"))
+        self.assertFalse(any("sk-topsecret" in v for v in keys.values()))

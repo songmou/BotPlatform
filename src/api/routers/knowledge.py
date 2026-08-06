@@ -440,7 +440,7 @@ def reindex_knowledge(
     service = _knowledge_service(request)
     tenant = _tenant(request, body.tenant_id)
     try:
-        return service.reindex(tenant.tenant_id, body.category_ids)
+        return service.reindex(tenant.tenant_id, body.category_ids, force=body.force)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

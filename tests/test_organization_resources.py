@@ -804,7 +804,9 @@ class OrganizationResourceApiTest(WebApiTestBase):
 
     def test_resource_payload_rejects_secrets_and_local_mcp(self):
         org_id, owner = self._create_owner("secure-resource")
-        secret = self.client.put(
+        # A model API key is now a sanctioned field: it is accepted, stashed in
+        # the keychain, and never echoed back in any response.
+        stored = self.client.put(
             "/api/v2/platform/catalog/models/private",
             json={
                 "payload": {
@@ -814,7 +816,27 @@ class OrganizationResourceApiTest(WebApiTestBase):
                 }
             },
         )
-        self.assertEqual(secret.status_code, 400)
+        self.assertEqual(stored.status_code, 200, stored.text)
+        self.assertNotIn("should-not-be-stored", stored.text)
+        fetched = self.client.get(
+            "/api/v2/platform/catalog/models/private"
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertNotIn("should-not-be-stored", fetched.text)
+        self.assertTrue(fetched.json()["payload"].get("api_key_set"))
+
+        # Unsanctioned secret fields are still rejected.
+        leaky = self.client.put(
+            "/api/v2/platform/catalog/models/leaky",
+            json={
+                "payload": {
+                    "name": "泄漏模型",
+                    "base_url": "https://models.example.com",
+                    "token": "leaked-token",
+                }
+            },
+        )
+        self.assertEqual(leaky.status_code, 400, leaky.text)
         removed = owner.put(
             "/api/v2/orgs/{}/resources/mcp/remote".format(org_id),
             json={

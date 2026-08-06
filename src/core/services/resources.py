@@ -23,6 +23,11 @@ from src.core.config.loader import (
     ToolConfig,
 )
 from src.core.config.mcp_headers import delete_headers, merge_headers, save_headers
+from src.core.config.model_api_keys import (
+    delete_model_api_key,
+    model_api_key_set,
+    save_model_api_key,
+)
 from src.core.modeling import ModelCapabilities
 from src.core.storage.organizations import OrganizationStore
 from src.core.tooling.definitions import TOOL_DEFINITIONS
@@ -39,7 +44,9 @@ RESOURCE_TYPES = {
     "scripts",
     "settings",
 }
-RESTART_RESOURCE_TYPES = {"plugins", "scripts", "settings"}
+RESTART_RESOURCE_TYPES = {"plugins", "scripts"}
+# settings/runtime fields that cannot be rebound without a process restart.
+RESTART_SETTINGS_FIELDS = ("embedding_model", "rerank_model")
 SECRET_FIELD_PARTS = {
     "api_key",
     "apikey",
@@ -254,6 +261,8 @@ class ScopedResourceStore:
                     if not resource_id or not RESOURCE_ID_PATTERN.fullmatch(resource_id):
                         continue
                     payload = _strip_secret_values(_json_value(raw_payload))
+                    if resource_type == "models":
+                        payload["api_key_set"] = model_api_key_set(resource_id)
                     serialized = json.dumps(
                         payload, ensure_ascii=False, separators=(",", ":")
                     )
@@ -300,6 +309,14 @@ class ScopedResourceStore:
         result["scope"] = "public"
         result["status"] = str(result.pop("lifecycle"))
         result.pop("resource_pk", None)
+        if result.get("resource_type") == "models" and isinstance(
+            result.get("payload"), dict
+        ):
+            # Surface a non-secret "configured" flag so the model editor can show
+            # a 已配置/未配置 badge without ever echoing the raw key.
+            result["payload"]["api_key_set"] = model_api_key_set(
+                result["resource_id"]
+            )
         return result
 
     def _resource_at_pointer(
@@ -400,6 +417,10 @@ class ScopedResourceStore:
         _reject_secret_fields(payload)
         if resource_type == "agents":
             self._validate_agent_payload(payload)
+            if payload.get("enabled") is False and resource_id == str(
+                getattr(self.bootstrap_config.app, "default_agent", "") or ""
+            ):
+                raise ResourceError("不能禁用默认智能体")
         elif resource_type == "models":
             base_url = str(payload.get("base_url") or "")
             if base_url:
@@ -416,7 +437,17 @@ class ScopedResourceStore:
                 if url.scheme.lower() != "https" or not url.netloc:
                     raise ResourceError("远程 MCP 地址必须使用 HTTPS")
         if payload.get("enabled") is False:
-            self._assert_not_referenced(resource_type, resource_id)
+            # Only block when an *enabled* record is being switched off. A
+            # referenced model that is already disabled must still be editable
+            # (e.g. re-saving its config without changing the enabled flag).
+            existing_enabled = True
+            try:
+                existing = self.get_public(resource_type, resource_id)
+                existing_enabled = (existing or {}).get("payload", {}).get("enabled", True)
+            except ResourceError:
+                existing_enabled = True
+            if existing_enabled is not False:
+                self._assert_not_referenced(resource_type, resource_id)
 
     def _assert_not_referenced(self, resource_type: str, resource_id: str) -> None:
         references = 0
@@ -470,7 +501,22 @@ class ScopedResourceStore:
                 "该能力仍被 {} 个组织配置引用，请先完成迁移".format(references)
             )
 
-    def _requires_restart(self, resource_type: str, payload: Dict[str, Any]) -> bool:
+    def _requires_restart(
+        self,
+        resource_type: str,
+        payload: Dict[str, Any],
+        previous: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if resource_type == "settings":
+            # First seed has no active revision yet; treating it as
+            # restart-required would leave active_revision NULL and break
+            # build_project_config on a cold start.
+            if previous is None:
+                return False
+            return any(
+                str(payload.get(key) or "") != str(previous.get(key) or "")
+                for key in RESTART_SETTINGS_FIELDS
+            )
         if resource_type in RESTART_RESOURCE_TYPES:
             return True
         return resource_type == "models" and str(payload.get("modality")) in {
@@ -514,7 +560,9 @@ class ScopedResourceStore:
                 previous = self.get_public(resource_type, resource_id)["payload"]
             except ResourceError:
                 pass
-            restart_required = self._requires_restart(resource_type, payload)
+            restart_required = self._requires_restart(
+                resource_type, payload, previous
+            )
             if not restart_required and self._activation_handler is not None:
                 try:
                     self._activation_handler(
@@ -599,6 +647,17 @@ class ScopedResourceStore:
             if isinstance(headers, dict) and headers:
                 save_headers(resource_id, headers)
                 payload = {**payload, "headers": {}}
+        elif resource_type == "models":
+            # Model API keys are entered on the page and must never be persisted
+            # to the catalog DB.  Stash the raw secret in the keychain (keyed by
+            # the model id) and store an empty shell; the runtime resolves it via
+            # get_model_api_key(profile.id).  A null/empty value means "leave the
+            # existing key untouched".
+            api_key = payload.get("api_key")
+            if isinstance(api_key, str) and api_key:
+                save_model_api_key(resource_id, api_key)
+                payload = {**payload, "api_key": ""}
+            payload = {**payload, "api_key_set": model_api_key_set(resource_id)}
         draft = self.save_draft(resource_type, resource_id, payload, user_id)
         activation = self.publish(
             resource_type,
@@ -650,6 +709,8 @@ class ScopedResourceStore:
                     raise ResourceError("运行时应用失败：{}".format(exc)) from exc
             if resource_type == "mcp":
                 delete_headers(resource_id)
+            elif resource_type == "models":
+                delete_model_api_key(resource_id)
             with self.database.transaction(immediate=True) as connection:
                 deleted = connection.execute(
                     "DELETE FROM platform_resources WHERE resource_type=? AND resource_id=?",

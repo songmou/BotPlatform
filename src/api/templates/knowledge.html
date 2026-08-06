@@ -78,7 +78,9 @@
                 <span class="knowledge-group-label">索引维护</span>
                 <span class="text-muted">源文件变化后可刷新所选；启用向量服务后可补齐当前库。</span>
                 <button id="knowledge-reindex-btn" class="btn-secondary">补齐当前库向量</button>
+                <button id="knowledge-rebuild-btn" class="btn-secondary" title="用当前向量模型覆盖该库全部已存在向量（换模型后使用）">强制重建向量</button>
             </div>
+            <div id="knowledge-health-banner" class="status-card status-warn" style="display:none"></div>
         </div>
         <div id="knowledge-search-results"></div>
 

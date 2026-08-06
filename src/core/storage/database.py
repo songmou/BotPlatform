@@ -135,6 +135,8 @@ class Database:
                         self._migrate_v28(connection)
                     elif version == 31:
                         self._migrate_v31(connection)
+                    elif version == 34:
+                        self._migrate_v34(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -382,6 +384,35 @@ WHERE EXISTS (
                 "ADD COLUMN script_run_id TEXT;\n"
             )
         cls._apply_schema_script(connection, 31, script)
+
+    @classmethod
+    def _migrate_v34(cls, connection: sqlite3.Connection) -> None:
+        """Add the embedding model fingerprint column idempotently.
+
+        ``knowledge_embeddings`` is normally created at v20, so the table is
+        present for any real database. Some reduced test baselines skip v20,
+        in which case the ALTER is skipped (the column is added whenever the
+        table is later created). The migration is still recorded so a
+        subsequent upgrade that follows the real v0..v34 path stays consistent.
+        """
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='knowledge_embeddings'"
+        ).fetchone()
+        script = ""
+        if exists:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(knowledge_embeddings)"
+                ).fetchall()
+            }
+            if "model_fingerprint" not in columns:
+                script = (
+                    "ALTER TABLE knowledge_embeddings "
+                    "ADD COLUMN model_fingerprint TEXT;\n"
+                )
+        cls._apply_schema_script(connection, 34, script)
 
     @staticmethod
     def _migrate_v12(connection: sqlite3.Connection) -> None:

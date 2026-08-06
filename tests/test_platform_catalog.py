@@ -150,14 +150,6 @@ class PlatformCatalogStoreTest(unittest.TestCase):
 
 
 class RetiredConfigurationApiTest(WebApiTestBase):
-    def test_normal_panel_rejects_legacy_configuration_writes(self):
-        self.app.state.allow_legacy_config_writes = False
-        response = self.client.post(
-            "/api/agents",
-            json={"id": "legacy", "name": "旧接口"},
-        )
-        self.assertEqual(response.status_code, 410, response.text)
-        self.assertIn("/api/v2/platform/catalog", response.text)
 
     def test_old_v2_context_and_generic_resource_routes_are_removed(self):
         self.assertEqual(self.client.get("/api/v2/me/context").status_code, 404)

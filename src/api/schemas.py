@@ -19,104 +19,6 @@ class StatusResponse(BaseModel):
     default_agent: str
 
 
-class ModelProfileOut(BaseModel):
-    id: str
-    enabled: bool
-    type: str
-    provider: str
-    base_url: str
-    api_key_env: Optional[str] = None
-    model: str
-    modality: str = "chat"
-    dimensions: Optional[int] = None
-    temperature: float
-    max_tokens: int
-    timeout_seconds: float
-    capabilities: Dict[str, bool]
-    billing_currency: str = "CNY"
-    pricing: Optional[Dict[str, Optional[str]]] = None
-    is_primary: bool = False
-    is_fallback: bool = False
-    restart_required: bool = False
-
-
-class ModelStatusOut(BaseModel):
-    primary_profile_id: str
-    fallback_profile_id: str
-    local_profile_id: Optional[str] = None
-    flash_profile_id: Optional[str] = None
-    pro_profile_id: Optional[str] = None
-    vision_profile_id: Optional[str] = None
-    embedding_profile_id: Optional[str] = None
-    rerank_profile_id: Optional[str] = None
-    cooling_down: bool
-    last_primary_error: Optional[str] = None
-
-
-class ModelSwitchRequest(BaseModel):
-    profile_id: str
-
-
-class ModelCreate(BaseModel):
-    id: str
-    type: str = "openai_compatible"
-    provider: str = ""
-    base_url: str = ""
-    model: str = ""
-    modality: str = "chat"
-    dimensions: Optional[int] = None
-    api_key_env: Optional[str] = None
-    temperature: float = 0.7
-    max_tokens: int = 2048
-    timeout_seconds: float = 120
-    enabled: bool = True
-    capabilities: Dict[str, bool] = {"tools": False, "vision": False, "reasoning": False}
-    pricing: Optional[Dict[str, Optional[str]]] = None
-
-
-class ModelUpdate(BaseModel):
-    type: Optional[str] = None
-    provider: Optional[str] = None
-    base_url: Optional[str] = None
-    model: Optional[str] = None
-    modality: Optional[str] = None
-    dimensions: Optional[int] = None
-    api_key_env: Optional[str] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    timeout_seconds: Optional[float] = None
-    enabled: Optional[bool] = None
-    capabilities: Optional[Dict[str, bool]] = None
-    pricing: Optional[Dict[str, Optional[str]]] = None
-
-
-class ModelRoleCandidate(BaseModel):
-    id: str
-    model: str
-    enabled: bool
-
-
-class ModelRolesOut(BaseModel):
-    active_model: str
-    fallback_model: str
-    local_model: str
-    flash_model: str
-    pro_model: str
-    vision_model: str
-    embedding_model: str
-    rerank_model: str
-    chat_candidates: List[ModelRoleCandidate] = []
-    vision_candidates: List[ModelRoleCandidate] = []
-    embedding_candidates: List[ModelRoleCandidate] = []
-    rerank_candidates: List[ModelRoleCandidate] = []
-
-
-class ModelRolesUpdate(BaseModel):
-    vision_model: Optional[str] = None
-    embedding_model: Optional[str] = None
-    rerank_model: Optional[str] = None
-
-
 class ModelFeedbackIn(BaseModel):
     rating: str
     reasons: List[str] = []
@@ -150,50 +52,6 @@ class AgentOut(BaseModel):
     enabled: bool = True
 
 
-class AgentCapabilityIn(BaseModel):
-    name: str
-    description: str
-
-
-class AgentCreate(BaseModel):
-    id: str
-    name: str
-    role: str = ""
-    description: str = ""
-    system_prompt: str = ""
-    capabilities: List[AgentCapabilityIn] = []
-    tools: List[str] = []
-    plugin_tools: Dict[str, List[str]] = {}
-    skills: List[str] = []
-    mcp_servers: List[str] = []
-    datasources: List[str] = []
-    model: Optional[str] = None
-    greeting: Optional[str] = None
-    greeting_hints: List[str] = []
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    enabled: bool = True
-
-
-class AgentUpdate(BaseModel):
-    name: Optional[str] = None
-    role: Optional[str] = None
-    description: Optional[str] = None
-    system_prompt: Optional[str] = None
-    capabilities: Optional[List[AgentCapabilityIn]] = None
-    tools: Optional[List[str]] = None
-    plugin_tools: Optional[Dict[str, List[str]]] = None
-    skills: Optional[List[str]] = None
-    mcp_servers: Optional[List[str]] = None
-    datasources: Optional[List[str]] = None
-    model: Optional[str] = None
-    greeting: Optional[str] = None
-    greeting_hints: Optional[List[str]] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    enabled: Optional[bool] = None
-
-
 class ChatRequest(BaseModel):
     message: str
     agent_id: Optional[str] = None
@@ -212,57 +70,6 @@ class ChatHistoryResponse(BaseModel):
 
 
 # ---- Schedule Task schemas ----
-
-class TaskActionOut(BaseModel):
-    type: str
-    content: Optional[str] = None
-    agent_id: Optional[str] = None
-    prompt: Optional[str] = None
-    image_path: Optional[str] = None
-    image_url: Optional[str] = None
-    caption: Optional[str] = None
-    script_id: Optional[str] = None
-    plugin_id: Optional[str] = None
-    tool_name: Optional[str] = None
-    parameters: Dict[str, Any] = {}
-
-
-class TaskConditionOut(BaseModel):
-    type: str
-    after_hours: float
-    before_hours: float
-
-
-class ScheduleTaskOut(BaseModel):
-    id: str
-    enabled: bool
-    cron: Optional[str] = None
-    crons: List[str] = []
-    target: str
-    action: TaskActionOut
-    condition: Optional[TaskConditionOut] = None
-
-
-class ScheduleTaskCreate(BaseModel):
-    id: str
-    enabled: bool = True
-    cron: Optional[str] = None
-    crons: List[str] = []
-    target: str = "last_active_user"
-    action: Dict[str, Any]
-    condition: Optional[Dict[str, Any]] = None
-
-
-class ScheduleTaskUpdate(BaseModel):
-    enabled: Optional[bool] = None
-    cron: Optional[str] = None
-    crons: Optional[List[str]] = None
-    target: Optional[str] = None
-    action: Optional[Dict[str, Any]] = None
-    condition: Optional[Dict[str, Any]] = None
-
-
-# ---- Plugin schemas ----
 
 class PluginToolOut(BaseModel):
     name: str
@@ -311,64 +118,6 @@ class PluginDataDeleteIn(BaseModel):
 class ToolStateUpdate(BaseModel):
     enabled: Optional[bool] = None
     require_approval: Optional[bool] = None
-
-
-class SkillOut(BaseModel):
-    id: str
-    name: str
-    description: str
-    prompt: str
-    enabled: bool
-
-
-class SkillCreate(BaseModel):
-    id: str
-    name: str
-    description: str = ""
-    prompt: str
-    enabled: bool = True
-
-
-class SkillUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    prompt: Optional[str] = None
-    enabled: Optional[bool] = None
-
-
-class McpServerOut(BaseModel):
-    id: str
-    name: str
-    transport: str
-    command: Optional[str] = None
-    args: List[str] = []
-    env: Dict[str, str] = {}
-    url: Optional[str] = None
-    headers: Dict[str, str] = {}
-    enabled: bool
-
-
-class McpServerCreate(BaseModel):
-    id: str
-    name: str
-    transport: str = "stdio"
-    command: Optional[str] = None
-    args: List[str] = []
-    env: Dict[str, str] = {}
-    url: Optional[str] = None
-    headers: Dict[str, str] = {}
-    enabled: bool = True
-
-
-class McpServerUpdate(BaseModel):
-    name: Optional[str] = None
-    transport: Optional[str] = None
-    command: Optional[str] = None
-    args: Optional[List[str]] = None
-    env: Optional[Dict[str, str]] = None
-    url: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-    enabled: Optional[bool] = None
 
 
 class McpTemplateAuth(BaseModel):
@@ -473,6 +222,7 @@ class KnowledgeTextIn(BaseModel):
 class KnowledgeReindexIn(BaseModel):
     tenant_id: str
     category_ids: Optional[List[str]] = None
+    force: bool = False
 
 
 class KnowledgeCategoryCreateIn(BaseModel):

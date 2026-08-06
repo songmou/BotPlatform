@@ -18,6 +18,7 @@ BotPlatform 是一个轻量级的AI中台的项目，外加一个 FastAPI Web �
 - 脚本可声明「等待用户输入」：`write_script_result(..., await_input={"param": <脚本参数名>, "ttl_seconds": <秒>})`（见 `src/core/jobs/_common/script_result.py`）会让平台登记一个带 TTL 的 `PendingScriptInput`（`src/core/services/script_input.py`）。用户下一条私聊回复会被 `MessageBot._route_pending_script_input` 拦截，并直接带参重跑该脚本（resume），不再依赖大模型猜测。带图验证码（如 `ctsoa_check`）即用此机制；任何脚本都能复用，通用原语。
 - 改完代码后，务必确认已真正杀掉旧进程再重启（同端口上残留的旧服务是常见坑）。`web.py`/`uvicorn` 运行时不带 `--reload`。
 - `ProjectConfig` 及所有配置数据类都是 `@dataclass(frozen=True)`。若要在运行时更新 `config.skills`/`config.mcp_servers`（例如 API 写入后刷新），必须调用 `config.update_skills(...)` / `config.update_mcp_servers(...)` —— 它们会先用 loader 的校验规则验证，再就地替换列表内容（引用不变，持有者自动可见）。禁止用 `object.__setattr__` 绕过冻结校验；直接赋值会抛出 `FrozenInstanceError`。
+- 唯一例外是 `AppConfig`：因需承载运行时热更新（激活模型/设置），已显式去除 `frozen=True`，但仅允许通过 `config.update_app(...)` 写入（内部用 `object.__setattr__` 受控更新），禁止在外部直接赋值或随意 `__setattr__`。
 
 ## 测试
 - 使用标准库 `unittest`，**不是** pytest。运行：`python -m unittest discover -s tests -v`。

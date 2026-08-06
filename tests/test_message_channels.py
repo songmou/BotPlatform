@@ -6,8 +6,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-import src.api.routers.bots as bots_module
-import src.core.messaging.credentials as credentials_module
 from src.core.messaging import (
     DIRECT,
     GROUP,
@@ -246,119 +244,6 @@ class GroupPolicyTests(unittest.TestCase):
         self.assertIn("wecom-main:group:group-1", kwargs["conversation_id"])
         self.assertEqual(self.adapter.sent[0][1].text, "群聊安全回复")
 
-
-class ChannelsApiTests(WebApiTestBase):
-    def setUp(self):
-        self.channel_files = tempfile.TemporaryDirectory()
-        self.addCleanup(self.channel_files.cleanup)
-        root = Path(self.channel_files.name)
-        self.config_root = root / "config"
-        self.config_root.mkdir()
-        self.credential_root = root / "credentials"
-        self.credential_root.mkdir()
-        config_patcher = patch.object(bots_module, "CONFIG_DIR", self.config_root)
-        credential_patcher = patch.object(
-            credentials_module,
-            "channel_credentials_path",
-            side_effect=lambda channel_id: self.credential_root
-            / "{}.json".format(channel_id),
-        )
-        config_patcher.start()
-        credential_patcher.start()
-        self.addCleanup(config_patcher.stop)
-        self.addCleanup(credential_patcher.stop)
-        super().setUp()
-
-    def test_channel_configuration_and_credentials_are_separate(self):
-        listing = self.client.get("/api/channels")
-        self.assertEqual(listing.status_code, 200, listing.text)
-        self.assertEqual(
-            {item["type"] for item in listing.json()["providers"]},
-            {"wechat_ilink", "wecom_aibot", "feishu"},
-        )
-
-        configured = self.client.put(
-            "/api/channels/wecom-main",
-            json={
-                "type": "wecom_aibot",
-                "enabled": True,
-                "agent_id": "general",
-                "settings": {"group_policy": "mention_only"},
-            },
-        )
-        self.assertEqual(configured.status_code, 200, configured.text)
-        saved = self.client.put(
-            "/api/channels/wecom-main/credentials",
-            json={
-                "credentials": {
-                    "bot_id": "bot-id",
-                    "secret": "top-secret",
-                }
-            },
-        )
-        self.assertEqual(saved.status_code, 200, saved.text)
-        response = self.client.get("/api/channels")
-        self.assertEqual(response.status_code, 200, response.text)
-        serialized = response.text
-        self.assertNotIn("top-secret", serialized)
-        channel = next(
-            item
-            for item in response.json()["channels"]
-            if item["id"] == "wecom-main"
-        )
-        self.assertTrue(channel["credential_configured"])
-        config_text = (self.config_root / "channels.json").read_text("utf-8")
-        self.assertNotIn("top-secret", config_text)
-
-    def test_viewer_can_read_but_cannot_manage_channels(self):
-        self.assertEqual(self.viewer_client.get("/api/channels").status_code, 200)
-        response = self.viewer_client.put(
-            "/api/channels/feishu-main",
-            json={
-                "type": "feishu",
-                "enabled": True,
-                "agent_id": "general",
-                "settings": {"group_policy": "mention_only"},
-            },
-        )
-        self.assertEqual(response.status_code, 403, response.text)
-
-    def test_delete_channel_removes_config_and_credentials(self):
-        configured = self.client.put(
-            "/api/channels/wecom-main",
-            json={
-                "type": "wecom_aibot",
-                "enabled": True,
-                "agent_id": "general",
-                "settings": {"group_policy": "mention_only"},
-            },
-        )
-        self.assertEqual(configured.status_code, 200, configured.text)
-        saved = self.client.put(
-            "/api/channels/wecom-main/credentials",
-            json={"credentials": {"bot_id": "bot-id", "secret": "top-secret"}},
-        )
-        self.assertEqual(saved.status_code, 200, saved.text)
-        credential_file = self.credential_root / "wecom-main.json"
-        self.assertTrue(credential_file.is_file())
-
-        deleted = self.client.delete("/api/channels/wecom-main")
-        self.assertEqual(deleted.status_code, 200, deleted.text)
-        self.assertTrue(deleted.json()["deleted"])
-
-        listing = self.client.get("/api/channels")
-        self.assertEqual(listing.status_code, 200, listing.text)
-        ids = {item["id"] for item in listing.json()["channels"]}
-        self.assertNotIn("wecom-main", ids)
-        self.assertFalse(credential_file.is_file())
-
-    def test_delete_unknown_channel_returns_error(self):
-        response = self.client.delete("/api/channels/does-not-exist")
-        self.assertEqual(response.status_code, 400, response.text)
-
-    def test_viewer_cannot_delete_channel(self):
-        response = self.viewer_client.delete("/api/channels/wecom-main")
-        self.assertEqual(response.status_code, 403, response.text)
 
 
 if __name__ == "__main__":

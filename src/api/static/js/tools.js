@@ -364,21 +364,16 @@ function initTools() {
         var enabled = document.getElementById("skill-enabled").checked;
         if (!name || !prompt) { showToast("名称和指令不能为空", "error"); return; }
 
+        var resourceId = skillEditingId || id;
         var payload = { name: name, description: description, prompt: prompt, enabled: enabled };
-        var method, url;
-        if (skillEditingId) {
-            method = "PUT"; url = "/api/skills/" + encodeURIComponent(skillEditingId);
-        } else {
-            method = "POST"; url = "/api/skills"; payload.id = id;
-        }
-        fetch(url, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
-            .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); }); return r.json(); })
+        if (!skillEditingId) payload.id = id;
+        CatalogApi.save("skills", resourceId, payload)
             .then(function () { showToast(skillEditingId ? "已更新技能" : "已创建技能", "success"); skillModal.style.display = "none"; loadSkills(); })
             .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
     });
 
     function loadSkills() {
-        fetch("/api/skills").then(function (r) { return r.json(); }).then(function (skills) {
+        CatalogApi.list("skills").then(function (skills) {
             var container = document.getElementById("skill-list");
             if (!skills.length) { container.innerHTML = '<div class="empty-state">暂无技能，点击"新建技能"创建</div>'; return; }
             container.innerHTML = skills.map(function (s) {
@@ -403,7 +398,7 @@ function initTools() {
         var tile = e.target.closest("[data-skill-id]");
         if (!tile) return;
         var id = tile.getAttribute("data-skill-id");
-        fetch("/api/skills").then(function (r) { return r.json(); }).then(function (skills) {
+        CatalogApi.list("skills").then(function (skills) {
             var s = skills.find(function (x) { return x.id === id; });
             if (!s) return;
             skillEditingId = id;
@@ -425,10 +420,8 @@ function initTools() {
         var id = skillEditingId;
         showConfirm("确定删除技能“" + id + "”吗？").then(function (ok) {
             if (!ok) return null;
-            return fetch("/api/skills/" + encodeURIComponent(id), { method: "DELETE" });
-        }).then(function (response) {
-            if (!response) return;
-            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            return CatalogApi.remove("skills", id);
+        }).then(function () {
             skillModal.style.display = "none";
             showToast("技能已删除", "success");
             loadSkills();
@@ -530,11 +523,9 @@ function initTools() {
                 payload.url = url + sep + encodeURIComponent(mcpTemplateAuth.key) + "=" + encodeURIComponent(secretVal);
             }
         }
-        var method, apiUrl;
-        if (mcpEditingId) { method = "PUT"; apiUrl = "/api/mcp/" + encodeURIComponent(mcpEditingId); }
-        else { method = "POST"; apiUrl = "/api/mcp"; payload.id = id; }
-        fetch(apiUrl, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
-            .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); }); return r.json(); })
+        var resourceId = mcpEditingId || id;
+        if (!mcpEditingId) payload.id = id;
+        CatalogApi.save("mcp", resourceId, payload)
             .then(function () {
                 var savedId = mcpEditingId;
                 showToast(mcpEditingId ? "已更新 MCP 服务" : "已添加 MCP 服务", "success");
@@ -551,7 +542,7 @@ function initTools() {
     function loadMcpTemplates() {
         var container = document.getElementById("mcp-template-list");
         container.innerHTML = '<div class="empty-state">加载中…</div>';
-        fetch("/api/mcp/templates").then(function (r) {
+        fetch("/api/v2/platform/mcp/templates").then(function (r) {
             if (!r.ok) { throw new Error("HTTP_" + r.status); }
             return r.json();
         }).then(function (templates) {
@@ -622,10 +613,7 @@ function initTools() {
     }
 
     function loadMcpServers() {
-        fetch("/api/mcp").then(function (r) {
-            if (!r.ok) { throw new Error("HTTP_" + r.status); }
-            return r.json();
-        }).then(function (servers) {
+        CatalogApi.list("mcp").then(function (servers) {
             if (!Array.isArray(servers)) { throw new Error("bad_payload"); }
             var container = document.getElementById("mcp-list");
             if (!servers.length) { container.innerHTML = '<div class="empty-state">暂无 MCP 服务，点击"添加服务"创建</div>'; return; }
@@ -708,7 +696,7 @@ function initTools() {
     }
 
     function openMcpDetail(id) {
-        fetch("/api/mcp").then(function (r) { return r.json(); }).then(function (servers) {
+        CatalogApi.list("mcp").then(function (servers) {
             var s = servers.find(function (x) { return x.id === id; });
             if (!s) return;
             currentMcpServer = s;
@@ -775,7 +763,7 @@ function initTools() {
         var countEl = document.getElementById("mcp-detail-tools-count");
         listEl.innerHTML = '<p class="text-muted">加载中…</p>';
         countEl.textContent = "";
-        fetch("/api/mcp/" + encodeURIComponent(id) + "/tools")
+        fetch("/api/v2/platform/mcp/" + encodeURIComponent(id) + "/tools")
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (data.error && (!data.tools || !data.tools.length)) {
@@ -829,7 +817,7 @@ function initTools() {
         }
         btn.disabled = true;
         outputEl.textContent = "运行中…";
-        fetch("/api/mcp/" + encodeURIComponent(currentMcpServer.id) + "/tools/" +
+        fetch("/api/v2/platform/mcp/" + encodeURIComponent(currentMcpServer.id) + "/tools/" +
               encodeURIComponent(toolName) + "/invoke", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -875,10 +863,8 @@ function initTools() {
         var id = currentMcpServer.id;
         showConfirm("确定删除 MCP 服务“" + id + "”吗？").then(function (ok) {
             if (!ok) return null;
-            return fetch("/api/mcp/" + encodeURIComponent(id), { method: "DELETE" });
-        }).then(function (response) {
-            if (!response) return;
-            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            return CatalogApi.remove("mcp", id);
+        }).then(function () {
             showToast("MCP 服务已删除", "success");
             showMcpList();
         }).catch(function (error) { showToast("删除失败：" + error.message, "error"); });

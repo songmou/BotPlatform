@@ -10,6 +10,10 @@ function initModels() {
     var idGroup = document.getElementById("model-id-group");
     var editingId = null;
     var allModels = [];
+    // Runtime model bindings live in settings/runtime, not in the model
+    // payloads, so the cards join against this snapshot for their badges.
+    var routing = {};
+    var ROUTING_URL = "/api/v2/platform/model-routing";
     var analyticsCurrency = "CNY";
     var currentCat = "chat";
     var modalityLabels = { chat: "\u5bf9\u8bdd", embedding: "\u5411\u91cf", rerank: "\u91cd\u6392" };
@@ -29,6 +33,11 @@ function initModels() {
         // model from the "\u5411\u91cf/\u91cd\u6392" tabs opens the right form.
         document.getElementById("model-modality").value =
             (currentCat === "embedding" || currentCat === "rerank") ? currentCat : "chat";
+        document.getElementById("model-api-key").value = "";
+        var akStatus = document.getElementById("model-api-key-status");
+        akStatus.textContent = "";
+        akStatus.className = "badge";
+        document.getElementById("model-api-key").placeholder = "初次录入密钥；编辑时留空表示保持不变";
         applyModalityVisibility();
         openModal();
     });
@@ -101,11 +110,17 @@ function initModels() {
 
     function applyModalityVisibility() {
         var modality = modalityEl.value;
+        var chatOn = modality === "chat";
         form.querySelectorAll(".chat-only").forEach(function (el) {
-            el.style.display = modality === "chat" ? "" : "none";
+            el.style.display = chatOn ? "" : "none";
+            // Disabled controls are exempt from constraint validation, so a
+            // hidden (display:none) chat field can no longer block submit.
+            el.querySelectorAll("input, select, textarea").forEach(function (f) { f.disabled = !chatOn; });
         });
+        var embedOn = modality === "embedding";
         form.querySelectorAll(".embedding-only").forEach(function (el) {
-            el.style.display = modality === "embedding" ? "" : "none";
+            el.style.display = embedOn ? "" : "none";
+            el.querySelectorAll("input, select, textarea").forEach(function (f) { f.disabled = !embedOn; });
         });
         // Rerank models have no tunable parameters; pricing only applies to chat.
         var tabVisibility = {
@@ -138,65 +153,72 @@ function initModels() {
         return opts;
     }
 
-    function loadRoles() {
-        fetch("/api/models/roles")
-            .then(function (r) { return r.json(); })
-            .then(function (roles) {
-                roleVision.innerHTML = roleOptions(roles.vision_candidates, roles.vision_model);
-                roleEmbedding.innerHTML = roleOptions(roles.embedding_candidates, roles.embedding_model);
-                roleRerank.innerHTML = roleOptions(roles.rerank_candidates, roles.rerank_model);
-            });
+    function readJson(response) {
+        if (response.ok) return response.json();
+        return response.json().then(
+            function (data) { throw new Error((data && data.detail) || "请求失败"); },
+            function () { throw new Error("请求失败(" + response.status + ")"); }
+        );
+    }
+
+    function applyRouting() {
+        statusEl.innerHTML =
+            "<strong>路由状态</strong><br>" +
+            "主模型：" + escapeHtml(routing.primary_profile_id || "—") +
+            (routing.cooling_down ? " <mark>冷却中</mark>" : " ✓") + "<br>" +
+            "兜底模型：" + escapeHtml(routing.fallback_profile_id || "—") + "<br>" +
+            (routing.local_profile_id
+                ? "本地模型：" + escapeHtml(routing.local_profile_id) + "<br>" : "") +
+            (routing.last_primary_error
+                ? "<br><small>最近错误：" + escapeHtml(routing.last_primary_error) + "</small>" : "");
+        roleVision.innerHTML = roleOptions(routing.vision_candidates, routing.vision_model);
+        roleEmbedding.innerHTML = roleOptions(routing.embedding_candidates, routing.embedding_model);
+        roleRerank.innerHTML = roleOptions(routing.rerank_candidates, routing.rerank_model);
+    }
+
+    function loadRouting() {
+        return fetch(ROUTING_URL).then(readJson).then(function (data) {
+            routing = data || {};
+            applyRouting();
+            return routing;
+        });
     }
 
     function saveRoles() {
-        var payload = {
-            vision_model: roleVision.value,
-            embedding_model: roleEmbedding.value,
-            rerank_model: roleRerank.value,
-        };
-        fetch("/api/models/roles", {
+        fetch(ROUTING_URL, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        }).then(function (r) {
-            if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-            return r.json();
-        }).then(function (d) {
+            body: JSON.stringify({
+                vision_model: roleVision.value,
+                embedding_model: roleEmbedding.value,
+                rerank_model: roleRerank.value,
+            }),
+        }).then(readJson).then(function (d) {
             showToast(
                 d.restart_required
                     ? "已保存，向量 / 重排绑定需完整重启后生效"
                     : "角色绑定已保存",
                 "success"
             );
-            loadRoles();
+            return loadModels();
         }).catch(function (err) { showToast("保存失败：" + err.message, "error"); });
     }
 
     function loadModels() {
-        fetch("/api/models/status")
-            .then(function (r) { return r.json(); })
-            .then(function (s) {
-                statusEl.innerHTML =
-                    "<strong>路由状态</strong><br>" +
-                    "主模型：" + s.primary_profile_id +
-                    (s.cooling_down ? " <mark>冷却中</mark>" : " ✓") + "<br>" +
-                    "兜底模型：" + s.fallback_profile_id + "<br>" +
-                    (s.local_profile_id ? "本地模型：" + s.local_profile_id + "<br>" : "") +
-                    (s.last_primary_error ? "<br><small>最近错误：" + s.last_primary_error + "</small>" : "");
-            });
-
-        fetch("/api/models")
-            .then(function (r) { return r.json(); })
-            .then(function (models) {
-                allModels = models;
-                var profileSelect = document.getElementById("analytics-profile");
-                profileSelect.innerHTML = '<option value="">全部模型</option>' +
-                    models.map(function (m) {
-                        return '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.id) + '</option>';
-                    }).join("");
-                renderModels();
-            });
-        loadRoles();
+        return Promise.all([
+            loadRouting(),
+            CatalogApi.list("models"),
+        ]).then(function (results) {
+            allModels = results[1] || [];
+            var profileSelect = document.getElementById("analytics-profile");
+            profileSelect.innerHTML = '<option value="">全部模型</option>' +
+                allModels.map(function (m) {
+                    return '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.id) + '</option>';
+                }).join("");
+            renderModels();
+        }).catch(function (err) {
+            showToast("加载模型失败：" + err.message, "error");
+        });
     }
 
     function initCategoryNav() {
@@ -256,16 +278,28 @@ function initModels() {
     function modelCardHtml(m) {
         var modality = modelModality(m);
         var modalityLabel = modalityLabels[modality] || "其他";
+        var isPrimary = !!m.id && m.id === routing.active_model;
+        var isFallback = !!m.id && m.id === routing.fallback_model;
+        var roleTags = [];
+        if (m.id === routing.local_model) roleTags.push("本地");
+        if (m.id === routing.flash_model) roleTags.push("Flash");
+        if (m.id === routing.pro_model) roleTags.push("Pro");
+        if (m.id === routing.vision_model) roleTags.push("视觉");
+        if (m.id === routing.embedding_model) roleTags.push("向量");
+        if (m.id === routing.rerank_model) roleTags.push("重排");
         var badges = '<span class="badge badge-modality badge-modality-' + modality + '">' + modalityLabel + '</span>';
-        if (m.is_primary) badges += '<span class="badge badge-primary">主模型</span>';
-        if (m.is_fallback) badges += '<span class="badge badge-fallback">兜底</span>';
+        if (isPrimary) badges += '<span class="badge badge-primary">主模型</span>';
+        if (isFallback) badges += '<span class="badge badge-fallback">兜底</span>';
+        roleTags.forEach(function (tag) {
+            badges += '<span class="badge badge-modality">' + tag + '</span>';
+        });
         if (!m.enabled) badges += '<span class="badge badge-fallback">已禁用</span>';
         var actions = '<div class="model-card-footer">';
-        if (modality === "chat" && m.enabled && !m.is_primary) {
+        if (modality === "chat" && m.enabled && !isPrimary) {
             actions += '<button class="btn-primary btn-switch" data-id="' + m.id + '">设为主模型</button> ';
         }
         actions += '<button class="btn-edit" data-action="edit-model" data-id="' + m.id + '">编辑</button> ';
-        if (!m.is_primary) {
+        if (!isPrimary) {
             actions += '<button class="btn-danger" data-action="delete-model" data-id="' + m.id + '">删除</button>';
         }
         actions += "</div>";
@@ -287,7 +321,7 @@ function initModels() {
                 ? "已配置 " + (m.billing_currency || "CNY") + " 计价"
                 : "未计价") + "</p>";
         }
-        return '<div class="model-card' + (m.is_primary ? ' is-primary' : '') + '">' +
+        return '<div class="model-card' + (isPrimary ? ' is-primary' : '') + '">' +
             "<h5>" + escapeHtml(m.id || "未命名档案") + " " + badges + "</h5>" +
             "<p>" + escapeHtml(m.provider || "未指定厂商") + " / " +
             escapeHtml(m.model || "未指定模型") + "</p>" +
@@ -303,14 +337,13 @@ function initModels() {
             var id = switchBtn.getAttribute("data-id");
             switchBtn.disabled = true;
             switchBtn.textContent = "切换中...";
-            fetch("/api/models/switch", {
+            fetch(ROUTING_URL, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ profile_id: id }),
-            }).then(function (r) {
-                if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                body: JSON.stringify({ active_model: id }),
+            }).then(readJson).then(function () {
                 showToast("已切换主模型为 " + id, "success");
-                loadModels();
+                return loadModels();
             }).catch(function (err) {
                 showToast("切换失败：" + err.message, "error");
                 switchBtn.disabled = false;
@@ -327,9 +360,8 @@ function initModels() {
         if (action === "delete-model") {
             showConfirm("确定要删除模型「" + mid + "」吗？").then(function (ok) {
                 if (!ok) return;
-                fetch("/api/models/" + mid, { method: "DELETE" })
-                    .then(function (r) {
-                        if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
+                CatalogApi.remove("models", mid)
+                    .then(function () {
                         showToast("已删除模型 " + mid, "success");
                         loadModels();
                     })
@@ -338,8 +370,7 @@ function initModels() {
         }
 
         if (action === "edit-model") {
-            fetch("/api/models/" + mid)
-                .then(function (r) { return r.json(); })
+            CatalogApi.get("models", mid)
                 .then(function (m) {
                     editingId = mid;
                     modalTitle.textContent = "编辑模型";
@@ -350,10 +381,24 @@ function initModels() {
                     document.getElementById("model-type").value = m.type;
                     document.getElementById("model-base-url").value = m.base_url || "";
                     document.getElementById("model-name").value = m.model;
-                    document.getElementById("model-api-key-env").value = m.api_key_env || "";
+                    document.getElementById("model-api-key").value = "";
+                    var akStatus = document.getElementById("model-api-key-status");
+                    if (m.api_key_set) {
+                        akStatus.textContent = "已配置";
+                        akStatus.className = "badge badge-success";
+                        document.getElementById("model-api-key").placeholder = "留空表示保持不变";
+                    } else {
+                        akStatus.textContent = "未配置";
+                        akStatus.className = "badge badge-muted";
+                        document.getElementById("model-api-key").placeholder = "初次录入密钥";
+                    }
                     document.getElementById("model-dimensions").value = m.dimensions || "";
-                    document.getElementById("model-temperature").value = m.temperature;
-                    document.getElementById("model-max-tokens").value = m.max_tokens;
+                    // Non-chat profiles carry sentinel max_tokens=1 / temperature=0
+                    // from the backend; only backfill them for chat so a hidden
+                    // field never holds an out-of-range value.
+                    var isChat = (m.modality || "chat") === "chat";
+                    document.getElementById("model-temperature").value = isChat ? m.temperature : 0.7;
+                    document.getElementById("model-max-tokens").value = isChat ? m.max_tokens : 2048;
                     document.getElementById("model-timeout").value = m.timeout_seconds;
                     document.getElementById("model-enabled").checked = m.enabled;
                     var caps = m.capabilities || {};
@@ -380,6 +425,7 @@ function initModels() {
                 var panel = invalid.closest("[data-editor-panel]");
                 if (panel) activateEditorTab(panel.getAttribute("data-editor-panel"));
                 invalid.reportValidity();
+                showToast("表单校验未通过：" + (invalid.validationMessage || invalid.id || "请检查标红字段"), "error");
             }
             return;
         }
@@ -390,7 +436,7 @@ function initModels() {
             provider: document.getElementById("model-provider").value,
             base_url: document.getElementById("model-base-url").value,
             model: document.getElementById("model-name").value,
-            api_key_env: document.getElementById("model-api-key-env").value || null,
+            api_key: document.getElementById("model-api-key").value || null,
             timeout_seconds: parseFloat(document.getElementById("model-timeout").value),
             enabled: document.getElementById("model-enabled").checked,
         };
@@ -430,25 +476,10 @@ function initModels() {
             payload.dimensions = parseInt(dims);
         }
 
-        var url, method;
-        if (editingId) {
-            url = "/api/models/" + editingId;
-            method = "PUT";
-        } else {
-            payload.id = document.getElementById("model-id").value;
-            url = "/api/models";
-            method = "POST";
-        }
+        var resourceId = editingId || document.getElementById("model-id").value;
+        if (!editingId) payload.id = resourceId;
 
-        fetch(url, {
-            method: method,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        })
-            .then(function (r) {
-                if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); });
-                return r.json();
-            })
+        CatalogApi.save("models", resourceId, payload)
             .then(function (d) {
                 var restart = d && d.restart_required;
                 showToast(

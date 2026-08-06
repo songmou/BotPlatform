@@ -49,10 +49,9 @@ function initChat() {
                 });
             return;
         }
-        fetch("/api/agents")
-            .then(function (r) { return r.json(); })
+        CatalogApi.list("agents")
             .then(function (agents) {
-                return fetch("/api/agents/active").then(function (r) {
+                return fetch("/api/v2/platform/agents/active").then(function (r) {
                     return r.json().then(function (active) {
                         return { agents: agents, activeId: active.id };
                     });

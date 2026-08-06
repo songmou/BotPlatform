@@ -111,14 +111,14 @@ def page_platform_overview(
 def page_platform_models(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
-    return _page(request, "models.html", "platform-models", platform_catalog=True)
+    return _page(request, "models.html", "platform-models")
 
 
 @router.get("/platform/agent-templates", response_class=HTMLResponse)
 def page_platform_agents(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
-    return _page(request, "agents.html", "platform-agents", platform_catalog=True)
+    return _page(request, "agents.html", "platform-agents")
 
 
 @router.get("/connections", response_class=HTMLResponse)
@@ -134,7 +134,7 @@ def page_connections(
 def page_platform_tools(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
-    return _page(request, "tools.html", "platform-tools", platform_catalog=True,
+    return _page(request, "tools.html", "platform-tools",
                  tools_tab="builtin")
 
 
@@ -142,7 +142,7 @@ def page_platform_tools(
 def page_platform_skills(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
-    return _page(request, "tools.html", "platform-skills", platform_catalog=True,
+    return _page(request, "tools.html", "platform-skills",
                  tools_tab="skills")
 
 
@@ -150,7 +150,7 @@ def page_platform_skills(
 def page_platform_mcp(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
-    return _page(request, "tools.html", "platform-mcp", platform_catalog=True,
+    return _page(request, "tools.html", "platform-mcp",
                  tools_tab="mcp")
 
 
@@ -165,14 +165,14 @@ def page_platform_database(
 def page_platform_plugins(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
-    return _page(request, "plugins.html", "platform-plugins", platform_catalog=True)
+    return _page(request, "plugins.html", "platform-plugins")
 
 
 @router.get("/platform/scripts", response_class=HTMLResponse)
 def page_platform_scripts(
     request: Request, _principal=Depends(require_permission("scripts.read"))
 ):
-    return _page(request, "scripts.html", "platform-scripts", platform_catalog=True)
+    return _page(request, "scripts.html", "platform-scripts")
 
 
 @router.get("/platform/knowledge", response_class=HTMLResponse)

@@ -521,42 +521,11 @@ def delete_public_resource(
         get_resource_store(request).delete_public(resource_type, resource_id)
     except ResourceError as exc:
         raise _resource_error(exc) from exc
+    if resource_type == "agents":
+        service = getattr(request.app.state, "knowledge_service", None)
+        if service is not None:
+            service.set_agent_bindings(resource_id, [])
     return {"deleted": True}
-
-
-@router.put("/platform/catalog/{resource_type}/{resource_id}/draft")
-def save_platform_resource_draft(
-    resource_type: str,
-    resource_id: str,
-    request: Request,
-    body: Dict[str, Any] = Body(...),
-    principal=Depends(require_permission("panel.write")),
-):
-    raise HTTPException(status_code=410, detail="草稿功能已移除，请直接保存配置")
-
-
-@router.post("/platform/catalog/{resource_type}/{resource_id}/publish")
-def publish_platform_resource(
-    resource_type: str,
-    resource_id: str,
-    request: Request,
-    body: Dict[str, Any] = Body(default={}),
-    principal=Depends(require_permission("panel.write")),
-):
-    raise HTTPException(status_code=410, detail="发布功能已移除，请直接保存配置")
-
-
-@router.post(
-    "/platform/catalog/{resource_type}/{resource_id}/rollback/{revision}"
-)
-def rollback_platform_resource(
-    resource_type: str,
-    resource_id: str,
-    revision: int,
-    request: Request,
-    principal=Depends(require_permission("panel.write")),
-):
-    raise HTTPException(status_code=410, detail="回滚功能已移除，请直接保存配置")
 
 
 @router.get("/platform/catalog/{resource_type}/{resource_id}/activation")

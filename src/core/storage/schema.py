@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 33
+LATEST_SCHEMA_VERSION = 34
 
 
 SCHEMA_V1 = r"""
@@ -1484,4 +1484,7 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     31: SCHEMA_V31,
     32: SCHEMA_V32,
     33: SCHEMA_V33,
+    34: (
+        "ALTER TABLE knowledge_embeddings ADD COLUMN model_fingerprint TEXT;\n"
+    ),
 }

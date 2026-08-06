@@ -37,6 +37,10 @@ class OllamaEmbeddingAdapter:
         return self._model_id
 
     @property
+    def fingerprint(self) -> str:
+        return "{}@{}@{}".format(self._model_id, self.model, self._dimensions)
+
+    @property
     def dimensions(self) -> int:
         return self._dimensions
 

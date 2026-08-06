@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}模型管理 - BotPlatform{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/models.css">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/models.css?v=20260806a">{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
@@ -244,9 +244,10 @@
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="model-api-key-env">API Key 环境变量名</label>
-                        <input type="text" id="model-api-key-env" placeholder="如 DASHSCOPE_API_KEY, DEEPSEEK_API_KEY">
-                        <small>在 data/system/model.env 中配置对应的 KEY=值</small>
+                        <label for="model-api-key">API Key</label>
+                        <input type="password" id="model-api-key" autocomplete="new-password" placeholder="初次录入密钥；编辑时留空表示保持不变">
+                        <small id="model-api-key-helper">密钥仅一次性保存，保存后不再显示明文。</small>
+                        <span id="model-api-key-status" class="badge"></span>
                     </div>
                     <div class="form-group">
                         <label for="model-timeout">超时(秒)</label>
@@ -305,11 +306,11 @@
                 <small class="panel-note">统一使用系统结算币种；价格修改后需完整重启，历史调用保留原价格快照。</small>
             </div>
 
-            <div class="modal-footer">
-                <button type="button" id="model-modal-cancel" class="btn-secondary">取消</button>
-                <button type="submit" class="btn-primary">保存</button>
-            </div>
         </form>
+        <div class="modal-footer">
+            <button type="button" id="model-modal-cancel" class="btn-secondary">取消</button>
+            <button type="submit" form="model-form" class="btn-primary">保存</button>
+        </div>
     </div>
 </div>
 
@@ -324,6 +325,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/models.js"></script>
+<script src="/static/js/models.js?v=20260806d"></script>
 <script>initModels();</script>
 {% endblock %}

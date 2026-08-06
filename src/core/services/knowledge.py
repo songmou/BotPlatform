@@ -518,12 +518,9 @@ class KnowledgeService:
         if self.embedding is None:
             return None
         vectors: List[List[float]] = []
-        try:
-            for offset in range(0, len(chunks), 32):
-                texts = [item[1] for item in chunks[offset : offset + 32]]
-                vectors.extend(self.embedding.embed(texts))
-        except EmbeddingError:
-            return None
+        for offset in range(0, len(chunks), 32):
+            texts = [item[1] for item in chunks[offset : offset + 32]]
+            vectors.extend(self.embedding.embed(texts))
         return vectors
 
     def _index(
@@ -542,7 +539,16 @@ class KnowledgeService:
     ) -> Dict[str, Any]:
         chunks = self._chunks(content)
         digest = _hash(content)
-        vectors = self._embed_chunks(chunks)
+        if self.embedding is None:
+            vectors = None
+            last_error = "向量模型未配置"
+        else:
+            try:
+                vectors = self._embed_chunks(chunks)
+                last_error = None
+            except EmbeddingError as exc:
+                vectors = None
+                last_error = "向量化失败：{}".format(exc)
         status = "ready" if vectors is not None else "pending_embedding"
         tenant_id = (
             str(category["tenant_id"]) if category.get("tenant_id") is not None else None
@@ -617,7 +623,7 @@ class KnowledgeService:
                 connection.execute(
                     "UPDATE knowledge_sources SET category_id=?, tenant_id=?, source_type=?, "
                     "name=?, relative_path=?, drive_scope=?, drive_tenant_id=?, drive_path=?, "
-                    "file_size=?, file_mtime_ns=?, content_hash=?, status=?, last_error=NULL, "
+                    "file_size=?, file_mtime_ns=?, content_hash=?, status=?, last_error=?, "
                     "updated_at=? WHERE source_id=?",
                     (
                         category["category_id"],
@@ -632,6 +638,7 @@ class KnowledgeService:
                         file_mtime_ns,
                         digest,
                         status,
+                        last_error,
                         _now(),
                         resolved_source_id,
                     ),
@@ -643,7 +650,7 @@ class KnowledgeService:
                     "source_id, category_id, tenant_id, source_type, name, relative_path, "
                     "drive_scope, drive_tenant_id, drive_path, file_size, file_mtime_ns, "
                     "content_hash, status, last_error, created_at, updated_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         resolved_source_id,
                         category["category_id"],
@@ -658,6 +665,7 @@ class KnowledgeService:
                         file_mtime_ns,
                         digest,
                         status,
+                        last_error,
                         created,
                         created,
                     ),
@@ -697,8 +705,9 @@ class KnowledgeService:
                     vector = array("f", vectors[position]).tobytes()
                     connection.execute(
                         "INSERT INTO knowledge_embeddings("
-                        "chunk_id, model_id, dimensions, vector, content_hash, created_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?)",
+                        "chunk_id, model_id, dimensions, vector, content_hash, created_at, "
+                        "model_fingerprint"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             chunk_id,
                             self.embedding.model_id,
@@ -706,6 +715,7 @@ class KnowledgeService:
                             vector,
                             body_hash,
                             _now(),
+                            self.embedding.fingerprint,
                         ),
                     )
         return {
@@ -1200,9 +1210,11 @@ class KnowledgeService:
                     "SELECT e.chunk_id, e.vector FROM knowledge_embeddings e "
                     "JOIN knowledge_chunks c ON c.chunk_id=e.chunk_id "
                     "JOIN knowledge_sources s ON s.source_id=c.source_id "
-                    "WHERE c.category_id IN ({}) AND e.model_id=? "
+                    "WHERE c.category_id IN ({}) "
+                    "AND (e.model_fingerprint=? OR (e.model_fingerprint IS NULL "
+                    "AND e.model_id=?)) "
                     "AND s.status='ready'".format(placeholders),
-                    [*allowed, self.embedding.model_id],
+                    [*allowed, self.embedding.fingerprint, self.embedding.model_id],
                 ).fetchall()
                 scored = []
                 for row in rows:
@@ -1377,37 +1389,48 @@ class KnowledgeService:
         self,
         tenant_id: Optional[str],
         category_ids: Optional[Sequence[str]] = None,
+        force: bool = False,
     ) -> Dict[str, int]:
         if self.embedding is None:
             raise ValueError("embedding 服务未配置")
         allowed = self._visible_category_ids(tenant_id, requested=category_ids)
         if not allowed:
-            return {"completed": 0, "remaining": 0}
+            return {"completed": 0, "failed": 0, "errors": []}
         placeholders = ",".join("?" for _ in allowed)
         with self.registry.database.read() as connection:
-            rows = connection.execute(
+            sql = (
                 "SELECT c.chunk_id, c.content, c.content_hash FROM knowledge_chunks c "
                 "JOIN knowledge_sources s ON s.source_id=c.source_id "
-                "LEFT JOIN knowledge_embeddings e ON e.chunk_id=c.chunk_id AND e.model_id=? "
+                "LEFT JOIN knowledge_embeddings e ON e.chunk_id=c.chunk_id "
+                "AND (e.model_fingerprint=? OR (e.model_fingerprint IS NULL "
+                "AND e.model_id=?)) "
                 "WHERE c.category_id IN ({}) AND s.status IN ('ready','pending_embedding') "
-                "AND e.chunk_id IS NULL ORDER BY c.source_id, c.position".format(
-                    placeholders
-                ),
-                [self.embedding.model_id, *allowed],
-            ).fetchall()
+            ).format(placeholders)
+            params: List[Any] = [
+                self.embedding.fingerprint,
+                self.embedding.model_id,
+                *allowed,
+            ]
+            if not force:
+                sql += "AND e.chunk_id IS NULL "
+            sql += "ORDER BY c.source_id, c.position"
+            rows = connection.execute(sql, params).fetchall()
         completed = 0
+        errors: List[str] = []
         for offset in range(0, len(rows), 32):
             batch = rows[offset : offset + 32]
             try:
                 vectors = self.embedding.embed([str(row["content"]) for row in batch])
-            except EmbeddingError:
+            except EmbeddingError as exc:
+                errors.append("向量化失败：{}".format(exc))
                 break
             with self.registry.database.transaction(immediate=True) as connection:
                 for row, vector in zip(batch, vectors):
                     connection.execute(
                         "INSERT OR REPLACE INTO knowledge_embeddings("
-                        "chunk_id, model_id, dimensions, vector, content_hash, created_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?)",
+                        "chunk_id, model_id, dimensions, vector, content_hash, "
+                        "created_at, model_fingerprint"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             row["chunk_id"],
                             self.embedding.model_id,
@@ -1415,6 +1438,7 @@ class KnowledgeService:
                             array("f", vector).tobytes(),
                             row["content_hash"],
                             _now(),
+                            self.embedding.fingerprint,
                         ),
                     )
                     completed += 1
@@ -1423,10 +1447,145 @@ class KnowledgeService:
                 "UPDATE knowledge_sources SET status='ready', updated_at=? "
                 "WHERE category_id IN ({}) AND status='pending_embedding' "
                 "AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c "
-                "LEFT JOIN knowledge_embeddings e ON e.chunk_id=c.chunk_id AND e.model_id=? "
+                "LEFT JOIN knowledge_embeddings e ON e.chunk_id=c.chunk_id "
+                "AND (e.model_fingerprint=? OR (e.model_fingerprint IS NULL "
+                "AND e.model_id=?)) "
                 "WHERE c.source_id=knowledge_sources.source_id AND e.chunk_id IS NULL)".format(
                     placeholders
                 ),
-                [_now(), *allowed, self.embedding.model_id],
+                [_now(), self.embedding.fingerprint, self.embedding.model_id, *allowed],
             )
-        return {"completed": completed, "remaining": len(rows) - completed}
+        return {
+            "completed": completed,
+            "failed": len(rows) - completed,
+            "errors": errors,
+        }
+
+    def reembed_sources(
+        self,
+        tenant_id: Optional[str],
+        source_ids: Sequence[str],
+    ) -> Dict[str, Any]:
+        """Force re-vectorize specific sources, overwriting existing embeddings."""
+        if self.embedding is None:
+            raise ValueError("向量模型未配置，无法向量化")
+        allowed = self._visible_category_ids(tenant_id)
+        if not allowed or not source_ids:
+            return {"completed": 0, "failed": 0, "chunks": 0, "errors": []}
+        placeholders = ",".join("?" for _ in allowed)
+        ids = list(dict.fromkeys(source_ids))
+        source_placeholders = ",".join("?" for _ in ids)
+        with self.registry.database.read() as connection:
+            rows = connection.execute(
+                "SELECT c.chunk_id, c.content, c.content_hash, c.source_id "
+                "FROM knowledge_chunks c "
+                "JOIN knowledge_sources s ON s.source_id=c.source_id "
+                "WHERE c.category_id IN ({}) AND c.source_id IN ({}) "
+                "ORDER BY c.source_id, c.position".format(
+                    placeholders, source_placeholders
+                ),
+                [*allowed, *ids],
+            ).fetchall()
+        by_source: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_source.setdefault(str(row["source_id"]), []).append(row)
+        completed = 0
+        failed = 0
+        chunk_total = 0
+        errors: List[Dict[str, str]] = []
+        for source_id, chunks in by_source.items():
+            if not chunks:
+                continue
+            try:
+                vectors = self.embedding.embed([str(r["content"]) for r in chunks])
+            except EmbeddingError as exc:
+                failed += 1
+                errors.append({"source_id": source_id, "error": str(exc)})
+                with self.registry.database.transaction(immediate=True) as connection:
+                    connection.execute(
+                        "UPDATE knowledge_sources SET status='pending_embedding', "
+                        "last_error=? WHERE source_id=?",
+                        ("向量化失败：{}".format(exc), source_id),
+                    )
+                continue
+            chunk_ids = [str(r["chunk_id"]) for r in chunks]
+            with self.registry.database.transaction(immediate=True) as connection:
+                connection.executemany(
+                    "DELETE FROM knowledge_embeddings WHERE chunk_id=?",
+                    [(cid,) for cid in chunk_ids],
+                )
+                for row, vector in zip(chunks, vectors):
+                    connection.execute(
+                        "INSERT OR REPLACE INTO knowledge_embeddings("
+                        "chunk_id, model_id, dimensions, vector, content_hash, "
+                        "created_at, model_fingerprint"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            row["chunk_id"],
+                            self.embedding.model_id,
+                            len(vector),
+                            array("f", vector).tobytes(),
+                            row["content_hash"],
+                            _now(),
+                            self.embedding.fingerprint,
+                        ),
+                    )
+                connection.execute(
+                    "UPDATE knowledge_sources SET status='ready', last_error=NULL, "
+                    "updated_at=? WHERE source_id=?",
+                    (_now(), source_id),
+                )
+            completed += 1
+            chunk_total += len(chunks)
+        return {
+            "completed": completed,
+            "failed": failed,
+            "chunks": chunk_total,
+            "errors": errors,
+        }
+
+    def embedding_health(
+        self,
+        tenant_id: Optional[str],
+        category_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """Report embedding model mismatch between stored vectors and config."""
+        allowed = self._visible_category_ids(tenant_id, requested=category_ids)
+        if not allowed:
+            return {
+                "configured": self.embedding is not None,
+                "current_fingerprint": (
+                    self.embedding.fingerprint if self.embedding is not None else None
+                ),
+                "total": 0,
+                "stale": 0,
+                "by_fingerprint": {},
+            }
+        placeholders = ",".join("?" for _ in allowed)
+        with self.registry.database.read() as connection:
+            rows = connection.execute(
+                "SELECT e.model_id, e.model_fingerprint, COUNT(*) AS cnt "
+                "FROM knowledge_embeddings e "
+                "JOIN knowledge_chunks c ON c.chunk_id=e.chunk_id "
+                "WHERE c.category_id IN ({}) "
+                "GROUP BY e.model_id, e.model_fingerprint".format(placeholders),
+                allowed,
+            ).fetchall()
+        by_fingerprint: Dict[str, int] = {}
+        total = 0
+        stale = 0
+        current = self.embedding.fingerprint if self.embedding is not None else None
+        for row in rows:
+            key = row["model_fingerprint"] or row["model_id"]
+            cnt = int(row["cnt"])
+            by_fingerprint[key] = by_fingerprint.get(key, 0) + cnt
+            total += cnt
+            if self.embedding is None or key != current:
+                stale += cnt
+        return {
+            "configured": self.embedding is not None,
+            "current_fingerprint": current,
+            "total": total,
+            "stale": stale,
+            "by_fingerprint": by_fingerprint,
+        }
