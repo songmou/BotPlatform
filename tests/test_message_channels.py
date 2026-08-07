@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 from src.core.messaging import (
     DIRECT,
@@ -21,7 +20,6 @@ from src.core.config.loader import ChannelConfig
 from src.core.modeling import CanonicalMessage
 from src.core.storage.tenants import ConversationStore, TenantRegistry
 from src.core.tooling import FinalAnswer
-from tests._web_api_base import WebApiTestBase
 
 
 def _message(

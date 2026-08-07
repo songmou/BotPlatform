@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
@@ -17,6 +17,7 @@ from src.core.services.connections import (
     PersonalConnectionError,
     PersonalConnectionService,
 )
+from src.core.services.feishu_registration import FeishuRegistrationManager
 from src.core.services.wechat_login import WeChatLoginManager
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,14 @@ def _managers(request: Request) -> Dict[str, WeChatLoginManager]:
     if managers is None:
         managers = {}
         request.app.state.wechat_login_managers = managers
+    return managers
+
+
+def _feishu_managers(request: Request) -> Dict[str, FeishuRegistrationManager]:
+    managers = getattr(request.app.state, "feishu_registration_managers", None)
+    if managers is None:
+        managers = {}
+        request.app.state.feishu_registration_managers = managers
     return managers
 
 
@@ -99,11 +108,38 @@ def _get_login_manager(
         return manager
 
 
+def _get_feishu_manager(
+    request: Request, connection_id: str, detail: Dict[str, Any]
+) -> FeishuRegistrationManager:
+    managers = _feishu_managers(request)
+    with _MANAGER_LOCK:
+        manager = managers.get(connection_id)
+        if manager is not None:
+            return manager
+        _service(request)
+        organization_id = detail["organization_id"]
+        channel_id = detail["channel"]["id"]
+
+        def connected() -> bool:
+            try:
+                channel = request.app.state.organization_control_store.get_channel(
+                    organization_id, channel_id
+                )
+            except Exception:  # noqa: BLE001 - poll loop must not fail
+                return False
+            return bool(channel.get("credential_configured"))
+
+        manager = FeishuRegistrationManager(connected_checker=connected)
+        managers[connection_id] = manager
+        return manager
+
+
 @router.get("")
 def list_connections(request: Request, principal=Depends(get_principal)):
     service = _service(request)
     user_id = principal.user.user_id
     managers = _managers(request)
+    feishu_managers = _feishu_managers(request)
     items = []
     for item in service.list_for_user(user_id):
         item = dict(item)
@@ -112,9 +148,16 @@ def list_connections(request: Request, principal=Depends(get_principal)):
             item["state"] = (
                 "disabled" if not item["enabled"] else "pending_runtime"
             )
+        # Credential was just saved but the runtime may not have picked up
+        # the revision yet — don't show the stale "authentication_required".
+        if item.get("credential_configured") and item.get("state") == "authentication_required":
+            item["state"] = "pending_runtime"
         if item["platform"] == "wechat":
             manager = managers.get(item["connection_id"])
             item["login"] = manager.status() if manager else None
+        if item["platform"] == "feishu":
+            manager = feishu_managers.get(item["connection_id"])
+            item["registration"] = manager.status() if manager else None
         items.append(item)
     return {"items": items}
 
@@ -257,6 +300,7 @@ def delete_connection(
         raise _error(exc) from exc
     with _MANAGER_LOCK:
         _managers(request).pop(connection_id, None)
+        _feishu_managers(request).pop(connection_id, None)
     return {"deleted": True}
 
 
@@ -313,6 +357,67 @@ def confirm_wechat_connection(
     if not pending:
         raise HTTPException(status_code=400, detail="尚未完成微信扫码")
     service.save_wechat_credentials(
+        connection_id,
+        pending,
+        allow_delegation=principal.allows("admins.manage"),
+    )
+    return {"ok": True}
+
+
+@router.get("/{connection_id}/feishu/status")
+def feishu_status(
+    connection_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    service = _service(request)
+    try:
+        detail = service.get(connection_id, principal.user.user_id)
+    except PersonalConnectionError as exc:
+        raise _error(exc) from exc
+    if detail["platform"] != "feishu":
+        raise HTTPException(status_code=400, detail="该连接不是飞书")
+    manager = _get_feishu_manager(request, connection_id, detail)
+    return manager.status()
+
+
+@router.post("/{connection_id}/feishu/login")
+def feishu_login(
+    connection_id: str,
+    request: Request,
+    body: Optional[Dict[str, Any]] = Body(None),
+    principal=Depends(get_principal),
+):
+    service = _service(request)
+    try:
+        detail = service.get(connection_id, principal.user.user_id)
+    except PersonalConnectionError as exc:
+        raise _error(exc) from exc
+    if detail["platform"] != "feishu":
+        raise HTTPException(status_code=400, detail="该连接不是飞书")
+    manager = _get_feishu_manager(request, connection_id, detail)
+    return manager.start(str((body or {}).get("name") or ""))
+
+
+@router.post("/{connection_id}/feishu/confirm")
+def confirm_feishu_connection(
+    connection_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    service = _service(request)
+    try:
+        detail = service.get(connection_id, principal.user.user_id)
+    except PersonalConnectionError as exc:
+        raise _error(exc) from exc
+    if detail["platform"] != "feishu":
+        raise HTTPException(status_code=400, detail="该连接不是飞书")
+    manager = _get_feishu_manager(request, connection_id, detail)
+    holder = getattr(manager, "pending_holder", None)
+    pending = holder.get("pending") if holder else None
+    if not pending:
+        raise HTTPException(status_code=400, detail="尚未完成飞书扫码创建")
+    service.save_feishu_credentials(
         connection_id,
         pending,
         allow_delegation=principal.allows("admins.manage"),

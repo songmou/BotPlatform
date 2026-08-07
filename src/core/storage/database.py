@@ -46,6 +46,12 @@ from src.core.storage.schema import (  # noqa: F401
     SCHEMA_V27,
     SCHEMA_V28,
     SCHEMA_V29,
+    SCHEMA_V30,
+    SCHEMA_V31,
+    SCHEMA_V32,
+    SCHEMA_V33,
+    SCHEMA_V34,
+    SCHEMA_V35,
 )
 
 
@@ -135,8 +141,11 @@ class Database:
                         self._migrate_v28(connection)
                     elif version == 31:
                         self._migrate_v31(connection)
-                    elif version == 34:
-                        self._migrate_v34(connection)
+                    elif version == 36:
+                        # Knowledge embedding fingerprint column (idempotent).
+                        self._migrate_v34(connection, 36)
+                    elif version == 37:
+                        self._migrate_v37(connection)
                     else:
                         self._apply_schema_script(
                             connection, version, SCHEMA_SCRIPTS[version]
@@ -386,7 +395,9 @@ WHERE EXISTS (
         cls._apply_schema_script(connection, 31, script)
 
     @classmethod
-    def _migrate_v34(cls, connection: sqlite3.Connection) -> None:
+    def _migrate_v34(
+        cls, connection: sqlite3.Connection, version: int = 34
+    ) -> None:
         """Add the embedding model fingerprint column idempotently.
 
         ``knowledge_embeddings`` is normally created at v20, so the table is
@@ -412,7 +423,26 @@ WHERE EXISTS (
                     "ALTER TABLE knowledge_embeddings "
                     "ADD COLUMN model_fingerprint TEXT;\n"
                 )
-        cls._apply_schema_script(connection, 34, script)
+        cls._apply_schema_script(connection, version, script)
+
+    @classmethod
+    def _migrate_v37(cls, connection: sqlite3.Connection) -> None:
+        """Rebuild personal_channel_connections for the feishu platform.
+
+        Version 34 (the rebuild) may already be recorded on databases that
+        followed the personal-connections branch; databases that followed the
+        mainline recorded v34 for the knowledge fingerprint column instead.
+        Detect the actual table definition and rebuild only when feishu is
+        missing from the CHECK constraint, so both lineages converge.
+        """
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='personal_channel_connections'"
+        ).fetchone()
+        script = ""
+        if row is not None and "feishu" not in str(row[0] or ""):
+            script = SCHEMA_V34
+        cls._apply_schema_script(connection, 37, script)
 
     @staticmethod
     def _migrate_v12(connection: sqlite3.Connection) -> None:

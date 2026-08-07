@@ -169,6 +169,121 @@ class PersonalConnectionServiceTest(WebApiTestBase):
             int(before.get(org_id, {}).get("channels_revision") or 0),
         )
 
+    def test_save_feishu_credentials_maps_protocol_fields(self):
+        service = self._service()
+        org_id, owner = self._create_owner("feishu")
+        user_id = self._user_id(owner)
+        created = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        before = self.app.state.organization_control_store.runtime_revisions()
+        # Payload as produced by the registration poll: client_id/client_secret
+        # plus extra protocol fields that must not leak into the keychain.
+        service.save_feishu_credentials(
+            created["connection_id"],
+            {
+                "client_id": "cli_a5d6",
+                "client_secret": "secret-1",
+                "user_info": {"name": "测试机器人", "open_id": "ou_123"},
+            },
+        )
+        detail = service.get(created["connection_id"], user_id)
+        self.assertEqual(detail["bot_account_id"], "cli_a5d6")
+        self.assertTrue(detail["credential_configured"])
+        raw = self.app.state.credential_service.secret_for_resource(
+            org_id, "channels", detail["channel_instance_id"]
+        )
+        self.assertIn('"app_id": "cli_a5d6"', raw)
+        self.assertIn('"app_secret": "secret-1"', raw)
+        self.assertNotIn("user_info", raw)
+        after = self.app.state.organization_control_store.runtime_revisions()
+        self.assertGreater(
+            int(after.get(org_id, {}).get("channels_revision") or 0),
+            int(before.get(org_id, {}).get("channels_revision") or 0),
+        )
+
+    def test_save_feishu_credentials_rejects_incomplete_payload(self):
+        service = self._service()
+        org_id, owner = self._create_owner("feishu-bad")
+        user_id = self._user_id(owner)
+        created = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        with self.assertRaises(PersonalConnectionError):
+            service.save_feishu_credentials(
+                created["connection_id"], {"client_id": "cli_only"}
+            )
+
+    def test_create_feishu_pauses_other_active_feishu_connections(self):
+        service = self._service()
+        org_id, owner = self._create_owner("feishu-pause")
+        user_id = self._user_id(owner)
+        first = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        self.assertTrue(first["enabled"])
+        second = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        self.assertTrue(second["enabled"])
+        self.assertFalse(service.get(first["connection_id"], user_id)["enabled"])
+
+    def test_enable_feishu_pauses_other_active_feishu_connections(self):
+        service = self._service()
+        org_id, owner = self._create_owner("feishu-reenable")
+        user_id = self._user_id(owner)
+        first = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        second = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        service.set_enabled(first["connection_id"], user_id, True)
+        self.assertTrue(service.get(first["connection_id"], user_id)["enabled"])
+        self.assertFalse(service.get(second["connection_id"], user_id)["enabled"])
+
+    def test_list_repairs_duplicate_active_feishu_connections(self):
+        service = self._service()
+        org_id, owner = self._create_owner("feishu-repair")
+        user_id = self._user_id(owner)
+        first = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        second = service.create(
+            user_id=user_id,
+            organization_id=org_id,
+            platform="feishu",
+            agent_id="general",
+        )
+        # Simulate legacy data: both connections enabled at once.
+        service.set_enabled(first["connection_id"], user_id, True)
+        service.set_enabled(second["connection_id"], user_id, True)
+        listed = service.list_for_user(user_id)
+        enabled = [item for item in listed if item["enabled"]]
+        self.assertEqual(len(enabled), 1)
+        self.assertEqual(enabled[0]["connection_id"], second["connection_id"])
+
     def test_change_agent_and_enabled(self):
         service = self._service()
         org_id, owner = self._create_owner("toggle")

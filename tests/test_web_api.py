@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import asdict, replace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient

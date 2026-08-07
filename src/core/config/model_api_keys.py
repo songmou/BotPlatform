@@ -8,7 +8,6 @@ never written to ``models.json``; only a reference is resolved at runtime.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from src.core.integrations.keychain import (
     KeychainError,

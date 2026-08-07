@@ -126,7 +126,14 @@
         </div>
         <form id="organization-channel-form" class="modal-body">
             <div id="organization-channel-form-panel">
-                <div class="form-group"><label for="organization-channel-id">渠道实例 ID</label><input id="organization-channel-id" required pattern="^[a-z][a-z0-9_\-]{1,63}$"><small id="organization-channel-id-help">新建时按渠道类型自动生成，可修改；小写字母开头，可含数字、下划线和连字符</small></div>
+                <div class="form-group" id="organization-channel-scope-group"><label for="organization-channel-scope">归属范围</label>
+                    <select id="organization-channel-scope">
+                        <option value="organization">组织</option>
+                        <option value="personal">个人</option>
+                    </select>
+                    <small>个人连接仅你可见、凭据个人私有；组织渠道对组织成员可见。</small>
+                </div>
+                <div class="form-group" id="organization-channel-id-group"><label for="organization-channel-id">渠道实例 ID</label><input id="organization-channel-id" required pattern="^[a-z][a-z0-9_\-]{1,63}$"><small id="organization-channel-id-help">新建时按渠道类型自动生成，可修改；小写字母开头，可含数字、下划线和连字符</small></div>
                 <div class="form-group"><label for="organization-channel-type">渠道类型</label><select id="organization-channel-type"><option value="wecom_aibot">企业微信智能机器人</option><option value="wechat_ilink">微信</option><option value="feishu">飞书</option></select></div>
                 <div class="form-group"><label for="organization-channel-agent">关联智能体</label><select id="organization-channel-agent" required></select><small>渠道默认由该智能体接待。</small></div>
                 <label class="checkbox-label"><input id="organization-channel-enabled" type="checkbox"> 启用渠道</label>
@@ -147,10 +154,14 @@
                     <p class="page-desc">同一个微信号同一时间只能挂在一个连接上，后扫码者将顶替先登录者。</p>
                 </div>
                 <div id="organization-channel-bind-feishu" style="display:none">
-                    <p class="page-desc">飞书渠道暂未开放，敬请期待。</p>
+                    <h4>飞书扫码创建机器人</h4>
+                    <div id="organization-channel-feishu-qr-area" class="wechat-connect" data-role="channel-feishu-area">
+                        <div class="tool-empty">渠道已创建，正在生成二维码…</div>
+                    </div>
+                    <p class="page-desc">用飞书扫描二维码，确认创建机器人应用；创建后可到飞书开放平台为该应用配置权限与事件订阅。</p>
                 </div>
             </div>
-            <div class="modal-footer"><button type="button" id="organization-channel-modal-cancel" class="btn-secondary">取消</button><button type="button" id="organization-channel-step-back" class="btn-secondary" style="display:none">上一步</button><button type="button" id="organization-channel-step-next" class="btn-primary">下一步</button><button type="submit" id="organization-channel-bind-save" class="btn-primary" style="display:none">保存</button></div>
+            <div class="modal-footer"><button type="button" id="organization-channel-modal-cancel" class="btn-secondary">取消</button><button type="button" id="organization-channel-step-back" class="btn-secondary" style="display:none">上一步</button><button type="button" id="organization-channel-step-next" class="btn-primary">下一步</button><button type="submit" id="organization-channel-bind-save" class="btn-primary" style="display:none">保存</button><button type="button" id="organization-channel-done" class="btn-primary" style="display:none">完成</button></div>
         </form>
     </div>
 </div>

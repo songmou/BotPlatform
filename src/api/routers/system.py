@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from src.api.deps import get_config, get_principal, get_router, require_permission
+from src.api.deps import get_config, get_router, require_permission
 from src.api.schemas import HealthResponse, StatusResponse
 from src.core.storage.organizations import OrganizationError
 
@@ -119,15 +119,6 @@ def page_platform_agents(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
     return _page(request, "agents.html", "platform-agents")
-
-
-@router.get("/connections", response_class=HTMLResponse)
-def page_connections(
-    request: Request, _principal=Depends(get_principal)
-):
-    return _organization_page(
-        request, "connections", template="connections.html", active="connections"
-    )
 
 
 @router.get("/platform/tools", response_class=HTMLResponse)

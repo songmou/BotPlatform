@@ -14,6 +14,11 @@ from src.core.integrations.wecom_verify import (
     WeComVerifyError,
     verify_wecom_credentials,
 )
+from src.core.messaging.credentials import (
+    ChannelCredentialError,
+    validate_channel_credentials,
+)
+from src.core.services.feishu_registration import FeishuRegistrationManager
 from src.core.services.wechat_login import WeChatLoginManager
 
 from src.api.deps import (
@@ -1591,20 +1596,27 @@ def delete_typed_organization_agent(
     return {"deleted": True}
 
 
-def _personal_channel_ids(request: Request, organization_id: str) -> set:
+def _personal_channel_owners(request: Request, organization_id: str) -> Dict[str, Dict[str, Any]]:
     with get_organization_store(request).database.read() as connection:
         rows = connection.execute(
-            "SELECT c.channel_id FROM organization_channels c "
+            "SELECT c.channel_id, p.user_id, p.connection_id "
+            "FROM organization_channels c "
             "JOIN personal_channel_connections p "
             "ON p.channel_instance_id = c.channel_instance_id "
             "WHERE c.organization_id=?",
             (organization_id,),
         ).fetchall()
-    return {str(row["channel_id"]) for row in rows}
+    return {
+        str(row["channel_id"]): {
+            "user_id": int(row["user_id"]),
+            "connection_id": str(row["connection_id"]),
+        }
+        for row in rows
+    }
 
 
 def _reject_personal_channel(request: Request, organization_id: str, channel_id: str) -> None:
-    if channel_id in _personal_channel_ids(request, organization_id):
+    if channel_id in _personal_channel_owners(request, organization_id):
         raise HTTPException(
             status_code=400, detail="个人连接请在「我的连接」中管理"
         )
@@ -1618,8 +1630,22 @@ def list_typed_organization_channels(
 ):
     _organization_context(request, principal, organization_id)
     items = get_organization_control_store(request).list_channels(organization_id)
-    personal = _personal_channel_ids(request, organization_id)
-    items = [item for item in items if item["id"] not in personal]
+    personal_owners = _personal_channel_owners(request, organization_id)
+    merged = []
+    for item in items:
+        owner = personal_owners.get(item["id"])
+        if owner is None:
+            item["personal"] = False
+            merged.append(item)
+            continue
+        # Personal connections are only visible to their owner.
+        if owner["user_id"] != principal.user.user_id:
+            continue
+        item["personal"] = True
+        item["user_id"] = owner["user_id"]
+        item["connection_id"] = owner["connection_id"]
+        merged.append(item)
+    items = merged
     registry = getattr(request.app.state, "channel_statuses", None)
     for item in items:
         status = registry.get(item["channel_instance_id"]) if registry else None
@@ -1666,11 +1692,15 @@ def upsert_typed_organization_channel(
     context = _organization_context(request, principal, organization_id)
     _reject_personal_channel(request, organization_id, channel_id)
     try:
-        return get_organization_control_store(request).upsert_channel(
+        result = get_organization_control_store(request).upsert_channel(
             organization_id, channel_id, body, context.user_id
         )
     except OrganizationControlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The runtime watches channels_revision to rebuild adapters; channel
+    # creation/edits must bump it so newly configured channels come online.
+    get_organization_control_store(request).bump_channels_revision(organization_id)
+    return result
 
 
 @router.patch("/orgs/{organization_id}/channels/{channel_id}/status")
@@ -1729,7 +1759,7 @@ def put_typed_organization_channel_credentials(
         credentials = channel_provider(channel["type"]).validate_credentials(
             raw_credentials
         )
-        return get_credential_service(request).put(
+        result = get_credential_service(request).put(
             organization_id,
             "channel:{}".format(channel_id),
             actor_user_id=context.user_id,
@@ -1740,6 +1770,10 @@ def put_typed_organization_channel_credentials(
             secret=json.dumps(credentials, ensure_ascii=False),
             allow_platform_delegation=context.platform_delegation,
         )
+        # Credentials changed: bump the revision so the runtime rebuilds the
+        # channel adapter with the new credentials.
+        get_organization_control_store(request).bump_channels_revision(organization_id)
+        return result
     except WeComVerifyError as exc:
         raise HTTPException(
             status_code=400, detail="企业微信凭证校验失败：{}".format(exc)
@@ -1857,6 +1891,121 @@ def organization_channel_wechat_confirm(
         resource_id=channel["channel_instance_id"],
         label="{} 微信登录".format(channel_id),
         secret=json.dumps(pending, ensure_ascii=False),
+        allow_platform_delegation=True,
+    )
+    get_organization_control_store(request).bump_channels_revision(organization_id)
+    return {"ok": True}
+
+
+def _organization_feishu_manager(
+    request: Request,
+    organization_id: str,
+    channel: Dict[str, Any],
+    actor_user_id: int,
+) -> FeishuRegistrationManager:
+    managers = request.app.state.feishu_registration_managers
+    manager_key = "org-feishu:{}".format(channel["id"])
+    with threading.Lock():
+        manager = managers.get(manager_key)
+        if manager is not None:
+            return manager
+
+        def connected() -> bool:
+            try:
+                item = get_organization_control_store(request).get_channel(
+                    organization_id, channel["id"]
+                )
+            except OrganizationControlError:
+                return False
+            return bool(item.get("credential_configured"))
+
+        manager = FeishuRegistrationManager(connected_checker=connected)
+        managers[manager_key] = manager
+        return manager
+
+
+@router.get("/orgs/{organization_id}/channels/{channel_id}/feishu/status")
+def organization_channel_feishu_status(
+    organization_id: str,
+    channel_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
+    channel = get_organization_control_store(request).get_channel(
+        organization_id, channel_id
+    )
+    if channel["type"] != "feishu":
+        raise HTTPException(status_code=400, detail="该渠道不是飞书渠道")
+    manager = _organization_feishu_manager(
+        request, organization_id, channel, principal.user.user_id
+    )
+    return manager.status()
+
+
+@router.post("/orgs/{organization_id}/channels/{channel_id}/feishu/login")
+def organization_channel_feishu_login(
+    organization_id: str,
+    channel_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
+    channel = get_organization_control_store(request).get_channel(
+        organization_id, channel_id
+    )
+    if channel["type"] != "feishu":
+        raise HTTPException(status_code=400, detail="该渠道不是飞书渠道")
+    manager = _organization_feishu_manager(
+        request, organization_id, channel, principal.user.user_id
+    )
+    return manager.start()
+
+
+@router.post("/orgs/{organization_id}/channels/{channel_id}/feishu/confirm")
+def organization_channel_feishu_confirm(
+    organization_id: str,
+    channel_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    _organization_context(request, principal, organization_id)
+    _reject_personal_channel(request, organization_id, channel_id)
+    channel = get_organization_control_store(request).get_channel(
+        organization_id, channel_id
+    )
+    if channel["type"] != "feishu":
+        raise HTTPException(status_code=400, detail="该渠道不是飞书渠道")
+    manager = _organization_feishu_manager(
+        request, organization_id, channel, principal.user.user_id
+    )
+    holder = getattr(manager, "pending_holder", None)
+    pending = holder.get("pending") if holder else None
+    if not pending:
+        raise HTTPException(status_code=400, detail="尚未完成飞书扫码创建")
+    payload = {
+        "app_id": str(
+            pending.get("client_id") or pending.get("app_id") or ""
+        ),
+        "app_secret": str(
+            pending.get("client_secret") or pending.get("app_secret") or ""
+        ),
+    }
+    try:
+        normalized = validate_channel_credentials("feishu", payload)
+    except ChannelCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    get_credential_service(request).put(
+        organization_id,
+        "channel:{}".format(channel_id),
+        actor_user_id=principal.user.user_id,
+        scope="organization",
+        resource_type="channels",
+        resource_id=channel["channel_instance_id"],
+        label="{} 飞书应用".format(channel_id),
+        secret=json.dumps(normalized, ensure_ascii=False),
         allow_platform_delegation=True,
     )
     get_organization_control_store(request).bump_channels_revision(organization_id)

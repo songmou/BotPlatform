@@ -60,6 +60,11 @@ class ConnectionsApiTests(WebApiTestBase):
         self.assertEqual(login.status_code, 200, login.text)
         return member
 
+    def _user_id(self, client: TestClient) -> int:
+        me = client.get("/api/auth/me")
+        self.assertEqual(me.status_code, 200, me.text)
+        return int(me.json()["user"]["user_id"])
+
     def test_wecom_connection_create_verify_and_hide_secret(self):
         org_id, owner = self._create_owner("wecom-api")
         with mock.patch(_VERIFY) as verify:
@@ -227,7 +232,7 @@ class ConnectionsApiTests(WebApiTestBase):
             200,
         )
 
-    def test_organization_channel_endpoints_hide_personal_connections(self):
+    def test_organization_channel_endpoints_include_personal_connections_for_owner(self):
         org_id, owner = self._create_owner("hide-personal")
         created = owner.post(
             "/api/connections",
@@ -239,9 +244,21 @@ class ConnectionsApiTests(WebApiTestBase):
         )
         self.assertEqual(created.status_code, 201, created.text)
         channel_id = created.json()["channel"]["id"]
+        connection_id = created.json()["connection_id"]
 
+        # The owner sees their personal connection in the org channel list,
+        # marked as personal and carrying the connection id.
         listed = owner.get("/api/v2/orgs/{}/channels".format(org_id)).json()
-        self.assertNotIn(channel_id, [item["id"] for item in listed["items"]])
+        item = [entry for entry in listed["items"] if entry["id"] == channel_id]
+        self.assertEqual(len(item), 1)
+        self.assertTrue(item[0]["personal"])
+        self.assertEqual(item[0]["connection_id"], connection_id)
+        self.assertEqual(item[0]["user_id"], self._user_id(owner))
+
+        # Other members cannot see it.
+        other = self._invite_member(owner, org_id, "hide-other")
+        other_listed = other.get("/api/v2/orgs/{}/channels".format(org_id)).json()
+        self.assertNotIn(channel_id, [entry["id"] for entry in other_listed["items"]])
 
         blocked = owner.put(
             "/api/v2/orgs/{}/channels/{}".format(org_id, channel_id),

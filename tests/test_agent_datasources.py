@@ -20,7 +20,6 @@ exercises paths that do NOT require a live database driver or sqlglot.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
 
 from src.core.config.loader import AgentPreset, Capability, ToolConfig
 from src.core.datasource.service import DataSourceService

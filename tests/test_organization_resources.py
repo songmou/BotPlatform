@@ -59,7 +59,6 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
 
     def test_platform_catalog_mcp_headers_stored_in_keychain(self):
-        import json
         import tempfile
         from pathlib import Path
         from unittest.mock import patch

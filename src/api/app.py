@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,6 +37,8 @@ from src.api.routers import (
 API_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = API_DIR / "templates"
 STATIC_DIR = API_DIR / "static"
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(config, model_router, registry, conversation_store,
@@ -160,6 +163,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
     app.state.wechat_login_managers = {}
+    app.state.feishu_registration_managers = {}
     app.state.datasource_service = datasource_service
     app.state.channel_statuses = channel_statuses
     app.state.organization_store = organization_store
