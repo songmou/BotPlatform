@@ -364,21 +364,16 @@ function initTools() {
         var enabled = document.getElementById("skill-enabled").checked;
         if (!name || !prompt) { showToast("名称和指令不能为空", "error"); return; }
 
+        var resourceId = skillEditingId || id;
         var payload = { name: name, description: description, prompt: prompt, enabled: enabled };
-        var method, url;
-        if (skillEditingId) {
-            method = "PUT"; url = "/api/skills/" + encodeURIComponent(skillEditingId);
-        } else {
-            method = "POST"; url = "/api/skills"; payload.id = id;
-        }
-        fetch(url, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
-            .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); }); return r.json(); })
+        if (!skillEditingId) payload.id = id;
+        CatalogApi.save("skills", resourceId, payload)
             .then(function () { showToast(skillEditingId ? "已更新技能" : "已创建技能", "success"); skillModal.style.display = "none"; loadSkills(); })
             .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
     });
 
     function loadSkills() {
-        fetch("/api/skills").then(function (r) { return r.json(); }).then(function (skills) {
+        CatalogApi.list("skills").then(function (skills) {
             var container = document.getElementById("skill-list");
             if (!skills.length) { container.innerHTML = '<div class="empty-state">暂无技能，点击"新建技能"创建</div>'; return; }
             container.innerHTML = skills.map(function (s) {
@@ -403,7 +398,7 @@ function initTools() {
         var tile = e.target.closest("[data-skill-id]");
         if (!tile) return;
         var id = tile.getAttribute("data-skill-id");
-        fetch("/api/skills").then(function (r) { return r.json(); }).then(function (skills) {
+        CatalogApi.list("skills").then(function (skills) {
             var s = skills.find(function (x) { return x.id === id; });
             if (!s) return;
             skillEditingId = id;
@@ -425,10 +420,8 @@ function initTools() {
         var id = skillEditingId;
         showConfirm("确定删除技能“" + id + "”吗？").then(function (ok) {
             if (!ok) return null;
-            return fetch("/api/skills/" + encodeURIComponent(id), { method: "DELETE" });
-        }).then(function (response) {
-            if (!response) return;
-            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            return CatalogApi.remove("skills", id);
+        }).then(function () {
             skillModal.style.display = "none";
             showToast("技能已删除", "success");
             loadSkills();
@@ -438,9 +431,28 @@ function initTools() {
     /* ---- MCP 服务 ---- */
     var mcpModal = document.getElementById("mcp-modal");
     var mcpEditingId = null;
+    var mcpTemplateAuth = null;
+    var mcpTemplatesCache = [];
+    var mcpTemplateModal = document.getElementById("mcp-template-modal");
+
+    document.getElementById("create-mcp-from-template-btn").addEventListener("click", function () {
+        loadMcpTemplates();
+        mcpTemplateModal.style.display = "";
+    });
+    document.getElementById("mcp-template-close").addEventListener("click", function () { mcpTemplateModal.style.display = "none"; });
+    mcpTemplateModal.addEventListener("click", function (e) { if (e.target === mcpTemplateModal) mcpTemplateModal.style.display = "none"; });
+    document.getElementById("mcp-template-list").addEventListener("click", function (e) {
+        var tile = e.target.closest("[data-template-key]");
+        if (!tile) return;
+        var key = tile.getAttribute("data-template-key");
+        var t = mcpTemplatesCache.filter(function (x) { return x.key === key; })[0];
+        if (t) openMcpTemplate(t);
+    });
 
     document.getElementById("create-mcp-btn").addEventListener("click", function () {
         mcpEditingId = null;
+        mcpTemplateAuth = null;
+        document.getElementById("mcp-secret-group").style.display = "none";
         document.getElementById("mcp-modal-title").textContent = "添加 MCP 服务";
         document.getElementById("mcp-id-group").style.display = "";
         document.getElementById("mcp-id").required = true;
@@ -494,11 +506,26 @@ function initTools() {
         var payload = { name: name, transport: transport, enabled: enabled };
         if (transport === "stdio") { payload.command = command; payload.args = args; }
         else { payload.url = url; payload.headers = headers; }
-        var method, apiUrl;
-        if (mcpEditingId) { method = "PUT"; apiUrl = "/api/mcp/" + encodeURIComponent(mcpEditingId); }
-        else { method = "POST"; apiUrl = "/api/mcp"; payload.id = id; }
-        fetch(apiUrl, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
-            .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail); }); return r.json(); })
+        if (mcpTemplateAuth) {
+            var secretVal = document.getElementById("mcp-secret-value").value.trim();
+            if (!secretVal) { showToast((mcpTemplateAuth.label || "密钥") + "不能为空", "error"); return; }
+            if (mcpTemplateAuth.prefix && !secretVal.startsWith(mcpTemplateAuth.prefix)) {
+                secretVal = mcpTemplateAuth.prefix + secretVal;
+            }
+            if (mcpTemplateAuth.kind === "header") {
+                payload.headers = {};
+                payload.headers[mcpTemplateAuth.key] = secretVal;
+            } else if (mcpTemplateAuth.kind === "env") {
+                payload.env = {};
+                payload.env[mcpTemplateAuth.key] = secretVal;
+            } else if (mcpTemplateAuth.kind === "query") {
+                var sep = url.indexOf("?") >= 0 ? "&" : "?";
+                payload.url = url + sep + encodeURIComponent(mcpTemplateAuth.key) + "=" + encodeURIComponent(secretVal);
+            }
+        }
+        var resourceId = mcpEditingId || id;
+        if (!mcpEditingId) payload.id = id;
+        CatalogApi.save("mcp", resourceId, payload)
             .then(function () {
                 var savedId = mcpEditingId;
                 showToast(mcpEditingId ? "已更新 MCP 服务" : "已添加 MCP 服务", "success");
@@ -512,8 +539,82 @@ function initTools() {
             .catch(function (err) { showToast("操作失败：" + err.message, "error"); });
     });
 
+    function loadMcpTemplates() {
+        var container = document.getElementById("mcp-template-list");
+        container.innerHTML = '<div class="empty-state">加载中…</div>';
+        fetch("/api/v2/platform/mcp/templates").then(function (r) {
+            if (!r.ok) { throw new Error("HTTP_" + r.status); }
+            return r.json();
+        }).then(function (templates) {
+            if (!Array.isArray(templates)) { throw new Error("bad_payload"); }
+            mcpTemplatesCache = templates;
+            if (!mcpTemplatesCache.length) { container.innerHTML = '<div class="empty-state">暂无可用模板</div>'; return; }
+            var byCat = {};
+            mcpTemplatesCache.forEach(function (t) {
+                var cat = t.category || "其他";
+                (byCat[cat] = byCat[cat] || []).push(t);
+            });
+            var html = "";
+            Object.keys(byCat).forEach(function (cat) {
+                html += '<div class="section-title">' + escapeHtml(cat) + "</div>";
+                html += byCat[cat].map(function (t) {
+                    var letter = (t.name || "?").trim().charAt(0).toUpperCase();
+                    var transport = t.transport === "stdio" ? "本地命令" : "远程服务";
+                    return '<div class="plugin-tile" data-template-key="' + escapeHtml(t.key) + '">' +
+                        '<div class="plugin-tile-header">' +
+                            '<div class="plugin-avatar" style="background:#6366f1">' + escapeHtml(letter) + "</div>" +
+                            '<div class="plugin-tile-info">' +
+                                '<div class="plugin-tile-name">' + escapeHtml(t.name) + "</div>" +
+                                '<div class="plugin-tile-meta"><span class="text-muted">' + escapeHtml(transport) + "</span></div>" +
+                            "</div>" +
+                        "</div>" +
+                        (t.description ? '<div class="plugin-tile-tags"><span class="tag">' + escapeHtml(t.category || "") + "</span></div>" : "") +
+                        (t.description ? '<div class="plugin-tile-desc">' + escapeHtml(t.description) + "</div>" : "") +
+                    "</div>";
+                }).join("");
+            });
+            container.innerHTML = html;
+        }).catch(function (e) {
+            var msg = "模板加载失败，请刷新页面重试";
+            if (e && e.message && e.message.indexOf("401") >= 0) { msg = "请先在面板登录后再试"; }
+            container.innerHTML = '<div class="empty-state">' + msg + '</div>';
+        });
+    }
+
+    function openMcpTemplate(t) {
+        mcpTemplateModal.style.display = "none";
+        mcpEditingId = null;
+        mcpTemplateAuth = t.auth || null;
+        document.getElementById("mcp-modal-title").textContent = "从模板创建：" + (t.name || "");
+        document.getElementById("mcp-id-group").style.display = "";
+        document.getElementById("mcp-id").required = true;
+        document.getElementById("mcp-form").reset();
+        document.getElementById("mcp-id").value = t.key || "";
+        document.getElementById("mcp-name").value = t.name || "";
+        document.getElementById("mcp-transport").value = t.transport || "stdio";
+        document.getElementById("mcp-command").value = t.command || "";
+        document.getElementById("mcp-args").value = (t.args || []).join(" ");
+        document.getElementById("mcp-url").value = t.url || "";
+        document.getElementById("mcp-enabled").checked = true;
+        document.getElementById("mcp-submit-btn").textContent = "创建实例";
+        toggleMcpTransport();
+        if (mcpTemplateAuth) {
+            document.getElementById("mcp-secret-group").style.display = "";
+            document.getElementById("mcp-secret-label").textContent = mcpTemplateAuth.label || "密钥";
+            document.getElementById("mcp-secret-value").value = "";
+            document.getElementById("mcp-secret-value").placeholder = mcpTemplateAuth.placeholder || "填写 Token / 密钥";
+            document.getElementById("mcp-secret-help").textContent = mcpTemplateAuth.help || "";
+            document.getElementById("mcp-headers-group").style.display = "none";
+        } else {
+            document.getElementById("mcp-secret-group").style.display = "none";
+            document.getElementById("mcp-headers-group").style.display = "none";
+        }
+        mcpModal.style.display = "";
+    }
+
     function loadMcpServers() {
-        fetch("/api/mcp").then(function (r) { return r.json(); }).then(function (servers) {
+        CatalogApi.list("mcp").then(function (servers) {
+            if (!Array.isArray(servers)) { throw new Error("bad_payload"); }
             var container = document.getElementById("mcp-list");
             if (!servers.length) { container.innerHTML = '<div class="empty-state">暂无 MCP 服务，点击"添加服务"创建</div>'; return; }
             container.innerHTML = servers.map(function (s) {
@@ -533,6 +634,11 @@ function initTools() {
                     '<div class="plugin-tile-tags">' + transportTag + "</div>" +
                 "</div>";
             }).join("");
+        }).catch(function (e) {
+            var container = document.getElementById("mcp-list");
+            var msg = "服务加载失败，请刷新页面重试";
+            if (e && e.message && e.message.indexOf("401") >= 0) { msg = "请先在面板登录后再试"; }
+            container.innerHTML = '<div class="empty-state">' + msg + '</div>';
         });
     }
 
@@ -590,7 +696,7 @@ function initTools() {
     }
 
     function openMcpDetail(id) {
-        fetch("/api/mcp").then(function (r) { return r.json(); }).then(function (servers) {
+        CatalogApi.list("mcp").then(function (servers) {
             var s = servers.find(function (x) { return x.id === id; });
             if (!s) return;
             currentMcpServer = s;
@@ -657,7 +763,7 @@ function initTools() {
         var countEl = document.getElementById("mcp-detail-tools-count");
         listEl.innerHTML = '<p class="text-muted">加载中…</p>';
         countEl.textContent = "";
-        fetch("/api/mcp/" + encodeURIComponent(id) + "/tools")
+        fetch("/api/v2/platform/mcp/" + encodeURIComponent(id) + "/tools")
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (data.error && (!data.tools || !data.tools.length)) {
@@ -711,7 +817,7 @@ function initTools() {
         }
         btn.disabled = true;
         outputEl.textContent = "运行中…";
-        fetch("/api/mcp/" + encodeURIComponent(currentMcpServer.id) + "/tools/" +
+        fetch("/api/v2/platform/mcp/" + encodeURIComponent(currentMcpServer.id) + "/tools/" +
               encodeURIComponent(toolName) + "/invoke", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -757,10 +863,8 @@ function initTools() {
         var id = currentMcpServer.id;
         showConfirm("确定删除 MCP 服务“" + id + "”吗？").then(function (ok) {
             if (!ok) return null;
-            return fetch("/api/mcp/" + encodeURIComponent(id), { method: "DELETE" });
-        }).then(function (response) {
-            if (!response) return;
-            if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || "删除失败"); });
+            return CatalogApi.remove("mcp", id);
+        }).then(function () {
             showToast("MCP 服务已删除", "success");
             showMcpList();
         }).catch(function (error) { showToast("删除失败：" + error.message, "error"); });

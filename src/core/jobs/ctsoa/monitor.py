@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
+from src.core.jobs._common.script_result import AWAITING_INPUT, write_script_result
+
 
 APP_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.getenv("ILINKBOT_SCRIPT_DATA_ROOT", str(APP_ROOT))).expanduser().resolve()
@@ -619,6 +621,12 @@ def execute_monitor(
         password = load_password(account, config)
         try:
             client.login_with_challenge(account, password, validate_code)
+        except AuthenticationError:
+            # 验证码错误:重新拉取验证码并继续等待用户输入,无需另跑一次首跑。
+            return client.create_challenge(
+                account,
+                max(60, int(config.get("oa", {}).get("challenge_ttl_seconds", 300))),
+            )
         finally:
             password = ""
         client.save_session(SESSION_FILE, account)
@@ -646,24 +654,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
 
-def write_script_result(
-    status: str,
-    summary: str,
-    artifacts: Optional[List[str]] = None,
-    error: str = "",
-) -> None:
-    result_file = os.getenv("ILINKBOT_SCRIPT_RESULT_FILE")
-    if not result_file:
-        return
-    atomic_write_json(
-        Path(result_file),
-        {
-            "status": status,
-            "summary": summary,
-            "artifacts": artifacts or [],
-            "error": error,
-        },
-    )
+# write_script_result is imported from src.core.jobs._common.script_result so
+# the result contract (including awaiting_input) stays in one place.
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -675,10 +667,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = execute_monitor(config, logger, validate_code=args.validate_code.strip())
         if result["kind"] == "challenge":
             summary = (
-                "CTS OA 需要验证码。请查看图片，并在 5 分钟内再次运行 "
-                "ctsoa_check，参数 validate_code 填写图片中的字符。"
+                "CTS OA 需要验证码。请查看图片，并在 5 分钟内直接回复图片中的字符，"
+                "我会自动用它继续查询，无需再次运行命令。"
             )
-            write_script_result("success", summary, [result["captcha"]])
+            write_script_result(
+                AWAITING_INPUT,
+                summary,
+                [result["captcha"]],
+                await_input={
+                    "param": "validate_code",
+                    "prompt": summary,
+                    "hint": "图片中的字符",
+                    "ttl_seconds": int(config.get("oa", {}).get("challenge_ttl_seconds", 300)),
+                },
+            )
             print(summary)
             return 0
         save_result(result, results_root)

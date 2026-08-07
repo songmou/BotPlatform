@@ -11,6 +11,7 @@ from src.core.services.drive import DriveService
 from src.core.services.knowledge import KnowledgeService
 from src.core.storage.tenants import TenantRegistry
 from src.core.storage.database import Database
+from src.core.modeling.contracts import EmbeddingError
 
 
 class KnowledgeCategoryServiceTests(unittest.TestCase):
@@ -292,3 +293,140 @@ class KnowledgeCategoryServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeEmbedding:
+    """Minimal embedding client for tests with a configurable fingerprint."""
+
+    def __init__(
+        self, profile_id: str = "emb1", model: str = "fake-model",
+        dimensions: int = 8, fail: bool = False,
+    ) -> None:
+        self._model_id = profile_id
+        self.model = model
+        self._dimensions = dimensions
+        self.fail = fail
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    @property
+    def fingerprint(self) -> str:
+        return "{}@{}@{}".format(self._model_id, self.model, self._dimensions)
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def embed(self, texts):
+        if self.fail:
+            raise EmbeddingError("boom")
+        return [
+            [float((i + 1) % self._dimensions) for i in range(self._dimensions)]
+            for _ in texts
+        ]
+
+    def close(self) -> None:
+        pass
+
+
+class KnowledgeVectorizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.registry = TenantRegistry(self.root)
+        self.embedding = FakeEmbedding(dimensions=8)
+        self.service = KnowledgeService(self.registry, self.embedding)
+
+    def _embedding_rows(self, source_id):
+        with self.registry.database.read() as conn:
+            rows = conn.execute(
+                "SELECT e.dimensions, e.model_fingerprint FROM knowledge_embeddings e "
+                "JOIN knowledge_chunks c ON c.chunk_id=e.chunk_id "
+                "WHERE c.source_id=?", (source_id,)
+            ).fetchall()
+        return [(int(r["dimensions"]), r["model_fingerprint"]) for r in rows]
+
+    def _source_status(self, source_id):
+        with self.registry.database.read() as conn:
+            return conn.execute(
+                "SELECT status, last_error FROM knowledge_sources WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+
+    def test_add_text_stores_fingerprint_and_ready(self) -> None:
+        public = self.service.create_category("public", "公共")
+        result = self.service.add_text_to_category(
+            public["category_id"], "doc", "一段知识内容，用于验证向量指纹。"
+        )
+        self.assertEqual(result["status"], "ready")
+        rows = self._embedding_rows(result["source_id"])
+        self.assertTrue(rows)
+        for dim, fp in rows:
+            self.assertEqual(dim, 8)
+            self.assertEqual(fp, self.embedding.fingerprint)
+
+    def test_reembed_sources_forces_revectorize(self) -> None:
+        public = self.service.create_category("public", "公共")
+        result = self.service.add_text_to_category(
+            public["category_id"], "doc", "内容一。内容二。内容三。内容四段。"
+        )
+        source_id = result["source_id"]
+        # Switch to a different model (different dimensions -> different fingerprint).
+        service2 = KnowledgeService(self.registry, FakeEmbedding(dimensions=4))
+        out = service2.reembed_sources(None, [source_id])
+        self.assertEqual(out["completed"], 1)
+        self.assertEqual(out["chunks"], result["chunks"])
+        for dim, fp in self._embedding_rows(source_id):
+            self.assertEqual(dim, 4)
+            self.assertEqual(fp, service2.embedding.fingerprint)
+        health = service2.embedding_health(None)
+        self.assertEqual(health["stale"], 0)
+        self.assertEqual(health["total"], result["chunks"])
+
+    def test_reindex_force_overwrites_stale_vectors(self) -> None:
+        public = self.service.create_category("public", "公共")
+        result = self.service.add_text_to_category(
+            public["category_id"], "doc", "内容一。内容二。内容三。内容四段。"
+        )
+        service2 = KnowledgeService(self.registry, FakeEmbedding(dimensions=4))
+        out = service2.reindex(None, [public["category_id"]], force=True)
+        self.assertEqual(out["completed"], result["chunks"])
+        for dim, fp in self._embedding_rows(result["source_id"]):
+            self.assertEqual(dim, 4)
+            self.assertEqual(fp, service2.embedding.fingerprint)
+
+    def test_embedding_health_reports_stale_after_model_change(self) -> None:
+        public = self.service.create_category("public", "公共")
+        result = self.service.add_text_to_category(
+            public["category_id"], "doc", "内容一。内容二。内容三。内容四段。"
+        )
+        service2 = KnowledgeService(self.registry, FakeEmbedding(dimensions=4))
+        health = service2.embedding_health(None)
+        self.assertEqual(health["total"], result["chunks"])
+        self.assertEqual(health["stale"], result["chunks"])
+        self.assertNotEqual(health["current_fingerprint"], self.embedding.fingerprint)
+
+    def test_reembed_without_embedding_raises(self) -> None:
+        service_noemb = KnowledgeService(self.registry, None)
+        public = self.service.create_category("public", "公共")
+        result = self.service.add_text_to_category(public["category_id"], "doc", "内容。")
+        with self.assertRaises(ValueError):
+            service_noemb.reembed_sources(None, [result["source_id"]])
+
+    def test_failed_embedding_writes_last_error_and_pending(self) -> None:
+        failing = KnowledgeService(self.registry, FakeEmbedding(fail=True))
+        public = failing.create_category("public", "公共")
+        result = failing.add_text_to_category(public["category_id"], "doc", "内容。")
+        self.assertEqual(result["status"], "pending_embedding")
+        row = self._source_status(result["source_id"])
+        self.assertEqual(row["status"], "pending_embedding")
+        self.assertTrue(row["last_error"])
+        # Recover with a working embedding.
+        recovered = self.service.reembed_sources(None, [result["source_id"]])
+        self.assertEqual(recovered["completed"], 1)
+        row = self._source_status(result["source_id"])
+        self.assertEqual(row["status"], "ready")
+        self.assertIsNone(row["last_error"])

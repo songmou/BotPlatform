@@ -23,7 +23,12 @@ from src.core.modeling import (
 
 class FakeEmbedding:
     model_id = "fake-embedding"
+    model = "fake-embedding"
     dimensions = 4
+
+    @property
+    def fingerprint(self):
+        return "{}@{}@{}".format(self.model_id, self.model, self.dimensions)
 
     def embed(self, texts):
         vectors = []

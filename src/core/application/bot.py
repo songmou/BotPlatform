@@ -378,6 +378,57 @@ class MessageBot:
             reply,
         )
 
+    def _route_pending_script_input(
+        self,
+        message: InboundMessage,
+        tenant: Optional[TenantContext],
+        endpoint: Any,
+        user_id: str,
+        normalized_text: str,
+        image_item: Any,
+    ) -> bool:
+        """Route a reply to a script paused for user input.
+
+        When a script result declared ``await_input``, the platform registers a
+        pending input and the user's next direct reply is routed back to the
+        script's resume entry point instead of being handed to the model. Returns
+        ``True`` when the message was consumed by a pending script.
+        """
+        if (
+            message.conversation_type != DIRECT
+            or image_item
+            or tenant is None
+            or self.script_service is None
+        ):
+            return False
+        pending = self.script_service.peek_pending_input(tenant)
+        if pending is None:
+            return False
+        if normalized_text in {"取消", "/cancel"}:
+            self.script_service.clear_pending_input(tenant)
+            reply = "已取消等待 {} 的输入。".format(pending.script_name)
+            self._reply(endpoint, reply, tenant, record=False)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return True
+        if normalized_text.startswith("/"):
+            # 命令放行给大模型处理,保留 pending 不消费
+            return False
+        if not normalized_text:
+            reply = "不能为空,请回复图片中的字符。"
+            self._reply(endpoint, reply, tenant, record=False)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return True
+        self.script_service.consume_pending_input(tenant)
+        if self.conversation_store is not None:
+            self.conversation_store.record_user_message(
+                tenant.personal_tenant_id or tenant.tenant_id, normalized_text
+            )
+        self.script_service.resume_pending_input(tenant, pending, normalized_text)
+        reply = "正在用你提供的内容继续 {}…".format(pending.script_name)
+        self._reply(endpoint, reply, tenant, record=False)
+        self._log(self._direction("输出", endpoint), user_id, reply)
+        return True
+
     def handle_inbound(self, message: InboundMessage) -> None:
         if not self._accept_message(message):
             return
@@ -566,6 +617,9 @@ class MessageBot:
                 self._reply(endpoint, reply, tenant, record=False)
                 self._log(self._direction("输出", endpoint), user_id, reply)
                 return
+
+        if self._route_pending_script_input(message, tenant, endpoint, user_id, normalized_text, image_item):
+            return
 
         if text or image_item:
             transcript_input = text or self.agent_service.image_prompt

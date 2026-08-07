@@ -17,6 +17,7 @@
 
 .knowledge-context-bar {
     justify-content: space-between;
+    position: relative;
     margin-bottom: 12px;
 }
 
@@ -45,6 +46,103 @@
     font: 13px var(--font);
     max-width: 300px;
 }
+
+/* Knowledge base tabs: fill the remaining width of the context bar, with
+   overflow clipped; hidden tabs are reachable through the "更多" dropdown. */
+.knowledge-category-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+}
+
+.knowledge-category-tab {
+    flex: 0 0 auto;
+    max-width: 200px;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font: 13px var(--font);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    transition: border-color .15s, background .15s, color .15s;
+}
+
+.knowledge-category-tab:hover { border-color: var(--accent); }
+
+.knowledge-category-tab.active {
+    border-color: var(--accent);
+    background: var(--bg-secondary);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.knowledge-category-tab[hidden] { display: none; }
+
+/* "More" overflow control sits outside the clipped tab strip so its menu
+   is not cut off by overflow:hidden. */
+.knowledge-more-wrap {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.knowledge-more-btn {
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    font: 13px var(--font);
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.knowledge-more-btn:hover { border-color: var(--accent); }
+
+.knowledge-more-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    display: none;
+    margin-top: 6px;
+    min-width: 200px;
+    max-height: 320px;
+    overflow: auto;
+    padding: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+    z-index: 50;
+}
+
+.knowledge-more-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: var(--radius);
+    background: none;
+    color: var(--text);
+    font: 13px var(--font);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+.knowledge-more-menu button:hover { background: var(--bg-secondary); }
+.knowledge-more-menu button.active { color: var(--accent); font-weight: 600; }
+
+.knowledge-library-actions { margin-left: auto; }
 
 .knowledge-action-card {
     display: grid;
@@ -131,6 +229,25 @@
 .knowledge-status-badge.stale_modified,
 .knowledge-status-badge.source_missing,
 .knowledge-status-badge.failed { color: #b91c1c; background: #fee2e2; }
+
+/* Amber banner warning (e.g. stale vectors after a model change). */
+.status-card.status-warn {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #92400e;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.status-card.status-warn strong { color: #92400e; }
+
+.knowledge-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+}
 
 .knowledge-source-cell {
     display: flex;

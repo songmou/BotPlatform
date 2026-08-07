@@ -419,6 +419,31 @@ def platform_embedding_status(
     return _embedding_status(request)
 
 
+@router.post("/platform/knowledge/reembed")
+def reembed_platform_knowledge(
+    request: Request,
+    body: Dict[str, Any] = Body(...),
+    _principal=Depends(require_permission("knowledge.manage")),
+):
+    service = _knowledge(request)
+    source_ids = _validate_sources(service, body.get("source_ids") or [], "public", None)
+    try:
+        return service.reembed_sources(None, source_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/platform/knowledge/embedding-health")
+def platform_embedding_health(
+    request: Request,
+    category_id: Optional[str] = Query(default=None),
+    _principal=Depends(require_permission("knowledge.read")),
+):
+    return _knowledge(request).embedding_health(
+        None, [category_id] if category_id else None
+    )
+
+
 @router.post("/platform/knowledge/reindex")
 def reindex_platform_knowledge(
     request: Request,
@@ -427,10 +452,11 @@ def reindex_platform_knowledge(
 ):
     service = _knowledge(request)
     category_ids = body.get("category_ids")
+    force = bool(body.get("force", False))
     for category_id in category_ids or []:
         _category(service, str(category_id), "public", None)
     try:
-        return service.reindex(None, category_ids)
+        return service.reindex(None, category_ids, force=force)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -622,6 +648,39 @@ def organization_embedding_status(
     return _embedding_status(request)
 
 
+@router.post("/orgs/{organization_id}/knowledge/reembed")
+def reembed_organization_knowledge(
+    organization_id: str,
+    request: Request,
+    body: Dict[str, Any] = Body(...),
+    principal=Depends(get_principal),
+):
+    context = _organization(request, principal, organization_id)
+    service = _knowledge(request)
+    source_ids = _validate_sources(
+        service, body.get("source_ids") or [], "tenant", organization_id
+    )
+    for source_id in source_ids:
+        _require_content_manager(request, context, "knowledge_source", source_id)
+    try:
+        return service.reembed_sources(organization_id, source_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/orgs/{organization_id}/knowledge/embedding-health")
+def organization_embedding_health(
+    organization_id: str,
+    request: Request,
+    category_id: Optional[str] = Query(default=None),
+    principal=Depends(get_principal),
+):
+    _organization(request, principal, organization_id)
+    return _knowledge(request).embedding_health(
+        organization_id, [category_id] if category_id else None
+    )
+
+
 @router.post("/orgs/{organization_id}/knowledge/reindex")
 def reindex_organization_knowledge(
     organization_id: str,
@@ -632,10 +691,11 @@ def reindex_organization_knowledge(
     _organization(request, principal, organization_id)
     service = _knowledge(request)
     category_ids = body.get("category_ids")
+    force = bool(body.get("force", False))
     for category_id in category_ids or []:
         _organization_writable_category(service, str(category_id), organization_id)
     try:
-        return service.reindex(organization_id, category_ids)
+        return service.reindex(organization_id, category_ids, force=force)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

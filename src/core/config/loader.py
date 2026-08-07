@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -158,8 +158,16 @@ class ChannelConfig:
     settings: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass
 class AppConfig:
+    """Application-level bindings.
+
+    Deliberately NOT frozen: runtime model routing changes (primary/fallback/
+    vision bindings) must be visible to holders that captured the object by
+    reference (notably ``AgentService.app_config``). ``ProjectConfig.update_app``
+    is the only sanctioned write entry point.
+    """
+
     default_agent: str
     timezone: str
     history_rounds: int
@@ -321,6 +329,18 @@ class ProjectConfig:
     datasources: List[Dict[str, Any]] = field(default_factory=list)
     channels: Dict[str, ChannelConfig] = field(default_factory=dict)
 
+    def update_app(self, new_app: "AppConfig") -> None:
+        """Apply an application-level binding update in place.
+
+        Mirrors the ``update_skills`` contract: the ``AppConfig`` object
+        identity is preserved so holders that captured it by reference
+        (AgentService, routers) observe the change immediately.
+        """
+        if not isinstance(new_app, AppConfig):
+            raise ConfigError("运行时 app 更新必须提供 AppConfig 对象")
+        for spec in fields(AppConfig):
+            setattr(self.app, spec.name, getattr(new_app, spec.name))
+
     def update_skills(self, skills: List[Dict[str, Any]]) -> None:
         """Validate and apply a runtime skills update.
 
@@ -341,6 +361,20 @@ class ProjectConfig:
         self.datasources[:] = validate_datasource_entries(
             entries, "运行时 datasources 更新"
         )
+
+    def update_models(self, models: "Dict[str, ModelProfile]") -> None:
+        """Apply a runtime model registry update in place.
+
+        The dict object is mutated in place so every holder of the original
+        reference observes the change without bypassing the frozen dataclass
+        contract.  Used by the catalog activation path so a model create /
+        edit reflected in the catalog is also visible to routing candidates
+        and embedding / rerank binding validation.
+        """
+        if not isinstance(models, dict):
+            raise ConfigError("运行时 models 更新必须提供字典")
+        self.models.clear()
+        self.models.update(models)
 
     @property
     def active_agent(self) -> AgentPreset:
@@ -689,11 +723,15 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
             raise _error(path, field_base + ".timeout_seconds", "必须在 0 到 600 之间")
         api_key_env = raw.get("api_key_env")
         if adapter_type == "openai_compatible":
-            if not isinstance(api_key_env, str) or not api_key_env.strip():
-                raise _error(
-                    path, field_base + ".api_key_env", "必须是非空环境变量名"
-                )
-            api_key_env = api_key_env.strip()
+            # The API key may instead be provided through the web panel, which
+            # stores it in the keychain keyed by profile id; a keychain-backed
+            # profile has no api_key_env. Require the field only when present.
+            if api_key_env is not None:
+                if not isinstance(api_key_env, str) or not api_key_env.strip():
+                    raise _error(
+                        path, field_base + ".api_key_env", "必须是非空环境变量名"
+                    )
+                api_key_env = api_key_env.strip()
         elif api_key_env is not None:
             raise _error(path, field_base + ".api_key_env", "仅云端兼容档案可配置")
         if adapter_type == "ollama":

@@ -95,7 +95,7 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 - `/api/v2/catalog/*`：可见公共目录；
 - `/api/v2/platform/knowledge/*`、`/api/v2/platform/drive/*`：平台公共知识与公共文件；
 - `/api/v2/orgs/{organization_id}/agents|channels|schedules|knowledge|drive|members|analytics|audit`：类型化组织能力；
-- `/api/v2/platform/catalog/{type}/{id}/draft|publish|rollback|activation`：平台目录版本与激活；
+- `/api/v2/platform/catalog/{type}/{id}/activation`：平台目录激活；
 - `/api/v2/platform/*`：组织管理和平台审计。
 
 统一控制台首页 `/` 对平台管理员进入 `/platform`，组织账号进入

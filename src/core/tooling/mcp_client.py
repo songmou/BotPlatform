@@ -51,6 +51,22 @@ def _is_disconnected(exc: BaseException) -> bool:
     return False
 
 
+def _format_mcp_error(exc: BaseException) -> str:
+    """Unwrap anyio/exceptiongroup ExceptionGroups into a readable message.
+
+    The MCP SDK runs transport reader/writer tasks inside an anyio TaskGroup;
+    when the handshake fails the real error is wrapped in an ExceptionGroup
+    whose ``str()`` only shows "unhandled errors in a TaskGroup (N
+    sub-exceptions)". Recurse into ``exc.exceptions`` so operators see the
+    underlying cause (e.g. the real HTTP 401 from the remote server).
+    """
+    exceptions = getattr(exc, "exceptions", None)
+    if exceptions:
+        inner = "; ".join(_format_mcp_error(sub) for sub in exceptions)
+        return "{}: {}".format(type(exc).__name__, inner)
+    return str(exc) or type(exc).__name__
+
+
 class _Connection:
     """A live MCP session plus the tools discovered on one server.
 
@@ -144,7 +160,9 @@ class McpClientManager:
                 try:
                     self._connect_locked(cfg)
                 except Exception as exc:  # noqa: BLE001 - keep other servers alive
-                    logger.warning("MCP 服务 %s 连接失败：%s", sid, exc)
+                    logger.warning(
+                        "MCP 服务 %s 连接失败：%s", sid, _format_mcp_error(exc), exc_info=exc
+                    )
 
     def connect_server(self, cfg: Dict[str, Any]) -> List[str]:
         with self._lock:
@@ -330,7 +348,9 @@ class McpClientManager:
             ).result(timeout=10)
             conn.task_future.result(timeout=10)
         except Exception as exc:  # noqa: BLE001 - best effort
-            logger.warning("关闭 MCP 服务 %s 失败：%s", server_id, exc)
+            logger.warning(
+                "关闭 MCP 服务 %s 失败：%s", server_id, _format_mcp_error(exc), exc_info=exc
+            )
             conn.task_future.cancel()
 
     async def _call(self, session: Any, real_name: str, arguments: Dict[str, Any]) -> Any:

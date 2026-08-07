@@ -25,7 +25,10 @@
                     <h2>MCP 服务</h2>
                     <p class="page-desc">管理 Model Context Protocol 外部服务</p>
                 </div>
-                <button id="create-mcp-btn" class="btn-primary">+ 添加服务</button>
+                <div class="page-header-actions">
+                    <button id="create-mcp-btn" class="btn-primary">+ 添加服务</button>
+                    <button id="create-mcp-from-template-btn" class="btn-secondary">从模板创建</button>
+                </div>
             </div>
         </div>
         <div id="mcp-list" class="plugin-card-grid"></div>
@@ -233,6 +236,11 @@
                     <textarea id="mcp-headers" rows="2" placeholder='如 {"Authorization": "Bearer <token>"}'></textarea>
                     <small>用于鉴权等自定义请求头，JSON 键值对格式</small>
                 </div>
+                <div class="form-group" id="mcp-secret-group" style="display:none">
+                    <label for="mcp-secret-value" id="mcp-secret-label">密钥</label>
+                    <input type="password" id="mcp-secret-value" placeholder="填写 Token / 密钥" autocomplete="off">
+                    <small id="mcp-secret-help"></small>
+                </div>
             </div>
             <div class="form-group">
                 <label class="checkbox-label"><input type="checkbox" id="mcp-enabled" checked> 启用</label>
@@ -244,9 +252,23 @@
         </form>
     </div>
 </div>
+
+<!-- MCP 模板选择器 -->
+<div id="mcp-template-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3>从模板创建 MCP 服务</h3>
+            <button id="mcp-template-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="page-desc">选择一个预设服务，系统会自动填好固定配置，你只需补全密钥即可创建实例。</p>
+            <div id="mcp-template-list" class="plugin-card-grid"></div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>window.BP_INITIAL_TOOLS_TAB = {{ tools_tab|default('builtin')|tojson }};</script>
-<script src="/static/js/tools.js?v=20260803b"></script>
+<script src="/static/js/tools.js?v=20260806a"></script>
 <script>initTools();</script>
 {% endblock %}

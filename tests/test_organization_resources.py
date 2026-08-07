@@ -8,6 +8,7 @@ import unittest.mock as _mock_um
 import json
 import sqlite3
 from contextlib import closing
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -56,6 +57,43 @@ class OrganizationResourceApiTest(WebApiTestBase):
             payload["organization"]["organization_id"],
             anonymous,
         )
+
+    def test_platform_catalog_mcp_headers_stored_in_keychain(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from src.core.config import mcp_headers as mh
+
+        keychain_file = Path(tempfile.mkdtemp()) / "mcp_headers.json"
+        with patch.object(mh, "MCP_HEADERS_FILE", keychain_file):
+            saved = self.client.put(
+                "/api/v2/platform/catalog/mcp/secret_svc",
+                json={"payload": {
+                    "id": "secret_svc",
+                    "name": "带鉴权 MCP",
+                    "transport": "streamablehttp",
+                    "url": "https://mcp.example.com",
+                    "headers": {"Authorization": "Bearer topsecret"},
+                }},
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            # Secret must NOT be echoed back in the stored catalog payload.
+            got = self.client.get("/api/v2/platform/catalog/mcp/secret_svc")
+            self.assertEqual(got.status_code, 200, got.text)
+            self.assertEqual(got.json()["payload"].get("headers"), {})
+            # Secret lives in the keychain, merged back at read time.
+            self.assertEqual(
+                mh.load_headers("secret_svc"),
+                {"Authorization": "Bearer topsecret"},
+            )
+            # Deleting the resource cleans up its keychain entry.
+            deleted = self.client.delete(
+                "/api/v2/platform/catalog/mcp/secret_svc"
+            )
+            self.assertEqual(deleted.status_code, 200, deleted.text)
+            self.assertEqual(mh.load_headers("secret_svc"), {})
 
     def _invite_member(
         self, owner: TestClient, organization_id: str, suffix: str, role="member"
@@ -629,6 +667,29 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(runs[0]["status"], "skipped")
         self.assertIn("没有有效", runs[0]["detail"])
 
+    def test_member_can_trigger_schedule_run_now(self):
+        # The "execute" button on the schedules page is gated by
+        # canWriteOrganization() (collaborate permission), so a regular member
+        # must be allowed to POST the run-now endpoint (no admin role required).
+        org_id, owner = self._create_owner("schedule-run-member")
+        owner.put(
+            "/api/v2/orgs/{}/schedules/morning".format(org_id),
+            json={
+                "enabled": True,
+                "crons": ["0 9 * * *"],
+                "action": {"type": "text", "content": "早上好"},
+            },
+        )
+        member = self._invite_member(owner, org_id, "runner")
+        scheduler = MagicMock()
+        scheduler.run_organization_schedule.return_value = True
+        self.app.state.scheduler = scheduler
+        triggered = member.post(
+            "/api/v2/orgs/{}/schedules/morning/run".format(org_id)
+        )
+        self.assertEqual(triggered.status_code, 200, triggered.text)
+        self.assertTrue(triggered.json()["ok"])
+
     def test_last_enabled_agent_is_preserved_and_default_moves(self):
         org_id, owner = self._create_owner("agents-invariant")
         last = owner.patch(
@@ -743,7 +804,9 @@ class OrganizationResourceApiTest(WebApiTestBase):
 
     def test_resource_payload_rejects_secrets_and_local_mcp(self):
         org_id, owner = self._create_owner("secure-resource")
-        secret = self.client.put(
+        # A model API key is now a sanctioned field: it is accepted, stashed in
+        # the keychain, and never echoed back in any response.
+        stored = self.client.put(
             "/api/v2/platform/catalog/models/private",
             json={
                 "payload": {
@@ -753,7 +816,27 @@ class OrganizationResourceApiTest(WebApiTestBase):
                 }
             },
         )
-        self.assertEqual(secret.status_code, 400)
+        self.assertEqual(stored.status_code, 200, stored.text)
+        self.assertNotIn("should-not-be-stored", stored.text)
+        fetched = self.client.get(
+            "/api/v2/platform/catalog/models/private"
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertNotIn("should-not-be-stored", fetched.text)
+        self.assertTrue(fetched.json()["payload"].get("api_key_set"))
+
+        # Unsanctioned secret fields are still rejected.
+        leaky = self.client.put(
+            "/api/v2/platform/catalog/models/leaky",
+            json={
+                "payload": {
+                    "name": "泄漏模型",
+                    "base_url": "https://models.example.com",
+                    "token": "leaked-token",
+                }
+            },
+        )
+        self.assertEqual(leaky.status_code, 400, leaky.text)
         removed = owner.put(
             "/api/v2/orgs/{}/resources/mcp/remote".format(org_id),
             json={

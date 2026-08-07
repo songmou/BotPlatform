@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 35
+LATEST_SCHEMA_VERSION = 37
 
 
 SCHEMA_V1 = r"""

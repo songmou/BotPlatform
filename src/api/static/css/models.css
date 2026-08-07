@@ -283,26 +283,30 @@
 .model-editor-modal {
     width: min(880px, calc(100vw - 32px));
     max-width: 880px;
+    height: 92vh;
     max-height: 92vh;
 }
 
 .model-editor-modal .modal-header {
     flex: 0 0 auto;
     padding-bottom: 16px;
-    border-bottom: 1px solid var(--border);
+    /* border-bottom: 1px solid var(--border); */
 }
 
 .model-editor-modal #model-form {
+    flex: 1 1 auto;
+    min-height: 0;          /* allow the form to shrink below content size within the fixed-height dialog */
+    overflow-y: auto;       /* sole scroll region: tab content scrolls here */
     padding-top: 0;
 }
 
 /* Editor sub-tabs inside the modal */
 .model-editor-modal .editor-tabs {
     position: sticky;
-    top: -20px;
+    top: 0;                 /* pinned to the top of the scrolling body, never bleeds under the header */
     z-index: 5;
-    margin: -20px -24px 20px;
-    padding: 6px 24px 0;
+    margin: 0 -24px 16px;
+    padding: 0 24px 0px;
     background: var(--bg);
 }
 
@@ -338,12 +342,7 @@
 }
 
 .model-editor-modal .modal-footer {
-    position: sticky;
-    bottom: -20px;
-    margin: 20px -24px -20px;
-    padding: 16px 24px 20px;
-    border-top: 1px solid var(--border);
-    background: var(--bg);
+    flex-shrink: 0;          /* pinned to the bottom of the dialog as a flex sibling of the form */
 }
 
 .analytics-toolbar,

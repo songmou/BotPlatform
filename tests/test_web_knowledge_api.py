@@ -181,40 +181,6 @@ class KnowledgeApiTest(WebApiTestBase):
             403,
         )
 
-    def test_category_crud_agent_binding_and_non_empty_conflict(self):
-        created = self.client.post(
-            "/api/knowledge/categories",
-            json={
-                "scope": "tenant",
-                "tenant_id": self.tenant.tenant_id,
-                "name": "产品知识",
-                "description": "产品领域",
-            },
-        )
-        self.assertEqual(created.status_code, 201, created.text)
-        category_id = created.json()["category_id"]
-        agent_id = next(iter(self.config.agents))
-        bound = self.client.put(
-            "/api/agents/{}/knowledge-categories".format(agent_id),
-            json={"category_ids": [category_id]},
-        )
-        self.assertEqual(bound.status_code, 200, bound.text)
-        self.assertEqual(bound.json()["category_ids"], [category_id])
-
-        added = self.client.post(
-            "/api/knowledge/text",
-            json={
-                "tenant_id": self.tenant.tenant_id,
-                "category_id": category_id,
-                "name": "手册",
-                "content": "产品知识内容",
-            },
-        )
-        self.assertEqual(added.status_code, 200, added.text)
-        conflict = self.client.delete(
-            "/api/knowledge/categories/{}".format(category_id)
-        )
-        self.assertEqual(conflict.status_code, 409, conflict.text)
 
     def test_import_public_drive_file_and_query_links(self):
         category = self.client.post(

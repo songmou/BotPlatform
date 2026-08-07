@@ -16,21 +16,16 @@ from src.api.auth import (
 )
 from src.api.routers import (
     admins,
-    agents,
     auth,
-    bots,
     chat,
     connections,
     content_v2,
     datasources,
     drive,
     knowledge,
-    models,
-    mcp,
+    platform_runtime,
     plugins,
     scripts,
-    schedules,
-    skills,
     system,
     tenants,
     model_analytics,
@@ -208,37 +203,89 @@ def create_app(config, model_router, registry, conversation_store,
                     manager.reload(values)
                 return
             if resource_type == "models":
+                from src.core.modeling.factory import create_model_client
+                from src.core.services.resources import _model_from_payload
+
                 if payload is None:
+                    config.models.pop(resource_id, None)
                     previous = model_router.clients.pop(resource_id, None)
                     if previous is not None:
                         previous.close()
                     return
-                from src.core.modeling.factory import create_model_client
-                from src.core.services.resources import _model_from_payload
-
-                profile = _model_from_payload(resource_id, payload)
-                if profile.modality != "chat":
-                    raise RuntimeError("向量或重排模型需要重启后生效")
-                replacement = None
-                if profile.enabled:
-                    logger = (
+                # Rebuild the full model registry in place so config.models
+                # reflects every persisted payload (routing candidates and
+                # embedding / rerank binding validation read it).  Non-chat
+                # modalities require a restart (enforced by _requires_restart)
+                # and are dropped from the live client pool here.
+                profiles = {}
+                for item in resource_store.list_public("models"):
+                    try:
+                        profiles[item["resource_id"]] = _model_from_payload(
+                            item["resource_id"], item["payload"]
+                        )
+                    except Exception:
+                        logger.warning(
+                            "跳过无法解析的模型档案 %s", item["resource_id"], exc_info=True
+                        )
+                config.update_models(profiles)
+                profile = profiles.get(resource_id)
+                if profile is None:
+                    return
+                previous = model_router.clients.get(resource_id)
+                if profile.modality == "chat" and profile.enabled:
+                    analytics = (
                         model_analytics_store.record_model_call
                         if model_analytics_store is not None
                         else None
                     )
-                    replacement = create_model_client(profile, logger=logger)
-                previous = model_router.clients.get(resource_id)
-                if replacement is None:
-                    model_router.clients.pop(resource_id, None)
+                    try:
+                        model_router.clients[resource_id] = create_model_client(
+                            profile, logger=analytics
+                        )
+                    except Exception:  # noqa: BLE001 - profile saved; client stays offline
+                        logger.warning("重建模型客户端 %s 失败", resource_id, exc_info=True)
                 else:
-                    model_router.clients[resource_id] = replacement
-                if previous is not None:
+                    model_router.clients.pop(resource_id, None)
+                if previous is not None and previous is not model_router.clients.get(resource_id):
                     previous.close()
                 return
             if resource_type == "tools" and tool_runtime is not None:
                 from src.core.config.loader import ToolConfig
 
                 tool_runtime.reload_config(ToolConfig(**dict(payload)))
+                return
+            if resource_type == "settings" and resource_id == "runtime":
+                from src.core.config.loader import AppConfig
+
+                if payload is None:
+                    raise RuntimeError("运行时设置不可删除")
+                new_app = AppConfig(**dict(payload))
+                for attribute, label in (
+                    ("active_model", "主"),
+                    ("fallback_model", "兜底"),
+                    ("local_model", "本地"),
+                    ("flash_model", "Flash"),
+                    ("pro_model", "Pro"),
+                    ("vision_model", "视觉"),
+                ):
+                    profile_id = getattr(new_app, attribute, "")
+                    if profile_id and profile_id not in model_router.clients:
+                        raise RuntimeError(
+                            "{}模型 {} 未启用或不存在".format(label, profile_id)
+                        )
+                # Validate before mutating so a failed activation leaves the
+                # running config untouched (publish() rolls back on raise).
+                model_router.rebind(
+                    primary=new_app.active_model,
+                    fallback=new_app.fallback_model or new_app.active_model,
+                    local=new_app.local_model or None,
+                    flash=new_app.flash_model or None,
+                    pro=new_app.pro_model or None,
+                    vision=new_app.vision_model or None,
+                    cooldown_seconds=new_app.fallback_cooldown_seconds,
+                )
+                config.update_app(new_app)
+                return
 
         resource_store.set_activation_handler(activate_platform_resource)
     if drive_service is not None and knowledge_service is not None:
@@ -257,24 +304,19 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(auth.router)
     app.include_router(system.router)
     app.include_router(content_v2.router)
-    app.include_router(models.router)
     app.include_router(model_analytics.router)
-    app.include_router(agents.router)
     app.include_router(chat.router)
     app.include_router(knowledge.router)
     app.include_router(drive.router)
-    app.include_router(schedules.router)
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
     app.include_router(connections.router)
-    app.include_router(bots.channels_router)
-    app.include_router(skills.router)
     app.include_router(scripts.router)
-    app.include_router(mcp.router)
     app.include_router(datasources.router)
     app.include_router(tenants.router)
     app.include_router(admins.router)
     app.include_router(tenant_env.router)
     app.include_router(v2.router)
+    app.include_router(platform_runtime.router)
 
     return app

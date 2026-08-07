@@ -104,13 +104,6 @@
     gap: 10px;
     padding: 12px;
 }
-#agent-form .agent-tools-section > .tool-checkboxes,
-#agent-form .agent-tools-section > .tool-plugin-groups,
-#organization-agent-form .organization-agent-panel > .tool-checkboxes,
-#organization-agent-form .organization-agent-panel > .tool-plugin-groups {
-    max-height: min(52vh, 520px);
-    overflow-y: auto;
-}
 .tool-checkboxes.tool-checkboxes-nested {
     padding: 0;
 }
@@ -214,4 +207,34 @@
 }
 .agent-tab-panel > .form-group:first-child {
     margin-top: 0;
+}
+
+/* ===== Agent create/edit dialog: fixed-size modal layout =====
+   Fixes the bug where a long tool list in #agent-form overlapped the top
+   tab bar; the header + tab bar are pinned at top, the tab content scrolls
+   inside a fixed-height body, and the 取消/保存 footer is pinned to bottom.
+   Reuses the proven sticky-footer pattern from models.css. */
+.agent-dialog {
+    height: 85vh;
+    max-height: 85vh;
+}
+.agent-dialog .modal-header,
+.agent-dialog > .tab-bar {
+    flex-shrink: 0;
+}
+.agent-dialog #agent-form,
+.agent-dialog #organization-agent-form {
+    flex: 1 1 auto;
+    min-height: 0;          /* allow the flex item to shrink below content size */
+    overflow-y: auto;       /* sole scroll region: tab content scrolls here */
+}
+.agent-dialog > .tab-bar.agent-modal-tabs,
+.agent-dialog > .tab-bar.organization-agent-tabs {
+    position: static;       /* was a no-op sticky outside the scroll container */
+    margin: 12px 24px 0;
+    background: var(--bg);
+    z-index: 5;
+}
+.agent-dialog .modal-footer {
+    flex-shrink: 0;          /* pinned to the bottom of the dialog as a flex sibling */
 }

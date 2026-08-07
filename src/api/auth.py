@@ -129,15 +129,6 @@ class OrganizationAuditMiddleware(BaseHTTPMiddleware):
 
 
 class SessionAuthMiddleware(BaseHTTPMiddleware):
-    _RETIRED_CONFIG_PREFIXES = (
-        "/api/models",
-        "/api/agents",
-        "/api/skills",
-        "/api/mcp",
-        "/api/channels",
-        "/api/schedules",
-    )
-
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if _is_open(path):
@@ -168,23 +159,4 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
             )
 
         request.state.principal = principal
-        if (
-            request.method in {"POST", "PUT", "PATCH", "DELETE"}
-            and not bool(
-                getattr(request.app.state, "allow_legacy_config_writes", False)
-            )
-            and any(
-                path == prefix or path.startswith(prefix + "/")
-                for prefix in self._RETIRED_CONFIG_PREFIXES
-            )
-        ):
-            return JSONResponse(
-                {
-                    "detail": (
-                        "旧配置写入接口已停用，请使用 "
-                        "/api/v2/platform/catalog 的草稿与发布接口"
-                    )
-                },
-                status_code=410,
-            )
         return await call_next(request)

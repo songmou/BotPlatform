@@ -1,0 +1,161 @@
+{
+  "templates": [
+    {
+      "key": "tencent_docs",
+      "name": "腾讯文档",
+      "description": "创建/查询/编辑在线文档、表格、幻灯片、思维导图、流程图、智能文档（SmartCanvas）等",
+      "category": "文档协作",
+      "transport": "streamablehttp",
+      "url": "https://docs.qq.com/openapi/mcp",
+      "icon": "tencent-docs",
+      "auth": {
+        "kind": "header",
+        "key": "Authorization",
+        "label": "Token",
+        "secret": true,
+        "placeholder": "粘贴从 https://docs.qq.com/open/auth/mcp.html 获取的个人 Token",
+        "help": "请求头名称固定为 Authorization，值为你的个人 Token。获取地址：https://docs.qq.com/open/auth/mcp.html"
+      },
+      "help_url": "https://docs.qq.com/open/auth/mcp.html"
+    },
+    {
+      "key": "feishu",
+      "name": "飞书",
+      "description": "通过飞书 MCP 访问云文档、多维表格、消息与通讯录等开放能力",
+      "category": "文档协作",
+      "transport": "streamablehttp",
+      "url": "https://mcp.feishu.cn",
+      "icon": "feishu",
+      "auth": {
+        "kind": "header",
+        "key": "Authorization",
+        "label": "App Token",
+        "secret": true,
+        "placeholder": "粘贴飞书开放平台获取的访问凭证",
+        "help": "URL 为飞书官方默认地址，若不可用请在创建时修改。凭证请从飞书开放平台（open.feishu.cn）应用凭证页获取。"
+      },
+      "help_url": "https://open.feishu.cn/"
+    },
+    {
+      "key": "dingtalk",
+      "name": "钉钉",
+      "description": "通过钉钉 MCP 调用工作通知、审批、宜搭与文档等能力",
+      "category": "办公协同",
+      "transport": "streamablehttp",
+      "url": "https://mcp.dingtalk.com",
+      "icon": "dingtalk",
+      "auth": {
+        "kind": "header",
+        "key": "Authorization",
+        "label": "Access Token",
+        "secret": true,
+        "placeholder": "粘贴钉钉开放平台获取的凭证",
+        "help": "URL 为钉钉官方默认地址，若不可用请在创建时修改。凭证请从钉钉开放平台（open.dingtalk.com）获取。"
+      },
+      "help_url": "https://open.dingtalk.com/"
+    },
+    {
+      "key": "notion",
+      "name": "Notion",
+      "description": "通过 Notion MCP 读写工作区页面与数据库（本地 stdio 启动）",
+      "category": "文档协作",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "auth": {
+        "kind": "env",
+        "key": "NOTION_TOKEN",
+        "label": "Integration Token",
+        "secret": true,
+        "placeholder": "ntn_...",
+        "help": "在 Notion → Settings → Integrations 创建内部集成并复制 Token（以 ntn_ 开头），确保已将集成连接到目标页面/数据库。"
+      },
+      "help_url": "https://developers.notion.com/docs/mcp"
+    },
+    {
+      "key": "slack",
+      "name": "Slack",
+      "description": "通过 Slack MCP 查询频道、消息与发送通知",
+      "category": "办公协同",
+      "transport": "streamablehttp",
+      "url": "https://mcp.slack.com/mcp",
+      "icon": "slack",
+      "auth": {
+        "kind": "header",
+        "key": "Authorization",
+        "label": "Bot Token",
+        "secret": true,
+        "placeholder": "xoxb-...",
+        "help": "Authorization 头填写 xoxb- 开头的 Bot Token。URL 为 Slack 官方默认地址，若不可用请修改。"
+      },
+      "help_url": "https://api.slack.com/mcp"
+    },
+    {
+      "key": "github",
+      "name": "GitHub",
+      "description": "通过官方 GitHub MCP Server 管理仓库、Issue、Pull Request 与代码搜索（本地 stdio 启动）",
+      "category": "研发工具",
+      "transport": "stdio",
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+      "icon": "github",
+      "auth": {
+        "kind": "env",
+        "key": "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "label": "Personal Access Token",
+        "secret": true,
+        "placeholder": "ghp_...",
+        "help": "需要本机 Docker 运行环境。Token 在 GitHub → Settings → Developer settings → Personal access tokens 创建，按所需权限（repo、read:org 等）授权。创建后可在「编辑配置」中改用 npx 方式运行。"
+      },
+      "help_url": "https://github.com/github/github-mcp-server"
+    },
+    {
+      "key": "playwright",
+      "name": "Playwright",
+      "description": "通过 Playwright 控制浏览器，实现网页自动化、截图、表单填写与端到端测试（本地 stdio 启动）",
+      "category": "研发工具",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "icon": "playwright",
+      "help_url": "https://github.com/microsoft/playwright-mcp"
+    },
+    {
+      "key": "baidu_ai_search",
+      "name": "百度AI搜索",
+      "description": "基于百度搜索与 AI 的实时搜索与智能总结能力",
+      "category": "信息检索",
+      "transport": "streamablehttp",
+      "url": "https://qianfan.baidubce.com/v2/ai_search/mcp",
+      "icon": "baidu",
+      "auth": {
+        "kind": "header",
+        "key": "Authorization",
+        "label": "API Key",
+        "secret": true,
+        "prefix": "Bearer ",
+        "placeholder": "粘贴 AppBuilder API Key（系统自动补全 Bearer 前缀）",
+        "help": "Authorization 头为 Bearer <API Key>，系统会自动补 Bearer 前缀。API Key 即 AppBuilder API Key，在百度智能云控制台（console.bce.baidu.com/iam/#/iam/apikey/list）获取。"
+      },
+      "help_url": "https://console.bce.baidu.com/iam/#/iam/apikey/list"
+    },
+    {
+      "key": "amap",
+      "name": "高德地图",
+      "description": "通过高德地图 MCP 提供地理编码、路径规划、POI 搜索、天气与地图可视化能力",
+      "category": "地图导航",
+      "transport": "streamablehttp",
+      "url": "https://mcp.amap.com/mcp",
+      "icon": "amap",
+      "auth": {
+        "kind": "query",
+        "key": "key",
+        "label": "API Key",
+        "secret": true,
+        "placeholder": "粘贴高德开放平台申请的 Key",
+        "help": "Key 作为 URL 查询参数自动追加（?key=...），这是高德官方推荐的接入方式。Key 在高德开放平台（developer.amap.com）创建应用后申请。"
+      },
+      "help_url": "https://developer.amap.com/api/mcp-server/gettingstarted"
+    }
+  ]
+}

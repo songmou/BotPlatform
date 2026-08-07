@@ -392,6 +392,36 @@ class ConversationStore:
                 )
         return True
 
+    def record_user_message(self, tenant_id: str, content: str) -> None:
+        """Persist a user reply (e.g. script input) into short-term LLM context."""
+        if not isinstance(content, str) or not content.strip():
+            raise TenantStoreError("用户消息上下文格式无效")
+        now = _utc_now()
+        with self.lock_for(tenant_id):
+            with self.registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT INTO conversation_context_messages"
+                    "(tenant_id, role, content, created_at, session_key) "
+                    "VALUES (?, 'user', ?, ?, 'direct')",
+                    (tenant_id, content, now),
+                )
+                connection.execute(
+                    "DELETE FROM conversation_context_messages "
+                    "WHERE tenant_id=? AND session_key='direct' "
+                    "AND message_id NOT IN ("
+                    "SELECT message_id FROM conversation_context_messages "
+                    "WHERE tenant_id=? AND session_key='direct' "
+                    "ORDER BY message_id DESC LIMIT ?"
+                    ")",
+                    (tenant_id, tenant_id, self.max_messages),
+                )
+                connection.execute(
+                    "INSERT INTO conversation_events"
+                    "(tenant_id, role, content, image, event_type, created_at, "
+                    "session_key) VALUES (?, 'user', ?, 0, 'message', ?, 'direct')",
+                    (tenant_id, content, now),
+                )
+
     def append_transcript(
         self,
         tenant_id: str,

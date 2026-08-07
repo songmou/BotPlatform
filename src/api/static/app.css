@@ -30,6 +30,26 @@
     --card-padding: 20px;
     --sidebar-width: 220px;
     --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    /* Sidebar theme (light default; coordinates with main content) */
+    --sidebar-bg: #f8fafc;
+    --sidebar-border: #e6e8ec;
+    --sidebar-text: #475569;
+    --sidebar-text-strong: #0f172a;
+    --sidebar-text-muted: #94a3b8;
+    --sidebar-hover-bg: #f1f2f6;
+    --sidebar-hover-text: #0f172a;
+    --sidebar-active-bg: #eef0ff;
+    --sidebar-active-text: #4353ff;
+    --sidebar-active-bar: #4353ff;
+    --sidebar-badge-bg: #f1f2f6;
+    --sidebar-badge-text: #475569;
+    --sidebar-badge-border: #e6e8ec;
+    --sidebar-scope-bg: #eef1f5;
+    --sidebar-scope-border: #e6e8ec;
+    --sidebar-scope-inactive-text: #64748b;
+    --sidebar-scope-active-bg: linear-gradient(135deg, #6573e6 0%, #8f78dc 100%);
+    --sidebar-scope-active-text: #ffffff;
+    --sidebar-logo-gradient: linear-gradient(135deg, #6573e6 0%, #8f78dc 100%);
 }
 
 [data-theme="dark"] {
@@ -48,6 +68,26 @@
     --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.45), 0 2px 4px -2px rgba(0, 0, 0, 0.35);
     --shadow-lg: 0 12px 20px -6px rgba(0, 0, 0, 0.55), 0 6px 8px -6px rgba(0, 0, 0, 0.4);
+    /* Sidebar theme (dark mode: business deep-blue, switched together with content) */
+    --sidebar-bg: #1b1f2e;
+    --sidebar-border: rgba(255, 255, 255, 0.07);
+    --sidebar-text: #cbd5e1;
+    --sidebar-text-strong: #ffffff;
+    --sidebar-text-muted: #94a3b8;
+    --sidebar-hover-bg: rgba(255, 255, 255, 0.06);
+    --sidebar-hover-text: #ffffff;
+    --sidebar-active-bg: rgba(91, 106, 255, 0.16);
+    --sidebar-active-text: #ffffff;
+    --sidebar-active-bar: var(--grad-accent);
+    --sidebar-badge-bg: rgba(255, 255, 255, 0.08);
+    --sidebar-badge-text: #cbd5e1;
+    --sidebar-badge-border: rgba(255, 255, 255, 0.12);
+    --sidebar-scope-bg: rgba(9, 14, 29, 0.24);
+    --sidebar-scope-border: rgba(255, 255, 255, 0.08);
+    --sidebar-scope-inactive-text: #94a3b8;
+    --sidebar-scope-active-bg: linear-gradient(135deg, rgba(101, 115, 230, 0.92), rgba(143, 120, 220, 0.88));
+    --sidebar-scope-active-text: #ffffff;
+    --sidebar-logo-gradient: linear-gradient(135deg, #8b98e6 0%, #a894cf 100%);
 }
 
 body {
@@ -2683,16 +2723,16 @@ a.btn-primary {
     padding: 5px 12px;
 }
 
-/* ===== 商务深色侧栏（明暗主题下始终深色） ===== */
+/* ===== 侧边栏：跟随 data-theme（浅色默认，深色模式深蓝） ===== */
 .sidebar {
-    background: linear-gradient(180deg, #212b45 0%, #26314c 100%);
-    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--sidebar-border);
 }
 .sidebar-header {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    border-bottom: 1px solid var(--sidebar-border);
 }
 .sidebar .logo {
-    background: linear-gradient(135deg, #8b98e6 0%, #a894cf 100%);
+    background: var(--sidebar-logo-gradient);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -2701,49 +2741,51 @@ a.btn-primary {
 }
 .sidebar .nav-item,
 .sidebar .nav-sub-item {
-    color: #cbd5e1;
+    color: var(--sidebar-text);
 }
 .sidebar .nav-item:hover,
 .sidebar .nav-sub-item:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: #ffffff;
+    background: var(--sidebar-hover-bg);
+    color: var(--sidebar-hover-text);
 }
 .sidebar .nav-item.active {
-    background: rgba(91, 106, 255, 0.16);
-    color: #ffffff;
+    background: var(--sidebar-active-bg);
+    color: var(--sidebar-active-text);
 }
 .sidebar .nav-item.active::before {
-    background: var(--grad-accent);
+    background: var(--sidebar-active-bar);
 }
 .sidebar .nav-sub-item.active {
-    background: rgba(91, 106, 255, 0.14);
-    color: #ffffff;
+    background: var(--sidebar-active-bg);
+    color: var(--sidebar-active-text);
 }
 .sidebar .nav-sub-item::before {
-    background: #64748b;
+    content: "";
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--sidebar-text-muted);
 }
 .sidebar .nav-sub-item.active::before {
-    background: #7c8bff;
+    background: var(--sidebar-active-bar);
 }
 .sidebar .nav-badge {
-    color: #cbd5e1;
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.12);
+    color: var(--sidebar-badge-text);
+    background: var(--sidebar-badge-bg);
+    border-color: var(--sidebar-badge-border);
 }
 .sidebar-footer {
-    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    border-top: 1px solid var(--sidebar-border);
 }
 .sidebar .current-user {
-    color: #94a3b8;
+    color: var(--sidebar-text-muted);
 }
-.sidebar .theme-btn {
-    background: rgba(255, 255, 255, 0.06);
-    color: #cbd5e1;
-}
-.sidebar .theme-btn:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: #ffffff;
-}
+/* .theme-btn uses the var-based base rule at app.css (.theme-btn), which adapts
+   to both light and dark themes automatically — no sidebar-specific override. */
 
 /* ===== 渐变主按钮 / 品牌点缀 ===== */
 .btn-primary {
@@ -2792,9 +2834,9 @@ a.btn-primary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 4px;
     padding: 3px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--sidebar-scope-border);
     border-radius: 11px;
-    background: rgba(9, 14, 29, 0.24);
+    background: var(--sidebar-scope-bg);
 }
 
 .sidebar-scope-tabs .sidebar-scope-tab:only-child {
@@ -2809,7 +2851,7 @@ a.btn-primary {
     min-height: 30px;
     padding: 5px 8px;
     border-radius: 6px;
-    color: #94a3b8;
+    color: var(--sidebar-scope-inactive-text);
     font-size: 12px;
     font-weight: 600;
     text-decoration: none;
@@ -2817,13 +2859,13 @@ a.btn-primary {
 }
 
 .sidebar-scope-tab:hover {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--sidebar-text-strong);
+    background: var(--sidebar-hover-bg);
 }
 
 .sidebar-scope-tab.active {
-    color: #fff;
-    background: linear-gradient(135deg, rgba(101, 115, 230, 0.92), rgba(143, 120, 220, 0.88));
+    color: var(--sidebar-scope-active-text);
+    background: var(--sidebar-scope-active-bg);
     box-shadow: 0 5px 14px -7px rgba(91, 106, 255, 0.9);
 }
 
@@ -2836,8 +2878,8 @@ a.btn-primary {
 }
 
 .sidebar-scope-tab.active .scope-tab-dot {
-    border-color: #fff;
-    background: #fff;
+    border-color: var(--sidebar-scope-active-text);
+    background: var(--sidebar-scope-active-text);
     box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.15);
 }
 

@@ -34,6 +34,7 @@ from src.core.services.notification import (
 )
 from src.core.services.script_registry import ExternalScriptRegistry, file_sha256
 from src.core.services.env_resolver import EnvResolver
+from src.core.services.script_input import PendingScriptInput, ScriptInputRegistry
 from src.core.storage.tenants import IntegrationStore, TenantContext, TenantRegistry
 
 
@@ -130,6 +131,7 @@ class ScriptService:
         self._cancelled = set()
         self._completion_listeners: List[Callable[[ScriptRun], None]] = []
         self._shutting_down = False
+        self.input_registry = ScriptInputRegistry()
         self._executor = ThreadPoolExecutor(
             max_workers=max(2, len(self.definitions)),
             thread_name_prefix="ilinkbot-script",
@@ -821,6 +823,40 @@ class ScriptService:
             self._emit_completion(run)
             self._notify(run)
 
+    def register_pending_input(
+        self, run: ScriptRun, await_input: Dict[str, Any]
+    ) -> Optional[PendingScriptInput]:
+        """Register a paused script from its ``await_input`` result payload."""
+        return self.input_registry.register(
+            run.tenant_id,
+            run.run_id,
+            run.script_id,
+            run.script_name,
+            await_input,
+        )
+
+    def peek_pending_input(
+        self, tenant: TenantContext
+    ) -> Optional[PendingScriptInput]:
+        """Return the active pending input for the session without consuming it."""
+        return self.input_registry.peek(tenant.tenant_id)
+
+    def consume_pending_input(
+        self, tenant: TenantContext
+    ) -> Optional[PendingScriptInput]:
+        """Return and remove the active pending input for the session."""
+        return self.input_registry.consume(tenant.tenant_id)
+
+    def clear_pending_input(self, tenant: TenantContext) -> None:
+        """Drop any pending input for the session."""
+        self.input_registry.clear(tenant.tenant_id)
+
+    def resume_pending_input(
+        self, tenant: TenantContext, pending: PendingScriptInput, text: str
+    ) -> Dict[str, Any]:
+        """Re-submit the script with the user's reply mapped to ``pending.param``."""
+        return self.submit_for_tenant(tenant, pending.script_id, {pending.param: text})
+
     def _apply_child_result(
         self,
         run: ScriptRun,
@@ -840,7 +876,7 @@ class ScriptService:
             except (OSError, ValueError):
                 payload = {}
         requested_status = payload.get("status")
-        run.status = requested_status if requested_status in {"success", "failed", "skipped"} else (
+        run.status = requested_status if requested_status in {"success", "failed", "skipped", "awaiting_input"} else (
             "success" if returncode == 0 else "failed"
         )
         summary = payload.get("summary")
@@ -873,6 +909,9 @@ class ScriptService:
                         continue
                     artifacts.append(str(path))
         run.artifacts = artifacts
+        await_input = payload.get("await_input")
+        if isinstance(await_input, dict):
+            self.register_pending_input(run, await_input)
         error = payload.get("error")
         if run.status != "success":
             run.error = _sanitize(
@@ -946,6 +985,7 @@ class ScriptService:
             "timed_out": "超时",
             "cancelled": "取消",
             "running": "运行中",
+            "awaiting_input": "待输入",
         }
         message = "【固定脚本结果】\n任务：{}\n状态：{}\n编号：{}\n{}".format(
             run.script_name,
