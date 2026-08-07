@@ -1692,11 +1692,15 @@ def upsert_typed_organization_channel(
     context = _organization_context(request, principal, organization_id)
     _reject_personal_channel(request, organization_id, channel_id)
     try:
-        return get_organization_control_store(request).upsert_channel(
+        result = get_organization_control_store(request).upsert_channel(
             organization_id, channel_id, body, context.user_id
         )
     except OrganizationControlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The runtime watches channels_revision to rebuild adapters; channel
+    # creation/edits must bump it so newly configured channels come online.
+    get_organization_control_store(request).bump_channels_revision(organization_id)
+    return result
 
 
 @router.patch("/orgs/{organization_id}/channels/{channel_id}/status")
@@ -1755,7 +1759,7 @@ def put_typed_organization_channel_credentials(
         credentials = channel_provider(channel["type"]).validate_credentials(
             raw_credentials
         )
-        return get_credential_service(request).put(
+        result = get_credential_service(request).put(
             organization_id,
             "channel:{}".format(channel_id),
             actor_user_id=context.user_id,
@@ -1766,6 +1770,10 @@ def put_typed_organization_channel_credentials(
             secret=json.dumps(credentials, ensure_ascii=False),
             allow_platform_delegation=context.platform_delegation,
         )
+        # Credentials changed: bump the revision so the runtime rebuilds the
+        # channel adapter with the new credentials.
+        get_organization_control_store(request).bump_channels_revision(organization_id)
+        return result
     except WeComVerifyError as exc:
         raise HTTPException(
             status_code=400, detail="企业微信凭证校验失败：{}".format(exc)

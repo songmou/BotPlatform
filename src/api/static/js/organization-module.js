@@ -569,6 +569,13 @@ function initOrganizationModule(requestedModule) {
                     typeSelect.disabled = true;
                     agentSelect.disabled = true;
                     idInput.disabled = true;
+                    if (typeSelect.value === "wecom_aibot" && isPersonal) {
+                        // Personal wecom credentials were submitted with the
+                        // create request; nothing left to bind, so finish.
+                        credentialBound = true;
+                        close();
+                        return;
+                    }
                     showStep("bind");
                     if (typeSelect.value === "wechat_ilink") {
                         startChannelWechatLogin(channelId, true, autoConfirmWechat, isPersonal);
@@ -705,19 +712,39 @@ function initOrganizationModule(requestedModule) {
                         showToast("请完善渠道配置（渠道实例 ID 需小写字母开头）", "error");
                         return;
                     }
-                    settle({
-                        payload: {
-                            id: idInput.value.trim(),
-                            type: typeSelect.value,
-                            agent_id: agentSelect.value,
-                            scope: isPersonalScope() ? "personal" : "organization",
-                            enabled: document.getElementById("organization-channel-enabled").checked,
-                            settings: Object.assign({}, current.settings || {}, {
-                                group_policy: document.getElementById("organization-channel-group-policy").value
-                            })
-                        },
-                        connect: showConnectPhase
-                    });
+                    var payload = {
+                        id: idInput.value.trim(),
+                        type: typeSelect.value,
+                        agent_id: agentSelect.value,
+                        scope: isPersonalScope() ? "personal" : "organization",
+                        enabled: document.getElementById("organization-channel-enabled").checked,
+                        settings: Object.assign({}, current.settings || {}, {
+                            group_policy: document.getElementById("organization-channel-group-policy").value
+                        })
+                    };
+                    if (payload.scope === "personal" && payload.type === "wecom_aibot") {
+                        // Personal wecom connections require bot_id/secret at
+                        // creation time; collect them before settling so a
+                        // cancelled dialog stays usable.
+                        showFormDialog({
+                            title: "配置企微凭证（请先在企微后台开启「API 模式 - 长连接」）",
+                            fields: [
+                                { name: "bot_id", label: "Bot ID", required: true },
+                                { name: "secret", label: "Secret", type: "password", required: true }
+                            ]
+                        }).then(function (value) {
+                            if (!value) return;
+                            if (!value.bot_id || !value.secret) {
+                                showToast("请填写 Bot ID 和 Secret", "error");
+                                return;
+                            }
+                            payload.bot_id = value.bot_id.trim();
+                            payload.secret = value.secret;
+                            settle({ payload: payload, connect: showConnectPhase });
+                        });
+                        return;
+                    }
+                    settle({ payload: payload, connect: showConnectPhase });
                 }
                 stepNext.onclick = goNext;
                 document.querySelectorAll("[data-channel-tab]").forEach(function (tab) {
@@ -1332,19 +1359,24 @@ function initOrganizationModule(requestedModule) {
 
     function createChannel(existing) {
         return channelDialog(existing || {
-            type: "wecom_aibot", agent_id: "general", enabled: false,
+            type: "wecom_aibot", agent_id: "general", enabled: true,
             settings: { group_policy: "private_only" }
         }, !existing).then(function (result) {
             if (!result) return null;
             var payload = result.payload;
             if (payload.scope === "personal") {
+                var createBody = {
+                    platform: channelPlatform("personal", payload.type),
+                    organization_id: activeOrganizationId(),
+                    agent_id: payload.agent_id
+                };
+                if (payload.type === "wecom_aibot") {
+                    createBody.bot_id = payload.bot_id;
+                    createBody.secret = payload.secret;
+                }
                 return request("/api/connections", {
                     method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        platform: channelPlatform("personal", payload.type),
-                        organization_id: activeOrganizationId(),
-                        agent_id: payload.agent_id
-                    })
+                    body: JSON.stringify(createBody)
                 }).then(function (created) {
                     result.connect(created.connection_id, true);
                     return created;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,6 +37,8 @@ from src.api.routers import (
 API_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = API_DIR / "templates"
 STATIC_DIR = API_DIR / "static"
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(config, model_router, registry, conversation_store,
