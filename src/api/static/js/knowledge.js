@@ -11,6 +11,10 @@ function initKnowledge() {
     var scopeEl = document.getElementById("knowledge-scope");
     var tenantEl = document.getElementById("knowledge-tenant");
     var categoryEl = document.getElementById("knowledge-category");
+    var tabsEl = document.getElementById("knowledge-category-tabs");
+    var moreWrap = document.getElementById("knowledge-more-wrap");
+    var moreBtn = document.getElementById("knowledge-more-btn");
+    var moreMenu = document.getElementById("knowledge-more-menu");
     var tableBody = document.getElementById("knowledge-table-body");
     var statusEl = document.getElementById("knowledge-status");
     var searchResults = document.getElementById("knowledge-search-results");
@@ -184,6 +188,7 @@ function initKnowledge() {
             state.categories = [];
             categoryEl.innerHTML = '<option value="">暂无租户</option>';
             rebuildMoveTargets();
+            renderCategoryTabs();
             setStatus("暂无租户，请先接入机器人用户后再管理私有知识库");
             return loadSources();
         }
@@ -204,11 +209,106 @@ function initKnowledge() {
             if (preferred && state.categories.some(function (item) {
                 return item.category_id === preferred;
             })) categoryEl.value = preferred;
+            renderCategoryTabs();
             rebuildMoveTargets();
             updateWritableState();
             return loadSources();
         }).catch(function (err) { setStatus(err.message); });
     }
+
+    function renderCategoryTabs() {
+        Array.prototype.slice.call(tabsEl.querySelectorAll(".knowledge-category-tab"))
+            .forEach(function (btn) { btn.remove(); });
+        var current = categoryEl.value;
+        state.categories.forEach(function (item) {
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "knowledge-category-tab" + (item.category_id === current ? " active" : "");
+            btn.setAttribute("role", "tab");
+            btn.setAttribute("data-category-id", item.category_id);
+            btn.setAttribute("aria-selected", item.category_id === current ? "true" : "false");
+            btn.textContent = item.name + "（" + Number(item.source_count || 0) + "）";
+            btn.addEventListener("click", function () { selectCategory(item.category_id); });
+            tabsEl.appendChild(btn);
+        });
+        layoutCategoryTabs();
+    }
+
+    function selectCategory(id) {
+        if (id !== categoryEl.value) categoryEl.value = id;
+        syncActiveTab();
+        categoryEl.dispatchEvent(new Event("change"));
+        layoutCategoryTabs();
+    }
+
+    function syncActiveTab() {
+        var current = categoryEl.value;
+        Array.prototype.slice.call(tabsEl.querySelectorAll(".knowledge-category-tab")).forEach(function (btn) {
+            var on = btn.getAttribute("data-category-id") === current;
+            btn.classList.toggle("active", on);
+            btn.setAttribute("aria-selected", on ? "true" : "false");
+        });
+    }
+
+    /* Show as many knowledge base tabs as fit the remaining width of the
+       context bar; tabs that overflow are hidden and surfaced via "更多". */
+    function layoutCategoryTabs() {
+        var tabs = Array.prototype.slice.call(tabsEl.querySelectorAll(".knowledge-category-tab"));
+        if (!tabs.length) { moreWrap.style.display = "none"; return; }
+        var avail = tabsEl.clientWidth;
+        var gap = 8;
+        var used = 0;
+        var hidden = [];
+        tabs.forEach(function (btn, idx) {
+            var next = used + (idx === 0 ? 0 : gap) + btn.offsetWidth;
+            if (idx > 0 && next > avail) {
+                btn.hidden = true;
+                hidden.push(btn);
+            } else {
+                btn.hidden = false;
+                used = next;
+            }
+        });
+        if (hidden.length) {
+            moreWrap.style.display = "";
+            populateMoreMenu(hidden);
+        } else {
+            moreWrap.style.display = "none";
+            closeMoreMenu();
+        }
+    }
+
+    function populateMoreMenu(hidden) {
+        moreMenu.innerHTML = "";
+        hidden.forEach(function (btn) {
+            var id = btn.getAttribute("data-category-id");
+            var item = state.categories.find(function (c) { return c.category_id === id; });
+            if (!item) return;
+            var m = document.createElement("button");
+            m.type = "button";
+            m.setAttribute("role", "menuitem");
+            m.textContent = item.name + "（" + Number(item.source_count || 0) + "）";
+            if (id === categoryEl.value) m.classList.add("active");
+            m.addEventListener("click", function () { selectCategory(id); closeMoreMenu(); });
+            moreMenu.appendChild(m);
+        });
+    }
+
+    function closeMoreMenu() {
+        moreMenu.style.display = "none";
+        moreBtn.setAttribute("aria-expanded", "false");
+    }
+
+    moreBtn.addEventListener("click", function (evt) {
+        evt.stopPropagation();
+        var open = moreMenu.style.display === "block";
+        moreMenu.style.display = open ? "none" : "block";
+        moreBtn.setAttribute("aria-expanded", open ? "false" : "true");
+    });
+    moreMenu.addEventListener("click", function (evt) { evt.stopPropagation(); });
+    document.addEventListener("click", closeMoreMenu);
+    document.addEventListener("keydown", function (evt) { if (evt.key === "Escape") closeMoreMenu(); });
+    window.addEventListener("resize", layoutCategoryTabs);
 
     function rebuildMoveTargets() {
         var current = currentCategoryId();

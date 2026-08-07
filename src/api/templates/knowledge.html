@@ -31,10 +31,14 @@
         </div>
 
         <div class="knowledge-context-bar">
-            <div class="knowledge-toolbar-group">
-                <span class="knowledge-group-label">当前知识库</span>
-                <select id="knowledge-tenant" class="tenant-select" aria-label="租户"></select>
-                <select id="knowledge-category" aria-label="知识库"></select>
+            <div class="knowledge-category-tabs" id="knowledge-category-tabs" role="tablist" aria-label="知识库">
+                <select id="knowledge-tenant" class="tenant-select" aria-label="租户" style="display:none"></select>
+                <select id="knowledge-category" aria-label="知识库" style="display:none"></select>
+            </div>
+            <div class="knowledge-more-wrap" id="knowledge-more-wrap" style="display:none">
+                <button type="button" class="knowledge-more-btn" id="knowledge-more-btn"
+                        aria-haspopup="true" aria-expanded="false">更多 ▾</button>
+                <div class="knowledge-more-menu" id="knowledge-more-menu" role="menu"></div>
             </div>
             <div class="knowledge-toolbar-group knowledge-library-actions" aria-label="知识库管理">
                 <button id="knowledge-category-add" class="btn-secondary">+ 新建库</button>
