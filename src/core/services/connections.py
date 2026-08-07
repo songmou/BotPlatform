@@ -15,6 +15,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from src.core.messaging.credentials import (
+    ChannelCredentialError,
+    validate_channel_credentials,
+)
 from src.core.services.credentials import CredentialError, CredentialService
 from src.core.services.organization_controls import (
     OrganizationControlError,
@@ -23,7 +27,11 @@ from src.core.services.organization_controls import (
 from src.core.storage.organizations import OrganizationStore
 
 
-PLATFORM_CHANNEL_TYPES = {"wechat": "wechat_ilink", "wecom": "wecom_aibot"}
+PLATFORM_CHANNEL_TYPES = {
+    "wechat": "wechat_ilink",
+    "wecom": "wecom_aibot",
+    "feishu": "feishu",
+}
 
 
 class PersonalConnectionError(ValueError):
@@ -139,6 +147,10 @@ class PersonalConnectionService:
             self.organizations.get(organization_id)
         else:
             self.organizations.membership(user_id, organization_id)
+        # A user may only have one active connection per platform: creating a
+        # new one pauses the others so the runtime never runs two adapters
+        # that share a single SDK connection (e.g. feishu long connection).
+        self._disable_other_platform_connections(user_id, platform)
         channel_id = self._generate_channel_id(organization_id, platform, user_id)
         try:
             channel = self.controls.upsert_channel(
@@ -181,6 +193,7 @@ class PersonalConnectionService:
         return self._detail(row, str(organization.get("name") or ""))
 
     def list_for_user(self, user_id: int) -> List[Dict[str, Any]]:
+        self._repair_single_active_per_platform(user_id)
         with self.database.read() as connection:
             rows = connection.execute(
                 "SELECT * FROM personal_channel_connections "
@@ -199,10 +212,79 @@ class PersonalConnectionService:
                 continue
         return result
 
+    def _repair_single_active_per_platform(self, user_id: int) -> None:
+        """Pause duplicate active connections per platform (legacy data).
+
+        The SDK for some platforms (feishu) only supports one live connection
+        per process, so keep at most the most recently updated connection
+        enabled per platform and pause the rest.
+        """
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT c.connection_id, c.organization_id, "
+                "c.channel_instance_id, c.platform, c.updated_at "
+                "FROM personal_channel_connections c "
+                "JOIN organization_channels o "
+                "ON o.channel_instance_id = c.channel_instance_id "
+                "WHERE c.user_id=? AND o.enabled=1",
+                (int(user_id),),
+            ).fetchall()
+        by_platform: Dict[str, List[Any]] = {}
+        for row in rows:
+            by_platform.setdefault(str(row["platform"]), []).append(row)
+        for items in by_platform.values():
+            if len(items) <= 1:
+                continue
+            items.sort(key=lambda row: str(row["updated_at"] or ""), reverse=True)
+            for extra in items[1:]:
+                try:
+                    channel_id = self._channel_id_of(
+                        str(extra["channel_instance_id"])
+                    )
+                    self.controls.set_channel_enabled(
+                        str(extra["organization_id"]),
+                        channel_id,
+                        False,
+                        int(user_id),
+                    )
+                except OrganizationControlError:
+                    continue
+
+    def _disable_other_platform_connections(
+        self,
+        user_id: int,
+        platform: str,
+        keep_connection_id: Optional[str] = None,
+    ) -> None:
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT connection_id, organization_id, channel_instance_id "
+                "FROM personal_channel_connections "
+                "WHERE user_id=? AND platform=?",
+                (int(user_id), platform),
+            ).fetchall()
+        for row in rows:
+            connection_id = str(row["connection_id"])
+            if keep_connection_id and connection_id == keep_connection_id:
+                continue
+            try:
+                channel_id = self._channel_id_of(str(row["channel_instance_id"]))
+                self.controls.set_channel_enabled(
+                    str(row["organization_id"]), channel_id, False, int(user_id)
+                )
+            except OrganizationControlError:
+                continue
+
     def set_enabled(
         self, connection_id: str, user_id: int, enabled: bool
     ) -> Dict[str, Any]:
         row = self._require_owner(connection_id, user_id)
+        if enabled:
+            # One active connection per platform: pausing the others before
+            # enabling this one keeps the runtime free of SDK conflicts.
+            self._disable_other_platform_connections(
+                user_id, row["platform"], keep_connection_id=connection_id
+            )
         channel_id = self._channel_id_of(row["channel_instance_id"])
         self.controls.set_channel_enabled(
             row["organization_id"], channel_id, bool(enabled), int(user_id)
@@ -315,6 +397,51 @@ class PersonalConnectionService:
             secret=json.dumps(credentials_payload, ensure_ascii=False),
         )
         self.set_bot_account(connection_id, str(credentials_payload.get("bot_id") or ""))
+        self.controls.bump_channels_revision(row["organization_id"])
+        return self._get_row(connection_id)
+
+    def save_feishu_credentials(
+        self,
+        connection_id: str,
+        credentials_payload: Dict[str, Any],
+        allow_delegation: bool = False,
+    ) -> Dict[str, Any]:
+        """Persist credentials produced by a successful Feishu QR registration."""
+        row = self._get_row(connection_id)
+        if row["platform"] != "feishu":
+            raise PersonalConnectionError("该连接不是飞书")
+        # The registration protocol returns client_id/client_secret plus extra
+        # fields (user_info); the channel credential format only stores
+        # app_id/app_secret, so map the payload before validation.
+        payload = {
+            "app_id": str(
+                credentials_payload.get("client_id")
+                or credentials_payload.get("app_id")
+                or ""
+            ),
+            "app_secret": str(
+                credentials_payload.get("client_secret")
+                or credentials_payload.get("app_secret")
+                or ""
+            ),
+        }
+        try:
+            normalized = validate_channel_credentials("feishu", payload)
+        except ChannelCredentialError as exc:
+            raise PersonalConnectionError(str(exc)) from exc
+        channel_id = self._channel_id_of(row["channel_instance_id"])
+        self.credentials.put(
+            row["organization_id"],
+            self.credential_id_for(channel_id),
+            actor_user_id=row["user_id"],
+            scope="personal",
+            allow_platform_delegation=allow_delegation,
+            resource_type="channels",
+            resource_id=row["channel_instance_id"],
+            label="个人飞书应用",
+            secret=json.dumps(normalized, ensure_ascii=False),
+        )
+        self.set_bot_account(connection_id, normalized["app_id"])
         self.controls.bump_channels_revision(row["organization_id"])
         return self._get_row(connection_id)
 

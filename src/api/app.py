@@ -165,6 +165,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.drive_service = drive_service
     app.state.drive_audit_store = drive_audit_store
     app.state.wechat_login_managers = {}
+    app.state.feishu_registration_managers = {}
     app.state.datasource_service = datasource_service
     app.state.channel_statuses = channel_statuses
     app.state.organization_store = organization_store

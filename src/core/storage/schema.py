@@ -8,7 +8,7 @@ applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
 from __future__ import annotations
 
 
-LATEST_SCHEMA_VERSION = 33
+LATEST_SCHEMA_VERSION = 35
 
 
 SCHEMA_V1 = r"""
@@ -1450,6 +1450,65 @@ CREATE INDEX IF NOT EXISTS ix_personal_connections_user
 """
 
 
+SCHEMA_V34 = r"""
+-- SQLite cannot alter a CHECK constraint in place, so the table is rebuilt
+-- to allow the feishu platform for personal connections.
+CREATE TABLE IF NOT EXISTS personal_channel_connections_v34 (
+    connection_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL REFERENCES organizations(organization_id)
+        ON DELETE CASCADE,
+    channel_instance_id TEXT NOT NULL UNIQUE
+        REFERENCES organization_channels(channel_instance_id) ON DELETE CASCADE,
+    platform TEXT NOT NULL CHECK (platform IN ('wechat', 'wecom', 'feishu')),
+    bot_account_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+INSERT INTO personal_channel_connections_v34(
+    connection_id, user_id, organization_id, channel_instance_id,
+    platform, bot_account_id, created_at, updated_at
+)
+SELECT connection_id, user_id, organization_id, channel_instance_id,
+       platform, bot_account_id, created_at, updated_at
+FROM personal_channel_connections;
+
+DROP TABLE personal_channel_connections;
+
+ALTER TABLE personal_channel_connections_v34
+    RENAME TO personal_channel_connections;
+
+CREATE INDEX IF NOT EXISTS ix_personal_connections_user
+    ON personal_channel_connections(user_id, created_at DESC);
+"""
+
+
+SCHEMA_V35 = r"""
+-- Fix legacy data: a user may only have one active connection per platform
+-- (the feishu SDK supports a single live WS connection per process). Keep
+-- the most recently updated connection enabled and pause the rest.
+UPDATE organization_channels
+SET enabled = 0
+WHERE enabled = 1
+AND channel_instance_id IN (
+    SELECT c.channel_instance_id
+    FROM personal_channel_connections c
+    WHERE c.channel_instance_id != (
+        SELECT c2.channel_instance_id
+        FROM personal_channel_connections c2
+        JOIN organization_channels o2
+            ON o2.channel_instance_id = c2.channel_instance_id
+        WHERE o2.enabled = 1
+        AND c2.user_id = c.user_id
+        AND c2.platform = c.platform
+        ORDER BY c2.updated_at DESC, c2.created_at DESC
+        LIMIT 1
+    )
+);
+"""
+
+
 # Versions applied as plain SQL scripts. Specialized versions with inspection
 # or permission backfills are dispatched through dedicated Database methods.
 SCHEMA_SCRIPTS: dict[int, str] = {
@@ -1484,4 +1543,6 @@ SCHEMA_SCRIPTS: dict[int, str] = {
     31: SCHEMA_V31,
     32: SCHEMA_V32,
     33: SCHEMA_V33,
+    34: SCHEMA_V34,
+    35: SCHEMA_V35,
 }

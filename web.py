@@ -327,6 +327,15 @@ def _run_panel_only(args) -> int:
         script_service,
         config.app.timezone,
     )
+    from src.core.services.organization_schedule_tool import (
+        OrganizationScheduleToolService,
+    )
+
+    organization_schedule_service = OrganizationScheduleToolService(
+        services.organization_control_store,
+        services.organization_store,
+        config,
+    )
 
     notification_service = NotificationService(
         credentials_loader=lambda: credentials,
@@ -372,7 +381,7 @@ def _run_panel_only(args) -> int:
             knowledge_service=knowledge_service,
             plugin_manager=plugin_manager,
             script_service=script_service,
-            script_schedule_service=script_schedule_service,
+            organization_schedule_service=organization_schedule_service,
             tool_audit_store=tool_audit_store,
             tool_states=tool_states,
             mcp_manager=mcp_manager,

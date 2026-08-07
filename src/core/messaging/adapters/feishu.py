@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
@@ -28,6 +29,10 @@ from .async_base import AsyncAdapterBridge
 
 
 FEISHU = "feishu"
+
+# The lark-channel-sdk WebSocket client drives a process-wide module-level
+# event loop, so only one Feishu connection can be active per process.
+_FEISHU_SDK_LOCK = threading.Lock()
 
 
 def _value(item: Any, *names: str, default: Any = "") -> Any:
@@ -84,6 +89,17 @@ class FeishuAdapter(AsyncAdapterBridge):
         self.channel_id = channel_id
         self._client_factory = client_factory or self._default_client_factory
         self._client: Any = None
+        if client_factory is None:
+            # The SDK's WebSocket client captures its module-level event loop
+            # at import time and later drives it with run_until_complete from
+            # a worker thread. Import it here (outside any running asyncio
+            # loop) so the captured loop stays idle; importing it later from
+            # _serve would capture the running loop and crash with
+            # "This event loop is already running".
+            try:
+                import lark_channel.ws.client  # noqa: F401
+            except ImportError:
+                pass
 
     @property
     def account_id(self) -> str:
@@ -300,6 +316,10 @@ class FeishuAdapter(AsyncAdapterBridge):
     async def _serve(self, emit, stop_event) -> None:
         loop = asyncio.get_running_loop()
         self._set_loop(loop)
+        if not _FEISHU_SDK_LOCK.acquire(blocking=False):
+            raise RuntimeError(
+                "同一进程同时只能运行一个飞书连接，请先停用其他飞书连接"
+            )
         try:
             self._client = self._client_factory(self.app_id, self.app_secret)
 
@@ -335,6 +355,7 @@ class FeishuAdapter(AsyncAdapterBridge):
                 watcher.cancel()
                 await self._disconnect()
         finally:
+            _FEISHU_SDK_LOCK.release()
             self._clear_loop()
 
     def start(self, emit, stop_event) -> None:

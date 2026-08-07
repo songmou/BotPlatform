@@ -2163,8 +2163,12 @@ a.btn-primary {
 }
 
 /* ===== MCP detail page ===== */
+/* Scroll containers span the full panel so the scrollbar aligns with the
+   panel's right edge; the inner content keeps the readability cap. */
 .control-center-page,
-.control-governance-page { max-width: 1440px; }
+.control-governance-page { max-width: none; }
+.control-center-page > *,
+.control-governance-page > * { max-width: 1440px; }
 .control-page-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; margin:4px 0 26px; padding-bottom:20px; border-bottom:1px solid var(--border); }
 .control-page-heading h2 { margin:4px 0 7px; font-size:26px; letter-spacing:-.02em; }
 .control-kicker { color:var(--accent); font-size:12px; font-weight:700; letter-spacing:.08em; }

@@ -114,7 +114,7 @@ class ChannelManager:
             self._set_status(adapter, "authentication_required", str(exc))
         except Exception as exc:
             LOGGER.exception("消息渠道退出 channel=%s", adapter.channel_id)
-            self._set_status(adapter, "failed", type(exc).__name__)
+            self._set_status(adapter, "failed", str(exc) or type(exc).__name__)
         else:
             self._set_status(adapter, "stopped")
 
