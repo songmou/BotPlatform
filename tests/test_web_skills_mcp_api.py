@@ -62,7 +62,9 @@ class McpTemplateApiTest(WebApiTestBase):
         self._file_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._file_dir.cleanup)
         self.templates_file = Path(self._file_dir.name) / "mcp_templates.json"
-        self.templates_file.write_text(json.dumps(TEMPLATES, ensure_ascii=False))
+        self.templates_file.write_text(
+            json.dumps(TEMPLATES, ensure_ascii=False), encoding="utf-8"
+        )
         patcher = patch.object(
             platform_runtime_module, "MCP_TEMPLATES_FILE", self.templates_file
         )
