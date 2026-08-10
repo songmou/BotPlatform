@@ -721,7 +721,8 @@ class ModelAnalyticsStore:
             rows = connection.execute(
                 "SELECT a.*, b.scope_type, b.scope_id, b.monthly_limit_micros,"
                 " b.currency FROM model_budget_alerts a JOIN model_budgets b "
-                "ON b.budget_id=a.budget_id ORDER BY a.created_at DESC LIMIT ?",
+                "ON b.budget_id=a.budget_id "
+                "ORDER BY a.created_at DESC, a.threshold DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]

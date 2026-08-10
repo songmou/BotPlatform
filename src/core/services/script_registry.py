@@ -412,7 +412,8 @@ class ExternalScriptRegistry:
             prefix=".script-registry-", dir=str(self.path.parent)
         )
         try:
-            os.fchmod(descriptor, 0o600)
+            if os.name != "nt":
+                os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
