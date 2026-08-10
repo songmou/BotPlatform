@@ -453,6 +453,7 @@ function initOrganizationModule(requestedModule) {
             var bindSave = document.getElementById("organization-channel-bind-save");
             var submitBtn = form.querySelector('button[type="submit"]');
             document.getElementById("organization-channel-modal-title").textContent = creating ? "新建渠道" : "编辑渠道";
+            stepNext.textContent = creating ? "下一步" : "完成";
             var idInput = document.getElementById("organization-channel-id");
             var idEdited = !creating;
             typeSelect.disabled = false;
@@ -475,6 +476,14 @@ function initOrganizationModule(requestedModule) {
             document.getElementById("organization-channel-enabled").checked = current.enabled === true;
             document.getElementById("organization-channel-group-policy").value =
                 (current.settings || {}).group_policy || "private_only";
+            function syncGroupPolicyField() {
+                var field = document.getElementById("organization-channel-group-policy");
+                if (!field) return;
+                var isWechat = typeSelect.value === "wechat_ilink";
+                field.disabled = isWechat;
+                if (isWechat) field.value = "private_only";
+            }
+            syncGroupPolicyField();
             document.getElementById("organization-channel-bot-id").value =
                 (creating ? "" : (current.bot_account_id || ""));
             document.getElementById("organization-channel-secret").value = "";
@@ -564,6 +573,12 @@ function initOrganizationModule(requestedModule) {
                     }
                 }
                 function showConnectPhase(channelId, isPersonal) {
+                    if (!creating) {
+                        // Editing an existing channel: credentials are already
+                        // bound, so save and close without re-binding.
+                        close();
+                        return;
+                    }
                     pendingChannelId = channelId;
                     credentialBound = false;
                     typeSelect.disabled = true;
@@ -680,9 +695,14 @@ function initOrganizationModule(requestedModule) {
                 var scopeGroup = document.getElementById("organization-channel-scope-group");
                 var scopeSelect = document.getElementById("organization-channel-scope");
                 if (scopeGroup) {
-                    scopeGroup.style.display = creating ? "" : "none";
-                    if (creating && scopeSelect) scopeSelect.value = "organization";
+                    scopeGroup.style.display = "";
                 }
+                if (scopeSelect) {
+                    scopeSelect.disabled = !creating;
+                    scopeSelect.value = "organization";
+                }
+                var bindTab = modal.querySelector('[data-channel-tab="bind"]');
+                if (bindTab) bindTab.style.display = creating ? "" : "none";
                 if (scopeSelect) {
                     scopeSelect.onchange = function () {
                         var idGroup = document.getElementById("organization-channel-id-group");
@@ -691,6 +711,7 @@ function initOrganizationModule(requestedModule) {
                 }
                 typeSelect.onchange = function () {
                     if (creating && !idEdited) idInput.value = suggestChannelId(typeSelect.value);
+                    syncGroupPolicyField();
                 };
                 document.getElementById("organization-channel-modal-cancel").onclick = close;
                 document.getElementById("organization-channel-modal-close").onclick = close;
@@ -719,7 +740,9 @@ function initOrganizationModule(requestedModule) {
                         scope: isPersonalScope() ? "personal" : "organization",
                         enabled: document.getElementById("organization-channel-enabled").checked,
                         settings: Object.assign({}, current.settings || {}, {
-                            group_policy: document.getElementById("organization-channel-group-policy").value
+                            group_policy: typeSelect.value === "wechat_ilink"
+                                ? "private_only"
+                                : document.getElementById("organization-channel-group-policy").value
                         })
                     };
                     if (payload.scope === "personal" && payload.type === "wecom_aibot") {
@@ -965,7 +988,7 @@ function initOrganizationModule(requestedModule) {
         });
     }
 
-    function editPersonalChannelAgent(current) {
+    function editPersonalChannel(current) {
         return request(organizationApi("/agents")).then(function (data) {
             var options = (data.items || []).map(function (item) {
                 var payload = item.payload || {};
@@ -975,24 +998,50 @@ function initOrganizationModule(requestedModule) {
                 showToast("组织暂无可用智能体", "error");
                 return null;
             }
-            return showFormDialog({
-                title: "更换接待智能体",
-                fields: [{
-                    name: "agent_id", label: "接待智能体", type: "select",
-                    value: current.agent_id, options: options
-                }]
-            }).then(function (value) {
-                if (!value || value.agent_id === current.agent_id) return null;
-                return request("/api/connections/" + encodeURIComponent(current.connection_id) + "/agent", {
-                    method: "PUT", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ agent_id: value.agent_id })
+            var fields = [{
+                name: "agent_id", label: "接待智能体", type: "select",
+                value: current.agent_id, options: options
+            }];
+            // WeChat (wechat_ilink) cannot receive group messages, so the
+            // group policy selector is only offered for wecom/feishu.
+            var supportsGroup = current.type !== "wechat_ilink";
+            if (supportsGroup) {
+                fields.push({
+                    name: "group_policy", label: "群聊策略", type: "select",
+                    value: (current.settings || {}).group_policy || "private_only",
+                    options: [
+                        { value: "private_only", label: "仅私聊" },
+                        { value: "mention_only", label: "仅被 @ 时响应" }
+                    ]
                 });
-            }).then(function (result) {
-                if (result) {
-                    showToast("接待智能体已更换", "success");
+            }
+            return showFormDialog({
+                title: "编辑个人连接",
+                fields: fields
+            }).then(function (value) {
+                if (!value) return null;
+                var updates = [];
+                if (value.agent_id && value.agent_id !== current.agent_id) {
+                    updates.push(request("/api/connections/" + encodeURIComponent(current.connection_id) + "/agent", {
+                        method: "PUT", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ agent_id: value.agent_id })
+                    }));
+                }
+                if (supportsGroup && value.group_policy &&
+                        value.group_policy !== ((current.settings || {}).group_policy || "private_only")) {
+                    updates.push(request("/api/connections/" + encodeURIComponent(current.connection_id) + "/group-policy", {
+                        method: "PUT", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ group_policy: value.group_policy })
+                    }));
+                }
+                if (!updates.length) return null;
+                return Promise.all(updates);
+            }).then(function (results) {
+                if (results && results.length) {
+                    showToast("个人连接已更新", "success");
                     refresh();
                 }
-                return result;
+                return results;
             });
         });
     }
@@ -1368,7 +1417,8 @@ function initOrganizationModule(requestedModule) {
                 var createBody = {
                     platform: channelPlatform("personal", payload.type),
                     organization_id: activeOrganizationId(),
-                    agent_id: payload.agent_id
+                    agent_id: payload.agent_id,
+                    settings: payload.settings
                 };
                 if (payload.type === "wecom_aibot") {
                     createBody.bot_id = payload.bot_id;
@@ -1501,7 +1551,7 @@ function initOrganizationModule(requestedModule) {
             return ok ? request(organizationApi("/agents/" + encodeURIComponent(id)), { method: "DELETE" }) : null;
         });
         else if (action === "channel-edit") {
-            if (current.personal) return editPersonalChannelAgent(current).catch(function (e) { showToast(e.message, "error"); });
+            if (current.personal) return editPersonalChannel(current).catch(function (e) { showToast(e.message, "error"); });
             return createChannel(current).catch(function (e) { showToast(e.message, "error"); });
         }
         else if (action === "channel-toggle") {

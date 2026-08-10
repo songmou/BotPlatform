@@ -232,6 +232,26 @@ class FeishuRegistrationManagerTests(unittest.TestCase):
         self.assertTrue(status["qr"].startswith("data:image/png;base64,"))
         self.assertEqual(status["state"], "pending")
 
+    def test_cancel_stops_poll_loop_without_staging(self) -> None:
+        manager = self._make([], credentials_saver=lambda c: self.saved.append(c))
+        manager.start()
+        for _ in range(100):
+            if manager.status()["qr"]:
+                break
+            time.sleep(0.02)
+        manager.cancel()
+        for _ in range(1000):
+            thread = manager._thread
+            if thread is None or not thread.is_alive():
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(manager._thread)
+        self.assertFalse(manager._thread.is_alive())
+        self.assertEqual(manager.pending_holder, {})
+        self.assertEqual(self.saved, [])
+        self.assertEqual(manager.status()["state"], "pending")
+        self.assertTrue(self.client.closed)
+
     def test_qr_content_includes_app_name(self) -> None:
         captured: Dict[str, str] = {}
 

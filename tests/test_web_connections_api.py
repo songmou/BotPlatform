@@ -310,6 +310,136 @@ class ConnectionsApiTests(WebApiTestBase):
             org_id, [item["organization_id"] for item in options["organizations"]]
         )
 
+    def test_connection_group_policy_roundtrip(self):
+        org_id, owner = self._create_owner("policy")
+        created = owner.post(
+            "/api/connections",
+            json={
+                "platform": "wechat",
+                "organization_id": org_id,
+                "agent_id": "general",
+                "settings": {"group_policy": "mention_only"},
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        connection_id = created.json()["connection_id"]
+        self.assertEqual(
+            created.json()["channel"]["settings"]["group_policy"], "mention_only"
+        )
+
+        listed = owner.get("/api/v2/orgs/{}/channels".format(org_id)).json()
+        item = [
+            entry
+            for entry in listed["items"]
+            if entry["id"] == created.json()["channel"]["id"]
+        ][0]
+        self.assertEqual(item["settings"]["group_policy"], "mention_only")
+
+        changed = owner.put(
+            "/api/connections/{}/group-policy".format(connection_id),
+            json={"group_policy": "private_only"},
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertEqual(
+            changed.json()["channel"]["settings"]["group_policy"], "private_only"
+        )
+        self.assertEqual(changed.json()["channel"]["agent_id"], "general")
+
+    def test_connection_group_policy_validation(self):
+        org_id, owner = self._create_owner("policy-bad")
+        bad_settings = owner.post(
+            "/api/connections",
+            json={
+                "platform": "wechat",
+                "organization_id": org_id,
+                "agent_id": "general",
+                "settings": {"group_policy": "everyone"},
+            },
+        )
+        self.assertEqual(bad_settings.status_code, 400, bad_settings.text)
+
+        created = owner.post(
+            "/api/connections",
+            json={
+                "platform": "wechat",
+                "organization_id": org_id,
+                "agent_id": "general",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        connection_id = created.json()["connection_id"]
+        bad_update = owner.put(
+            "/api/connections/{}/group-policy".format(connection_id),
+            json={"group_policy": "everyone"},
+        )
+        self.assertEqual(bad_update.status_code, 400, bad_update.text)
+        detail = owner.get("/api/connections").json()["items"][0]
+        self.assertEqual(
+            detail["channel"]["settings"]["group_policy"], "private_only"
+        )
+
+    def test_deleting_org_channel_releases_login_managers(self):
+        org_id, owner = self._create_owner("release-mgr")
+        created = owner.put(
+            "/api/v2/orgs/{}/channels/feishu_del".format(org_id),
+            json={
+                "type": "feishu",
+                "agent_id": "general",
+                "enabled": True,
+                "settings": {"group_policy": "private_only"},
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        fake_status = {
+            "connected": False,
+            "state": "pending",
+            "qr": "data:image/png;base64,x",
+            "error": "",
+            "app_id": "",
+            "user_name": "",
+        }
+        with mock.patch("src.api.routers.v2.FeishuRegistrationManager") as fake_cls:
+            fake = fake_cls.return_value
+            fake.status.return_value = dict(fake_status)
+            fake.start.return_value = dict(fake_status)
+            fake.pending_holder = {}
+            login = owner.post(
+                "/api/v2/orgs/{}/channels/feishu_del/feishu/login".format(org_id)
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+            self.assertIn(
+                "org-feishu:feishu_del",
+                self.app.state.feishu_registration_managers,
+            )
+
+            deleted = owner.delete(
+                "/api/v2/orgs/{}/channels/feishu_del".format(org_id)
+            )
+            self.assertEqual(deleted.status_code, 200, deleted.text)
+            self.assertNotIn(
+                "org-feishu:feishu_del",
+                self.app.state.feishu_registration_managers,
+            )
+            fake.cancel.assert_called_once()
+
+            # Recreating the channel with the same id must build a fresh manager.
+            recreated = owner.put(
+                "/api/v2/orgs/{}/channels/feishu_del".format(org_id),
+                json={
+                    "type": "feishu",
+                    "agent_id": "general",
+                    "enabled": True,
+                    "settings": {"group_policy": "private_only"},
+                },
+            )
+            self.assertEqual(recreated.status_code, 200, recreated.text)
+            login_again = owner.post(
+                "/api/v2/orgs/{}/channels/feishu_del/feishu/login".format(org_id)
+            )
+            self.assertEqual(login_again.status_code, 200, login_again.text)
+            self.assertEqual(fake_cls.call_count, 2, fake_cls.call_args_list)
+
     def test_org_wecom_channel_credentials_are_verified(self):
         from src.core.integrations.wecom_verify import WeComVerifyError
 

@@ -393,7 +393,7 @@ class FeishuAdapter(AsyncAdapterBridge):
         send = getattr(self._client, "send", None)
         if not callable(send):
             raise UnsupportedCapability("当前飞书 SDK 不支持发送消息")
-        result = send(target, {"text": message.text}, options)
+        result = send(target, {"markdown": message.text}, options)
         if asyncio.iscoroutine(result):
             result = await result
         self._raise_failed_result(result)

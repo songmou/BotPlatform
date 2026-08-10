@@ -56,6 +56,7 @@ class FeishuRegistrationManager:
         self._connected_checker = connected_checker
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
+        self._cancelled = False
         self._state = "idle"
         self._qr_data_url = ""
         self._error = ""
@@ -95,6 +96,7 @@ class FeishuRegistrationManager:
             self._error = ""
             self._app_id = ""
             self._user_name = ""
+            self._cancelled = False
             self.pending_holder.clear()
             self._thread = threading.Thread(
                 target=self._run,
@@ -104,6 +106,11 @@ class FeishuRegistrationManager:
             )
             self._thread.start()
         return self.status()
+
+    def cancel(self) -> None:
+        """Stop an in-flight registration; the worker thread exits at its next check."""
+        with self._lock:
+            self._cancelled = True
 
     def _request(self, client: Any, domain: str, params: Dict[str, str]) -> Any:
         response = client.post(
@@ -160,7 +167,11 @@ class FeishuRegistrationManager:
                 raise FeishuRegistrationError("飞书注册失败：未返回设备编号")
             interval = _as_float(begin.get("interval"), 5.0)
             expires_in = _as_float(begin.get("expires_in"), 3600.0)
+            if self._cancelled:
+                return
             credentials = self._poll(client, domain, device_code, interval, expires_in)
+            if self._cancelled:
+                return
             self.pending_holder.clear()
             self.pending_holder["pending"] = credentials
             if self._save is not None:
@@ -201,6 +212,8 @@ class FeishuRegistrationManager:
         deadline = time.monotonic() + max(expires_in, 1.0)
         domain_switched = False
         while time.monotonic() < deadline:
+            if self._cancelled:
+                return {}
             poll = self._request(
                 client, domain, {"action": "poll", "device_code": device_code}
             )

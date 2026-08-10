@@ -412,6 +412,7 @@ class AgentService:
         preset: AgentPreset,
         model: ModelSession,
         has_image: bool,
+        session_key: str = "direct",
     ) -> Optional[FinalAnswer]:
         configured_tools = resolve_tool_names(preset, self.tool_runtime)
         if (
@@ -437,7 +438,7 @@ class AgentService:
         answer = self.tool_runtime.direct_response_text("todo_manage", result)
         if answer is None:
             answer = "查询待办失败：{}".format(result.error or "工具没有返回有效结果")
-        return self._finish(user_id, history, question, answer)
+        return self._finish(user_id, history, question, answer, session_key=session_key)
 
     def _finish(
         self,
@@ -703,6 +704,7 @@ class AgentService:
                     preset,
                     model,
                     has_image=bool(image_bytes),
+                    session_key=session_key,
                 )
                 if allow_tools
                 else None
@@ -757,6 +759,7 @@ class AgentService:
                 thinking_parts=thinking_parts,
                 model=model,
                 datasource_ids=list(getattr(preset, "datasources", []) or []),
+                session_key=session_key,
             )
 
     def _parse_call(
@@ -848,6 +851,7 @@ class AgentService:
         thinking_parts: List[str],
         model: ModelSession,
         datasource_ids: Optional[List[str]] = None,
+        session_key: str = "direct",
     ) -> AgentOutcome:
         assert self.tool_runtime is not None
         # Re-assert the datasource grant on the current thread: schemas() and
@@ -879,12 +883,14 @@ class AgentService:
                         provider=model.identity.provider,
                     )
                 return self._finish(
-                    user_id, history, question, answer, thinking_parts
+                    user_id, history, question, answer, thinking_parts,
+                    session_key=session_key,
                 )
             if total_calls + len(raw_calls) > max_calls:
                 answer = "本次任务需要的工具步骤超过安全上限，请缩小问题范围后重试。"
                 return self._finish(
-                    user_id, history, question, answer, thinking_parts
+                    user_id, history, question, answer, thinking_parts,
+                    session_key=session_key,
                 )
             audit_context = ToolAuditContext(
                 user_id=user_id,
@@ -931,6 +937,7 @@ class AgentService:
                     datasource_ids=list(
                         getattr(self.tool_runtime, "bound_datasources", None) or []
                     ),
+                    session_key=session_key,
                 )
                 self._approvals.put(user_id, pending)
                 return self._approval_outcome(pending)
@@ -945,11 +952,15 @@ class AgentService:
                     question,
                     "\n\n".join(str(answer) for answer in direct_answers),
                     thinking_parts,
+                    session_key=session_key,
                 )
             messages.extend(self._tool_message(call) for call in calls)
 
         answer = "本次任务达到工具调用轮次上限，请缩小问题范围后重试。"
-        return self._finish(user_id, history, question, answer, thinking_parts)
+        return self._finish(
+            user_id, history, question, answer, thinking_parts,
+            session_key=session_key,
+        )
 
     def _approval_outcome(self, pending: PendingApproval) -> ApprovalRequired:
         ttl_seconds = (
@@ -1041,6 +1052,7 @@ class AgentService:
             thinking_parts=list(pending.thinking_parts),
             model=model,
             datasource_ids=list(getattr(pending, "datasource_ids", []) or []),
+            session_key=pending.session_key,
         )
 
     def generate(self, agent_id: str, prompt: str) -> str:

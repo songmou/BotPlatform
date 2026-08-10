@@ -54,6 +54,7 @@ class WeChatLoginManager:
         self._connected_checker = connected_checker
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
+        self._cancelled = False
         self._state = "idle"
         self._qr_data_url = ""
         self._error = ""
@@ -84,11 +85,17 @@ class WeChatLoginManager:
             self._state = "pending"
             self._qr_data_url = ""
             self._error = ""
+            self._cancelled = False
             self._thread = threading.Thread(
                 target=self._run, name="wechat-panel-login", daemon=True
             )
             self._thread.start()
         return self.status()
+
+    def cancel(self) -> None:
+        """Mark the session cancelled; a blocking login exits without saving."""
+        with self._lock:
+            self._cancelled = True
 
     def _on_qr(self, content: str) -> None:
         data_url = _qr_png_data_url(content)
@@ -108,6 +115,8 @@ class WeChatLoginManager:
         try:
             client = self._client_factory()
             credentials = client.login(self._on_qr, status_changed=self._on_status)
+            if self._cancelled:
+                return
             self._save(credentials, self.credentials_path)
             with self._lock:
                 self._state = "success"

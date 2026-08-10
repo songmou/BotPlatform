@@ -139,6 +139,7 @@ class PersonalConnectionService:
         platform: str,
         agent_id: str,
         bot_account_id: str = "",
+        settings: Optional[Dict[str, Any]] = None,
         allow_delegation: bool = False,
     ) -> Dict[str, Any]:
         if platform not in PLATFORM_CHANNEL_TYPES:
@@ -160,7 +161,9 @@ class PersonalConnectionService:
                     "type": PLATFORM_CHANNEL_TYPES[platform],
                     "agent_id": agent_id,
                     "enabled": True,
-                    "settings": {"group_policy": "private_only"},
+                    "settings": settings
+                    if settings is not None
+                    else {"group_policy": "private_only"},
                 },
                 int(user_id),
             )
@@ -306,6 +309,30 @@ class PersonalConnectionService:
                     "agent_id": agent_id,
                     "enabled": channel["enabled"],
                     "settings": channel.get("settings") or {"group_policy": "private_only"},
+                },
+                int(user_id),
+            )
+        except OrganizationControlError as exc:
+            raise PersonalConnectionError(str(exc)) from exc
+        return self.get(connection_id, user_id)
+
+    def set_group_policy(
+        self, connection_id: str, user_id: int, group_policy: str
+    ) -> Dict[str, Any]:
+        if group_policy not in {"private_only", "mention_only"}:
+            raise PersonalConnectionError("群聊策略无效")
+        row = self._require_owner(connection_id, user_id)
+        channel_id = self._channel_id_of(row["channel_instance_id"])
+        channel = self.controls.get_channel(row["organization_id"], channel_id)
+        try:
+            self.controls.upsert_channel(
+                row["organization_id"],
+                channel_id,
+                {
+                    "type": channel["type"],
+                    "agent_id": channel["agent_id"],
+                    "enabled": channel["enabled"],
+                    "settings": {"group_policy": group_policy},
                 },
                 int(user_id),
             )

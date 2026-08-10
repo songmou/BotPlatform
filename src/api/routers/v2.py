@@ -2071,6 +2071,24 @@ def test_typed_organization_channel(
     }
 
 
+def _release_channel_managers(request: Request, channel_id: str) -> None:
+    """Drop in-memory login/registration sessions bound to a deleted channel.
+
+    A recreated channel with the same id must start a fresh session, otherwise
+    the stale worker thread keeps serving an old QR/state forever.
+    """
+    wechat_managers = getattr(request.app.state, "wechat_login_managers", None)
+    if wechat_managers is not None:
+        manager = wechat_managers.pop("org-channel:{}".format(channel_id), None)
+        if manager is not None:
+            manager.cancel()
+    feishu_managers = getattr(request.app.state, "feishu_registration_managers", None)
+    if feishu_managers is not None:
+        manager = feishu_managers.pop("org-feishu:{}".format(channel_id), None)
+        if manager is not None:
+            manager.cancel()
+
+
 @router.delete("/orgs/{organization_id}/channels/{channel_id}")
 def delete_typed_organization_channel(
     organization_id: str,
@@ -2096,6 +2114,7 @@ def delete_typed_organization_channel(
                 raise
     except (OrganizationControlError, CredentialError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _release_channel_managers(request, channel_id)
     return {"deleted": True, "channel_instance_id": instance_id}
 
 
