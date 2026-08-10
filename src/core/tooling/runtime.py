@@ -1238,7 +1238,8 @@ class ToolRuntime:
         existing_mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
         descriptor, temp_name = tempfile.mkstemp(prefix=".ilinkbot-", dir=str(path.parent))
         try:
-            os.fchmod(descriptor, existing_mode)
+            if os.name != "nt":
+                os.fchmod(descriptor, existing_mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(content)
                 handle.flush()

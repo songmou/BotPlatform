@@ -210,12 +210,16 @@ def create_connection(
     agent_id = str(body.get("agent_id") or "").strip()
     if not organization_id or not agent_id:
         raise HTTPException(status_code=400, detail="请选择归属组织和智能体")
+    settings = body.get("settings")
+    if settings is not None and not isinstance(settings, dict):
+        raise HTTPException(status_code=400, detail="渠道设置必须是 JSON 对象")
     try:
         created = service.create(
             user_id=principal.user.user_id,
             organization_id=organization_id,
             platform=platform,
             agent_id=agent_id,
+            settings=settings,
             allow_delegation=principal.allows("admins.manage"),
         )
     except PersonalConnectionError as exc:
@@ -287,6 +291,26 @@ def set_connection_agent(
     return detail
 
 
+@router.put("/{connection_id}/group-policy")
+def set_connection_group_policy(
+    connection_id: str,
+    request: Request,
+    body: Dict[str, Any] = Body(...),
+    principal=Depends(get_principal),
+):
+    group_policy = str(body.get("group_policy") or "").strip()
+    if group_policy not in {"private_only", "mention_only"}:
+        raise HTTPException(status_code=400, detail="群聊策略无效")
+    service = _service(request)
+    try:
+        detail = service.set_group_policy(
+            connection_id, principal.user.user_id, group_policy
+        )
+    except PersonalConnectionError as exc:
+        raise _error(exc) from exc
+    return detail
+
+
 @router.delete("/{connection_id}")
 def delete_connection(
     connection_id: str,
@@ -299,8 +323,12 @@ def delete_connection(
     except PersonalConnectionError as exc:
         raise _error(exc) from exc
     with _MANAGER_LOCK:
-        _managers(request).pop(connection_id, None)
-        _feishu_managers(request).pop(connection_id, None)
+        wechat_manager = _managers(request).pop(connection_id, None)
+        if wechat_manager is not None:
+            wechat_manager.cancel()
+        feishu_manager = _feishu_managers(request).pop(connection_id, None)
+        if feishu_manager is not None:
+            feishu_manager.cancel()
     return {"deleted": True}
 
 
