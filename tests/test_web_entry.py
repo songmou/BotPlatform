@@ -101,14 +101,10 @@ class SharedRuntimeGraphTest(unittest.TestCase):
             scheduler=runtime.scheduler,
             script_service=runtime.script_service,
             script_registry=runtime.external_script_registry,
-            script_schedule_service=runtime.script_schedule_service,
             owns_services=False,
         )
         self.assertIs(app.state.scheduler, runtime.scheduler)
         self.assertIs(app.state.script_service, runtime.script_service)
-        self.assertIs(
-            app.state.script_schedule_service, runtime.script_schedule_service
-        )
         self.assertIs(app.state.model_router, services.model_router)
         self.assertFalse(app.state.owns_services)
         # This config disables tools, so the shared runtime has none either.

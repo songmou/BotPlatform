@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -59,6 +60,7 @@ class ScriptRun:
     exit_code: Optional[int] = None
     error: Optional[str] = None
     notification_error: Optional[str] = None
+    trigger_endpoint_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -131,7 +133,22 @@ class ScriptService:
         self._cancelled = set()
         self._completion_listeners: List[Callable[[ScriptRun], None]] = []
         self._shutting_down = False
+        # Transient: endpoint id of the inbound message that triggered the
+        # current submission, used to route proactive results back to the same
+        # conversation. Overwritten per inbound message; never relied upon
+        # across messages.
+        self.trigger_endpoint_id: Optional[str] = None
         self.input_registry = ScriptInputRegistry()
+        # Idempotent migration: older databases lack the trigger_endpoint_id
+        # column on script_runs, which records which conversation a run's
+        # proactive result should be routed back to.
+        try:
+            with self.tenant_registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "ALTER TABLE script_runs ADD COLUMN trigger_endpoint_id TEXT"
+                )
+        except (sqlite3.Error, OSError):
+            pass
         self._executor = ThreadPoolExecutor(
             max_workers=max(2, len(self.definitions)),
             thread_name_prefix="ilinkbot-script",
@@ -245,18 +262,26 @@ class ScriptService:
         )
 
     def submit_for_tenant(
-        self, tenant: TenantContext, script_id: str, parameters: object
+        self,
+        tenant: TenantContext,
+        script_id: str,
+        parameters: object,
+        trigger_endpoint_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         registered = self.tenant_registry.get(tenant.tenant_id)
         if registered != tenant:
             raise ValueError("租户身份不匹配")
         recipient = self.recipient_store.load(tenant.tenant_id)
+        effective_endpoint = trigger_endpoint_id or getattr(
+            self, "trigger_endpoint_id", None
+        )
         return self.submit(
             tenant,
             script_id,
             parameters,
             trigger="model",
             recipient=recipient,
+            trigger_endpoint_id=effective_endpoint,
         )
 
     def submit(
@@ -266,6 +291,7 @@ class ScriptService:
         parameters: object,
         trigger: str,
         recipient: Optional[Recipient] = None,
+        trigger_endpoint_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if self.tenant_registry.get(tenant.tenant_id) != tenant:
             raise ValueError("租户身份不匹配")
@@ -287,6 +313,7 @@ class ScriptService:
             summary="任务已提交，正在后台执行。",
             created_at=now.isoformat(),
             tenant_id=tenant.tenant_id,
+            trigger_endpoint_id=trigger_endpoint_id,
         )
         with self._lock:
             if self._shutting_down:
@@ -611,15 +638,17 @@ class ScriptService:
             connection.execute(
                 "INSERT INTO script_runs(run_id, tenant_id, script_id, script_name, trigger, "
                 "parameters_json, status, summary, created_at, started_at, finished_at, exit_code, "
-                "error, notification_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "error, notification_error, trigger_endpoint_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(run_id) DO UPDATE SET status=excluded.status, summary=excluded.summary, "
                 "started_at=excluded.started_at, finished_at=excluded.finished_at, "
                 "exit_code=excluded.exit_code, error=excluded.error, "
-                "notification_error=excluded.notification_error",
+                "notification_error=excluded.notification_error, "
+                "trigger_endpoint_id=excluded.trigger_endpoint_id",
                 (
                     run.run_id, run.tenant_id, run.script_id, run.script_name, run.trigger,
                     parameters, run.status, run.summary, run.created_at, run.started_at,
                     run.finished_at, run.exit_code, run.error, run.notification_error,
+                    run.trigger_endpoint_id,
                 ),
             )
             connection.execute("DELETE FROM script_run_artifacts WHERE run_id=?", (run.run_id,))
@@ -978,6 +1007,14 @@ class ScriptService:
     def _notify(self, run: ScriptRun) -> None:
         with self._lock:
             recipient = self._recipients.pop(run.run_id, None)
+        # Derive the originating channel so the dispatcher can fall back within
+        # the same channel instead of blindly using the tenant's last-active
+        # endpoint (which may be a different channel, e.g. WeChat -> Feishu).
+        trigger_channel_id: Optional[str] = None
+        if run.trigger_endpoint_id and self.address_store is not None:
+            trigger_endpoint = self.address_store.endpoint(run.trigger_endpoint_id)
+            if trigger_endpoint is not None:
+                trigger_channel_id = trigger_endpoint.channel_id
         labels = {
             "success": "成功",
             "failed": "失败",
@@ -1004,6 +1041,8 @@ class ScriptService:
                     message,
                     source_type="script",
                     source_key="{}:text".format(run.run_id),
+                    selected_endpoint_id=run.trigger_endpoint_id,
+                    channel_id=trigger_channel_id,
                 )
             elif recipient is not None:
                 self.notification_service.send_text_to(recipient, message)
@@ -1021,6 +1060,8 @@ class ScriptService:
                         caption="",
                         source_type="script",
                         source_key="{}:image:{}".format(run.run_id, index),
+                        selected_endpoint_id=run.trigger_endpoint_id,
+                        channel_id=trigger_channel_id,
                     )
                 elif recipient is not None:
                     self.notification_service.send_image_to(

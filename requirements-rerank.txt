@@ -1,0 +1,4 @@
+# Optional local multilingual reranker. The default installation does not load it.
+torch>=2.4,<3.0
+transformers>=4.48,<6.0
+safetensors>=0.4,<1.0

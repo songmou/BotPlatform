@@ -1149,7 +1149,9 @@ function initOrganizationModule(requestedModule) {
             state.data = data;
             setItems(data.items || [], function (item) {
                 var personal = !!item.personal;
+                var channelInstanceId = item.channel_instance_id || item.id;
                 var actions = "";
+                actions += button("channel-conversations", channelInstanceId, "会话");
                 if (canWriteOrganization() || personal) {
                     actions += button("channel-toggle", item.id, item.enabled ? "暂停" : "启用");
                     actions += button("channel-edit", item.id, "编辑");
@@ -1166,6 +1168,56 @@ function initOrganizationModule(requestedModule) {
                     actions
                 );
             });
+        });
+    }
+
+    function formatConvTime(value) {
+        if (!value) return "—";
+        var date = new Date(value);
+        if (isNaN(date.getTime())) return String(value);
+        return date.toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function openConversationsModal(titleText, fetchUrl, channelInstanceId) {
+        var modal = document.getElementById("organization-conversations-modal");
+        if (!modal) { showToast("会话面板未初始化", "error"); return; }
+        var titleEl = modal.querySelector(".modal-header h3");
+        var body = modal.querySelector(".modal-body");
+        if (titleEl) titleEl.textContent = titleText || "渠道会话";
+        body.innerHTML = '<div class="organization-empty">加载中…</div>';
+        modal.style.display = "";
+        request(fetchUrl).then(function (data) {
+            var items = Array.isArray(data) ? data : (data.items || []);
+            if (!items.length) {
+                body.innerHTML = '<div class="organization-empty">该渠道暂无会话记录</div>';
+                return;
+            }
+            body.innerHTML = items.map(function (c) {
+                var channelLabel = channelInstanceId || c.channel_instance_id || "";
+                var participant = c.external_participant_name ||
+                    c.external_participant_ref || "匿名用户";
+                var title = c.title || "未命名会话";
+                return '<div class="conv-list-row" data-conv="' + escapeHtml(c.id) + '">' +
+                    '<div class="conv-row-main">' +
+                        '<div class="conv-row-title">' + escapeHtml(title) + "</div>" +
+                        '<div class="conv-row-meta">' + escapeHtml(participant) +
+                        (channelLabel ? ' · <span class="conv-row-channel">' +
+                            escapeHtml(channelLabel) + "</span>" : "") +
+                        " · " + escapeHtml(formatConvTime(c.updated_at)) + "</div>" +
+                    "</div>" +
+                    '<div class="conv-row-go">打开 ›</div>' +
+                "</div>";
+            }).join("");
+            body.querySelectorAll(".conv-list-row").forEach(function (row) {
+                row.addEventListener("click", function () {
+                    var convId = row.getAttribute("data-conv");
+                    modal.style.display = "none";
+                    window.location.href = "/chat?conversation=" + encodeURIComponent(convId);
+                });
+            });
+        }).catch(function (err) {
+            body.innerHTML = '<div class="organization-empty">加载失败：' +
+                escapeHtml(err && err.message ? err.message : "未知错误") + "</div>";
         });
     }
 
@@ -1506,7 +1558,7 @@ function initOrganizationModule(requestedModule) {
         var id = target.getAttribute("data-id");
         var current;
         if (module === "agents") current = (state.data.items || []).filter(function (item) { return item.resource_id === id; })[0];
-        if (module === "channels") current = (state.data.items || []).filter(function (item) { return item.id === id; })[0];
+        if (module === "channels") current = (state.data.items || []).filter(function (item) { return item.id === id || item.channel_instance_id === id; })[0];
         if (module === "schedules") current = (state.data.items || []).filter(function (item) { return item.id === id; })[0];
         if (module === "members") current = (state.data.items || []).filter(function (item) { return String(item.user_id) === id; })[0];
         var promise = Promise.resolve();
@@ -1576,10 +1628,20 @@ function initOrganizationModule(requestedModule) {
             } else {
                 promise = updateChannelWecomCredentials(current, false);
             }
-        } else if (action === "channel-test") promise = request(organizationApi("/channels/" + encodeURIComponent(id) + "/test"), { method: "POST" }).then(function (result) {
+        }         else if (action === "channel-test") promise = request(organizationApi("/channels/" + encodeURIComponent(id) + "/test"), { method: "POST" }).then(function (result) {
             showToast((result && result.detail) || "渠道测试通过", "success");
             return result;
         });
+        else if (action === "channel-conversations") {
+            if (!current) { showToast("无法定位该渠道", "error"); return; }
+            var convChannel = current.channel_instance_id || current.id;
+            openConversationsModal(
+                "渠道会话 · " + (current.id + (current.personal ? "（个人）" : "")),
+                organizationApi("/channels/" + encodeURIComponent(convChannel) + "/conversations"),
+                convChannel
+            );
+            return;
+        }
         else if (action === "channel-delete") {
             if (current.personal) {
                 promise = showConfirm("确定删除该个人连接？删除后对应的微信/企微/飞书接入会立即断开。").then(function (ok) {
@@ -1656,6 +1718,23 @@ function initOrganizationModule(requestedModule) {
         }
         refresh();
     });
+
+    var aggregateConvBtn = document.getElementById("organization-channel-conversations-btn");
+    if (aggregateConvBtn) {
+        aggregateConvBtn.addEventListener("click", function () {
+            openConversationsModal("跨渠道最近会话", organizationApi("/channel-conversations"), null);
+        });
+    }
+    var convModal = document.getElementById("organization-conversations-modal");
+    if (convModal) {
+        var convModalClose = convModal.querySelector(".modal-close-btn");
+        if (convModalClose) {
+            convModalClose.addEventListener("click", function () { convModal.style.display = "none"; });
+        }
+        convModal.addEventListener("click", function (e) {
+            if (e.target === convModal) convModal.style.display = "none";
+        });
+    }
     primary.addEventListener("click", function () {
         primaryAction().catch(function (error) { showToast(error.message, "error"); });
     });

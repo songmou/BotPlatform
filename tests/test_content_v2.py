@@ -47,6 +47,28 @@ class ContentV2ApiTest(WebApiTestBase):
         self.assertEqual(login.status_code, 200, login.text)
         return payload["organization"]["organization_id"], owner
 
+    def test_platform_drive_import_supports_benchmark_sized_batches(self):
+        category = self.client.post(
+            "/api/v2/platform/knowledge/categories", json={"name": "批量评测库"}
+        ).json()
+        paths = ["benchmark/doc-{}.md".format(index) for index in range(800)]
+        imported = self.client.post(
+            "/api/v2/platform/knowledge/from-drive",
+            json={"category_id": category["category_id"], "paths": paths},
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(len(imported.json()["items"]), 800)
+
+        rejected = self.client.post(
+            "/api/v2/platform/knowledge/from-drive",
+            json={
+                "category_id": category["category_id"],
+                "paths": paths + ["benchmark/overflow-{}.md".format(index) for index in range(201)],
+            },
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertIn("1 到 1000", rejected.json()["detail"])
+
     def test_platform_public_knowledge_and_drive_full_flow(self):
         self.assertEqual(
             self.viewer_client.get("/api/v2/platform/knowledge/categories").status_code,

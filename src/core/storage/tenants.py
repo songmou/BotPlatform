@@ -305,6 +305,45 @@ class ConversationStore:
                     ).fetchall()
         return [CanonicalMessage(str(row["role"]), str(row["content"])) for row in reversed(rows)]
 
+    def load_transcript(
+        self,
+        tenant_id: str,
+        session_key: str = "direct",
+    ) -> List[CanonicalMessage]:
+        """Return the durable conversation transcript for display/history.
+
+        Unlike :meth:`load_context` (which returns the rolling LLM context
+        window from ``conversation_context_messages``), this reads the
+        append-only ``conversation_events`` log. That log also captures
+        channel-sourced organization conversations, whose messages are only
+        ever written there (the bot appends a transcript event but never
+        touches the rolling context). ``context_cleared`` markers truncate the
+        visible history so the clear-context action is still honoured.
+        """
+        with self.lock_for(tenant_id, session_key):
+            with self.registry.database.read() as connection:
+                rows = connection.execute(
+                    "SELECT event_id, role, content, event_type "
+                    "FROM conversation_events "
+                    "WHERE tenant_id=? AND session_key=? "
+                    "ORDER BY event_id ASC",
+                    (tenant_id, session_key),
+                ).fetchall()
+        last_clear = -1
+        for row in rows:
+            if row["event_type"] == "context_cleared":
+                last_clear = row["event_id"]
+        messages: List[CanonicalMessage] = []
+        for row in rows:
+            if row["event_id"] <= last_clear:
+                continue
+            if row["event_type"] != "message":
+                continue
+            messages.append(
+                CanonicalMessage(str(row["role"]), str(row["content"]))
+            )
+        return messages
+
     def save_context(
         self,
         tenant_id: str,

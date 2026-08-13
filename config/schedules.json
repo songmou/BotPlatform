@@ -23,7 +23,7 @@
     },
     {
       "id": "autogen_monitor",
-      "enabled": true,
+      "enabled": false,
       "cron": "0 8,14 * * *",
       "target": "last_active_user",
       "action": {
@@ -34,7 +34,7 @@
     },
     {
       "id": "ctsehr_check",
-      "enabled": true,
+      "enabled": false,
       "crons": [
         "50 8 * * *",
         "0 18 * * *"
@@ -48,7 +48,7 @@
     },
     {
       "id": "todo_reminder",
-      "enabled": true,
+      "enabled": false,
       "crons": [
         "0 9 * * *",
         "0 18 * * *"
@@ -65,7 +65,7 @@
     },
     {
       "id": "todo_monthly_archive",
-      "enabled": true,
+      "enabled": false,
       "cron": "5 9 1 * *",
       "target": "last_active_user",
       "action": {
@@ -79,7 +79,7 @@
     },
     {
       "id": "inactive_user_reminder",
-      "enabled": true,
+      "enabled": false,
       "cron": "*/10 * * * *",
       "target": "last_active_user",
       "condition": {

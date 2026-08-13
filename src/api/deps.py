@@ -58,10 +58,6 @@ def get_script_registry(request: Request):
     return getattr(request.app.state, "script_registry", None)
 
 
-def get_script_schedule_service(request: Request):
-    return getattr(request.app.state, "script_schedule_service", None)
-
-
 def get_settings_store(request: Request):
     store = getattr(request.app.state, "settings_store", None)
     if store is None:

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}工作流 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/workflows.css?v=20260812d">{% endblock %}
+{% block content %}
+<div id="workflow-app" class="page-container workflow-page" data-mode="{{ workflow_mode }}">
+    <div class="page-header workflow-header">
+        <div><h2>{{ '工作流模板' if workflow_mode == 'platform' else '组织工作流' }}</h2><p class="page-desc">通过可视节点编排 AI、知识、工具、分支与人工审批。</p></div>
+        <div class="workflow-actions"><button id="workflow-new" class="btn-primary">新建工作流</button><button id="workflow-refresh" class="btn-secondary">刷新</button></div>
+    </div>
+    {% if workflow_mode == 'organization' %}
+    <div class="tab-bar workflow-tabs"><button class="tab-btn active" data-workflow-tab="flows">工作流</button><button class="tab-btn" data-workflow-tab="runs">运行记录</button><button class="tab-btn" data-workflow-tab="waits">审批待办</button></div>
+    {% endif %}
+    <div id="workflow-notice" class="status-card" hidden></div>
+    <section id="workflow-list" class="workflow-list"></section>
+    <section id="workflow-runs" hidden><div class="table-scroll"><table class="data-table"><thead><tr><th>时间</th><th>工作流</th><th>触发</th><th>状态</th><th>操作</th></tr></thead><tbody id="workflow-runs-body"></tbody></table></div></section>
+    <section id="workflow-waits" hidden><div class="workflow-list" id="workflow-waits-list"></div></section>
+    <section id="workflow-editor" class="workflow-editor" hidden>
+        <div class="workflow-editor-toolbar">
+            <button id="workflow-back" class="btn-secondary">返回</button><button id="workflow-reload" class="btn-secondary">重新加载</button><input id="workflow-name" type="text" aria-label="工作流名称">
+            <span id="workflow-save-state" class="workflow-save-state"></span>
+            <button id="workflow-undo" class="btn-secondary">撤销</button><button id="workflow-redo" class="btn-secondary">重做</button>
+            <button id="workflow-settings" class="btn-secondary">流程设置</button><button id="workflow-ai" class="btn-secondary">AI 搭建</button><button id="workflow-validate" class="btn-secondary">校验</button>
+            {% if workflow_mode == 'organization' %}<button id="workflow-test" class="btn-secondary">试运行</button>{% endif %}<button id="workflow-manage" class="btn-secondary">管理</button><button id="workflow-publish" class="btn-primary">发布</button>
+        </div>
+        <div class="workflow-designer">
+            <aside class="workflow-palette"><h3>节点</h3><input id="workflow-node-search" type="search" placeholder="搜索节点" aria-label="搜索节点"><div id="workflow-node-catalog"></div></aside>
+            <div class="workflow-canvas-shell">
+                <div class="workflow-canvas-tools"><button id="workflow-zoom-out">−</button><span id="workflow-zoom-label">100%</span><button id="workflow-zoom-in">＋</button><button id="workflow-fit">适应</button><span id="workflow-connect-hint"></span></div>
+                <div id="workflow-canvas" class="workflow-canvas" tabindex="0" aria-label="工作流画布"><div id="workflow-world" class="workflow-world"><svg id="workflow-edges" class="workflow-edges"></svg><div id="workflow-nodes"></div><div id="workflow-selection-box" class="workflow-selection-box" hidden></div></div></div>
+                <div id="workflow-debug" class="workflow-debug" hidden><div class="workflow-debug-header"><strong>调试结果</strong><button id="workflow-debug-close" type="button" aria-label="关闭调试结果">×</button></div><pre id="workflow-debug-content"></pre></div>
+            </div>
+            <aside class="workflow-properties"><div class="workflow-properties-header"><h3>节点配置</h3><button id="workflow-property-close" type="button" aria-label="关闭节点配置">×</button></div><div id="workflow-property-empty" class="tool-empty">请选择节点或连线</div><div id="workflow-edge-form" hidden><p id="workflow-edge-summary"></p><button id="workflow-delete-edge" class="btn-danger">删除连线</button></div><div id="workflow-property-form" hidden><label>节点名称<input id="workflow-node-name" type="text"></label><div class="workflow-config-tabs"><button type="button" class="active" data-config-tab="form">结构化配置</button><button type="button" data-config-tab="json">高级 JSON</button></div><div id="workflow-node-fields"></div><div class="workflow-variable-picker"><label>可用变量<select id="workflow-variable-picker"></select></label><button id="workflow-variable-insert" type="button" class="btn-secondary">插入变量</button></div><div id="workflow-node-json" hidden><label>配置 JSON<textarea id="workflow-node-config" rows="14"></textarea></label><p id="workflow-json-error" class="workflow-field-error" hidden></p></div><div id="workflow-node-contract" class="workflow-node-contract"></div><label>失败策略<select id="workflow-error-mode"><option value="stop">停止</option><option value="retry">重试</option><option value="continue">继续</option><option value="error_branch">错误分支</option></select></label><label id="workflow-retry-wrap" hidden>最大重试次数<input id="workflow-max-retries" type="number" min="1" max="3" value="3"></label><div class="workflow-property-actions"><button id="workflow-connect" class="btn-secondary">连接到…</button><button id="workflow-delete-node" class="btn-danger">删除节点</button></div></div></aside>
+        </div>
+    </section>
+    <div id="workflow-panel-overlay" class="workflow-panel-overlay" hidden><section class="workflow-panel" role="dialog" aria-modal="true"><header><h3 id="workflow-panel-title">工作流设置</h3><button id="workflow-panel-close" aria-label="关闭">×</button></header><div id="workflow-panel-body"></div><footer><button id="workflow-panel-cancel" class="btn-secondary">取消</button><button id="workflow-panel-save" class="btn-primary">保存</button></footer></section></div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/workflows.js?v=20260812f"></script><script>initWorkflowPage();</script>{% endblock %}

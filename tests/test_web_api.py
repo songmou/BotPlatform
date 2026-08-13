@@ -650,7 +650,7 @@ class WebApiTest(unittest.TestCase):
 
     def test_chat_history(self):
         conv_id = self._create_conversation()
-        self.mock_store.load_context.return_value = [
+        self.mock_store.load_transcript.return_value = [
             CanonicalMessage("user", "你好"),
             CanonicalMessage("assistant", "你好！"),
         ]
@@ -677,12 +677,12 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(len(response.json()), 0)
 
     def test_page_chat(self):
-        response = self.client.get("/chat", params=self._auth_params())
+        response = self.client.get("/organization/chat", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertIn("chat-messages", response.text)
 
     def test_chat_uses_local_markdown_dependencies_under_csp(self):
-        response = self.client.get("/chat", params=self._auth_params())
+        response = self.client.get("/organization/chat", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("cdn.jsdelivr.net", response.text)
         marked = response.text.index("/static/vendor/marked/marked.umd.js")
@@ -699,13 +699,13 @@ class WebApiTest(unittest.TestCase):
             self.assertIn(marker, asset.text)
 
     def test_reworked_management_pages_render(self):
-        scripts = self.client.get("/scripts")
+        scripts = self.client.get("/platform/scripts")
         self.assertEqual(scripts.status_code, 200)
         self.assertIn('data-scripts-tab="catalog"', scripts.text)
         self.assertIn('data-scripts-tab="runs"', scripts.text)
         self.assertIn("script-settings-modal", scripts.text)
 
-        tools = self.client.get("/tools")
+        tools = self.client.get("/platform/tools")
         self.assertEqual(tools.status_code, 200)
         self.assertIn("执行审计", tools.text)
         self.assertIn("audit-filter-status", tools.text)
@@ -726,7 +726,7 @@ class WebApiTest(unittest.TestCase):
         self.assertIn("organization-detail-modal", users.text)
 
     def test_management_layout_structure(self):
-        tools = self.client.get("/tools")
+        tools = self.client.get("/platform/tools")
         self.assertEqual(tools.status_code, 200)
         tools_dom = BeautifulSoup(tools.text, "html.parser")
         category_tabs = tools_dom.select_one("#builtin-category-tabs")
@@ -752,7 +752,7 @@ class WebApiTest(unittest.TestCase):
         self.assertIsNone(drive_dom.select_one("#organization-switch"))
 
     def test_unified_shell_versions_global_context_assets(self):
-        response = self.client.get("/agents")
+        response = self.client.get("/platform/agent-templates")
         self.assertEqual(response.status_code, 200)
         self.assertIn('/static/js/common.js?v=20260803b', response.text)
         self.assertIn('/static/js/catalog-api.js?v=20260806a', response.text)
@@ -761,12 +761,12 @@ class WebApiTest(unittest.TestCase):
         self.assertNotIn('id="organization-page-switch"', response.text)
 
     def test_page_models(self):
-        response = self.client.get("/models", params=self._auth_params())
+        response = self.client.get("/platform/models", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertIn("model-list", response.text)
 
     def test_page_agents(self):
-        response = self.client.get("/agents", params=self._auth_params())
+        response = self.client.get("/platform/agent-templates", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertIn("agent-list", response.text)
         self.assertNotIn('data-agent-tab="tools"', response.text)
@@ -790,7 +790,7 @@ class WebApiTest(unittest.TestCase):
         from fastapi.testclient import TestClient as _TestClient
 
         anonymous = _TestClient(self.app)
-        response = anonymous.get("/models", follow_redirects=False)
+        response = anonymous.get("/platform/models", follow_redirects=False)
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.headers["location"].startswith("/login"))
 

@@ -836,6 +836,45 @@ def list_organization_conversations(
     return [item for item in items if str(item.get("source") or "") != "channel"]
 
 
+@router.get("/orgs/{organization_id}/channels/{channel_instance_id}/conversations")
+def list_channel_conversations(
+    organization_id: str,
+    channel_instance_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    """Recent conversations for a single message channel (org or personal)."""
+    context = _organization_context(request, principal, organization_id)
+    return get_organization_store(request).list_channel_conversations(
+        context.user_id,
+        organization_id,
+        channel_instance_id,
+        allow_delegation=context.platform_delegation,
+    )
+
+
+@router.get("/orgs/{organization_id}/channel-conversations")
+def list_all_channel_conversations(
+    organization_id: str,
+    request: Request,
+    limit: int = 200,
+    principal=Depends(get_principal),
+):
+    """Cross-channel aggregate of recent conversations for the organization."""
+    context = _organization_context(request, principal, organization_id)
+    items = get_organization_store(request).list_conversations(
+        context.user_id,
+        organization_id,
+        allow_delegation=context.platform_delegation,
+    )
+    channel_items = [
+        item for item in items if str(item.get("source") or "") == "channel"
+    ]
+    if limit and limit > 0:
+        channel_items = channel_items[:limit]
+    return channel_items
+
+
 @router.post("/orgs/{organization_id}/conversations", status_code=201)
 def create_organization_conversation(
     organization_id: str,
@@ -931,7 +970,7 @@ def organization_conversation_history(
     if str(conversation["organization_id"]) != organization_id:
         raise HTTPException(status_code=404, detail="对话不存在")
     store = request.app.state.conversation_store
-    messages = store.load_context(
+    messages = store.load_transcript(
         organization_id,
         session_key="organization:{}".format(conversation_id),
     )
@@ -1140,6 +1179,10 @@ _CAPABILITY_SAFE_FIELDS = {
     },
     "channels": {"id", "name", "description", "type", "enabled"},
     "schedules": {"id", "name", "description", "enabled"},
+    "workflows": {
+        "schema_version", "name", "description", "inputs", "outputs",
+        "triggers", "nodes", "edges", "settings",
+    },
 }
 
 _SENSITIVE_CATALOG_PARTS = {

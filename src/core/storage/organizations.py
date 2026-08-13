@@ -561,6 +561,35 @@ class OrganizationStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_channel_conversations(
+        self,
+        user_id: int,
+        organization_id: str,
+        channel_instance_id: str,
+        allow_delegation: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List conversations bound to a single message channel.
+
+        Channel conversations are stored with ``source='channel'`` and a
+        ``channel_instance_id`` taken from the inbound message's channel id, so
+        they are excluded from the web chat list but remain queryable here.
+        """
+        if allow_delegation:
+            self.get(organization_id)
+        else:
+            self.membership(user_id, organization_id)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT conversation_id AS id, title, organization_id, "
+                "creator_user_id, source, channel_instance_id, "
+                "external_participant_ref, external_participant_name, status, "
+                "created_at, updated_at FROM organization_conversations "
+                "WHERE organization_id=? AND channel_instance_id=? "
+                "AND source='channel' ORDER BY updated_at DESC",
+                (organization_id, channel_instance_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_conversation(
         self,
         user_id: int,

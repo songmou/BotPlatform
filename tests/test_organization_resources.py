@@ -94,6 +94,49 @@ class OrganizationResourceApiTest(WebApiTestBase):
             self.assertEqual(deleted.status_code, 200, deleted.text)
             self.assertEqual(mh.load_headers("secret_svc"), {})
 
+    def test_platform_catalog_mcp_tat_secret_stored_in_keychain(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from src.core.config import mcp_headers as mh
+
+        keychain_file = Path(tempfile.mkdtemp()) / "mcp_headers.json"
+        with patch.object(mh, "MCP_HEADERS_FILE", keychain_file):
+            saved = self.client.put(
+                "/api/v2/platform/catalog/mcp/tat_svc",
+                json={"payload": {
+                    "id": "tat_svc",
+                    "name": "飞书 TAT",
+                    "transport": "streamablehttp",
+                    "url": "https://mcp.feishu.cn/mcp",
+                    "headers": {"X-Lark-MCP-Allowed-Tools": "fetch-doc"},
+                    "token_provider": {
+                        "kind": "feishu_tat",
+                        "app_id": "cli_xxx",
+                        "app_secret": "topsecret",
+                    },
+                }},
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            # The app_secret must NOT be echoed back in the catalog payload.
+            got = self.client.get("/api/v2/platform/catalog/mcp/tat_svc")
+            self.assertEqual(got.status_code, 200, got.text)
+            returned = got.json()["payload"]
+            self.assertNotIn("app_secret", returned.get("token_provider", {}))
+            self.assertEqual(
+                returned.get("token_provider"),
+                {"kind": "feishu_tat", "app_id": "cli_xxx"},
+            )
+            # The secret is kept in the keychain instead.
+            self.assertEqual(mh.load_secret("tat_svc"), "topsecret")
+            # Deleting the resource cleans up both headers and the secret.
+            deleted = self.client.delete(
+                "/api/v2/platform/catalog/mcp/tat_svc"
+            )
+            self.assertEqual(deleted.status_code, 200, deleted.text)
+            self.assertIsNone(mh.load_secret("tat_svc"))
+
     def _invite_member(
         self, owner: TestClient, organization_id: str, suffix: str, role="member"
     ):
@@ -606,6 +649,89 @@ class OrganizationResourceApiTest(WebApiTestBase):
         # the chat page conversation list.
         self.assertEqual(shared, [])
 
+    def test_channel_conversations_are_queryable_by_channel_and_aggregated(self):
+        from src.core.messaging import ChannelAddressStore, InboundMessage
+
+        org_a, owner_a = self._create_owner("chan-conv")
+        body = {
+            "type": "wecom_aibot",
+            "agent_id": "general",
+            "enabled": True,
+            "settings": {"group_policy": "private_only"},
+        }
+        channel = owner_a.put(
+            "/api/v2/orgs/{}/channels/main".format(org_a), json=body
+        ).json()
+        channel_instance_id = channel["channel_instance_id"]
+        store = ChannelAddressStore(self.registry)
+
+        inbound = InboundMessage(
+            event_id="evt-chan-conv",
+            channel_id=channel_instance_id,
+            platform="wecom_aibot",
+            account_id="bot",
+            sender_id="external-user",
+            conversation_type="direct",
+            conversation_id="external-user",
+            text="你好",
+        )
+        tenant = store.resolve(inbound)
+        store.ensure_organization_conversation(inbound, tenant)
+        store.record_endpoint(tenant, inbound)
+
+        # Per-channel listing surfaces the channel conversation.
+        per_channel = owner_a.get(
+            "/api/v2/orgs/{}/channels/{}/conversations".format(
+                org_a, channel_instance_id
+            )
+        )
+        self.assertEqual(per_channel.status_code, 200, per_channel.text)
+        per_items = per_channel.json()
+        self.assertEqual(len(per_items), 1)
+        self.assertEqual(per_items[0]["channel_instance_id"], channel_instance_id)
+        self.assertEqual(per_items[0]["source"], "channel")
+
+        # Cross-channel aggregate also returns it.
+        aggregate = owner_a.get(
+            "/api/v2/orgs/{}/channel-conversations".format(org_a)
+        )
+        self.assertEqual(aggregate.status_code, 200, aggregate.text)
+        self.assertEqual(len(aggregate.json()), 1)
+
+        # Regression: the web chat conversation list still excludes channels.
+        web_list = owner_a.get("/api/v2/orgs/{}/conversations".format(org_a))
+        self.assertEqual(web_list.status_code, 200, web_list.text)
+        self.assertEqual(web_list.json(), [])
+
+        # Web-mode GET-by-id endpoint returns the channel conversation meta.
+        conv_id = per_items[0]["id"]
+        by_id = owner_a.get("/api/chat/conversations/{}".format(conv_id))
+        self.assertEqual(by_id.status_code, 200, by_id.text)
+        self.assertEqual(by_id.json()["id"], conv_id)
+
+        # The durable transcript (conversation_events) must be returned by the
+        # history endpoint. Channel messages are stored only there, never in
+        # the rolling context table, so the previous load_context read was empty.
+        conversation_store = self.app.state.conversation_store
+        session_key = "organization:{}".format(conv_id)
+        conversation_store.append_transcript(
+            org_a, "user", "你好", session_key=session_key,
+            actor_type="channel_user", actor_account="external-user",
+        )
+        conversation_store.append_transcript(
+            org_a, "assistant", "你好，有什么可以帮你？", session_key=session_key,
+            actor_type="agent", actor_account="general",
+        )
+        history = owner_a.get(
+            "/api/v2/orgs/{}/conversations/{}/history".format(org_a, conv_id)
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        history_messages = history.json()["messages"]
+        self.assertEqual(len(history_messages), 2)
+        self.assertEqual(history_messages[0]["role"], "user")
+        self.assertEqual(history_messages[0]["content"], "你好")
+        self.assertEqual(history_messages[1]["role"], "assistant")
+
     def test_member_collaborates_but_sensitive_governance_stays_restricted(self):
         org_id, owner = self._create_owner("controls")
         member = self._invite_member(owner, org_id, "controls")
@@ -754,7 +880,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         self.assertEqual(admin_deleted.status_code, 200, admin_deleted.text)
 
-    def test_web_conversations_are_shared_but_lifecycle_is_restricted(self):
+    def test_organization_conversations_are_shared_but_lifecycle_is_restricted(self):
         org_id, owner = self._create_owner("chat")
         member = self._invite_member(owner, org_id, "chat")
         conversation = owner.post(

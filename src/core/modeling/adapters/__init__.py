@@ -5,6 +5,7 @@ from .ollama_embedding import OllamaEmbeddingAdapter
 from .openai_compatible import OpenAICompatibleAdapter
 from .openai_embedding import OpenAIEmbeddingAdapter
 from .openai_rerank import OpenAIRerankAdapter
+from .local_transformers_rerank import LocalTransformersRerankAdapter
 
 __all__ = [
     "OllamaAdapter",
@@ -12,4 +13,5 @@ __all__ = [
     "OpenAICompatibleAdapter",
     "OpenAIEmbeddingAdapter",
     "OpenAIRerankAdapter",
+    "LocalTransformersRerankAdapter",
 ]

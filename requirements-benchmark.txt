@@ -1,0 +1,2 @@
+# Optional dependency used only to prepare the T²Ranking parquet dataset.
+pyarrow>=17,<24

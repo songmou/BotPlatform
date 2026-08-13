@@ -67,6 +67,13 @@ class ConnectionPool:
 
     def put(self, item: PoolItem) -> None:
         """Return a connection to the pool, dropping stale items."""
+        # Roll back any open transaction so a leaked BEGIN（e.g. a read-only
+        # query that never committed）cannot poison a subsequently borrowed
+        # connection with a dangling READ ONLY transaction.
+        try:
+            item.conn.rollback()
+        except Exception:  # noqa: BLE001 - best effort reset on return
+            pass
         if item.idle_seconds > _IDLE_TTL_SECONDS:
             try:
                 item.conn.close()

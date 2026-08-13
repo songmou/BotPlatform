@@ -14,9 +14,14 @@ from src.core.messaging import (
     InboundMessage,
     MessageRouter,
 )
-from src.core.messaging.adapters import FeishuAdapter, WeComAIBotAdapter
+from src.core.messaging.adapters import (
+    FeishuAdapter,
+    WeChatILinkAdapter,
+    WeComAIBotAdapter,
+)
 from src.core.application.bot import MessageBot
 from src.core.config.loader import ChannelConfig
+from src.core.integrations.ilink import TEXT_ITEM_TYPE, USER_MESSAGE_TYPE
 from src.core.modeling import CanonicalMessage
 from src.core.storage.tenants import ConversationStore, TenantRegistry
 from src.core.tooling import FinalAnswer
@@ -91,6 +96,110 @@ class AdapterNormalizationTests(unittest.TestCase):
         self.assertEqual(message.conversation_type, GROUP)
         self.assertTrue(message.addressed_to_bot)
         self.assertEqual(message.first_image.adapter_ref["file_key"], "img_1")
+
+    def test_feishu_p2p_is_direct(self):
+        adapter = FeishuAdapter(
+            "cli_test",
+            "secret",
+            channel_id="feishu-main",
+            client_factory=lambda *_args: None,
+        )
+        message = adapter.normalize(
+            {
+                "message_id": "om_p2p",
+                "sender_id": "ou_user",
+                "chat_id": "oc_p2p",
+                "chat_type": "p2p",
+                "body_text": "你好",
+            }
+        )
+        self.assertEqual(message.conversation_type, DIRECT)
+        self.assertTrue(message.addressed_to_bot)
+        self.assertEqual(message.text, "你好")
+
+    def test_feishu_unknown_chat_type_is_direct_not_group(self):
+        # 飞书未知 chat_type 不得误判为群聊，否则主动私聊会被静默忽略。
+        adapter = FeishuAdapter(
+            "cli_test",
+            "secret",
+            channel_id="feishu-main",
+            client_factory=lambda *_args: None,
+        )
+        message = adapter.normalize(
+            {
+                "message_id": "om_unknown",
+                "sender_id": "ou_user",
+                "chat_id": "oc_unknown",
+                "chat_type": "some_new_type",
+                "body_text": "你好",
+            }
+        )
+        self.assertEqual(message.conversation_type, DIRECT)
+        self.assertTrue(message.addressed_to_bot)
+
+
+class _StubILinkClient:
+    """Minimal stand-in so WeChat normalize can read account_id."""
+
+    class _Credentials:
+        bot_id = "bot"
+
+    credentials = _Credentials()
+
+
+class WeChatNormalizationTests(unittest.TestCase):
+    def _adapter(self) -> WeChatILinkAdapter:
+        return WeChatILinkAdapter(
+            client=_StubILinkClient(),
+            channel_id="wechat-main",
+        )
+
+    @staticmethod
+    def _raw(text: str, **overrides: object) -> dict:
+        raw = {
+            "message_type": USER_MESSAGE_TYPE,
+            "from_user_id": "wx_user_1",
+            "context_token": "tok_abc",
+            "item_list": [
+                {"type": TEXT_ITEM_TYPE, "text_item": {"text": text}}
+            ],
+        }
+        raw.update(overrides)
+        return raw
+
+    def test_private_chat_without_chat_type_is_direct(self):
+        # 主动私聊常不带 chat_type 字段，必须是 DIRECT 且不能抛异常。
+        message = self._adapter().normalize(self._raw("你好"))
+        self.assertEqual(message.conversation_type, DIRECT)
+        self.assertEqual(message.sender_id, "wx_user_1")
+        self.assertTrue(message.addressed_to_bot)
+
+    def test_unexpected_chat_type_is_direct_not_group(self):
+        # 个人微信协议常用 single/p2p/c2c 标注私聊，不得误判为群聊。
+        for chat_type in ("single", "p2p", "c2c", "private"):
+            message = self._adapter().normalize(
+                self._raw("你好", chat_type=chat_type)
+            )
+            self.assertEqual(
+                message.conversation_type,
+                DIRECT,
+                "chat_type={} 不应被判为群聊".format(chat_type),
+            )
+
+    def test_group_id_marks_group(self):
+        message = self._adapter().normalize(
+            self._raw("群消息", group_id="grp_1")
+        )
+        self.assertEqual(message.conversation_type, GROUP)
+        self.assertEqual(message.conversation_id, "grp_1")
+
+    def test_missing_context_token_still_normalizes(self):
+        # 缺 context_token 不应再静默丢弃，记日志后照常归一化为 DIRECT。
+        raw = self._raw("你好")
+        raw.pop("context_token")
+        message = self._adapter().normalize(raw)
+        self.assertEqual(message.conversation_type, DIRECT)
+        self.assertEqual(message.reply_context, {})
 
 
 class ChannelBindingTests(unittest.TestCase):

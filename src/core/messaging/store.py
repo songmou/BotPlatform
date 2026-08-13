@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import base64
 import secrets
 from dataclasses import replace
@@ -644,6 +645,30 @@ class ChannelAddressStore:
                 (identity_id, channel_id),
             ).fetchone()
         return self._endpoint_from_row(row) if row is not None else None
+
+    def latest_context_token(self, recipient_id: str) -> Optional[str]:
+        """Return the most recently stored WeChat iLink context_token.
+
+        The token expires within minutes, so proactive results must use the
+        freshest value rather than the one frozen on the delivery endpoint at
+        enqueue time. Returns ``None`` on any lookup failure so callers can
+        fall back to the endpoint's own (possibly stale) token.
+        """
+        if not recipient_id:
+            return None
+        try:
+            with self.registry.database.read() as connection:
+                row = connection.execute(
+                    "SELECT context_token FROM recipients WHERE user_id=? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (recipient_id,),
+                ).fetchone()
+        except (sqlite3.Error, OSError):
+            return None
+        if row is None:
+            return None
+        token = row["context_token"]
+        return str(token) if token else None
 
     def mark_stale(self, endpoint_id: str) -> None:
         if not endpoint_id:

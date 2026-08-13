@@ -97,7 +97,7 @@ class ConfigAndDefinitionTests(unittest.TestCase):
             with self.subTest(settings=bad), self.assertRaises(ValueError):
                 WebResearchPlugin.validate_settings(bad)
 
-    def test_config_defaults_and_project_registration(self) -> None:
+    def test_config_defaults_and_neutral_project_registration(self) -> None:
         config = WebResearchConfig.from_mapping({})
         self.assertEqual(config.timeout_seconds, 20)
         self.assertEqual(config.max_results, 8)
@@ -105,7 +105,7 @@ class ConfigAndDefinitionTests(unittest.TestCase):
 
         project = load_project_config(SOURCE_CONFIG)
         plugin_config = project.plugins["web_research"]
-        self.assertTrue(plugin_config.enabled)
+        self.assertFalse(plugin_config.enabled)
         for agent_id in ("researcher", "general"):
             tools = set(
                 project.agents[agent_id].plugin_tools["web_research"]

@@ -2,7 +2,7 @@
 /* ===== Plugins page ===== */
 function initTools() {
     if (location.hash === "#plugins") {
-        location.replace("/plugins");
+        location.replace("/platform/plugins");
         return;
     }
     var auditOffset = 0;

@@ -132,6 +132,12 @@ class ChannelManager:
                     message.conversation_type != DIRECT
                     and not message.addressed_to_bot
                 ):
+                    LOGGER.warning(
+                        "渠道消息被忽略（非私聊且未@机器人）：channel=%s event=%s type=%s",
+                        row["channel_id"],
+                        row["event_id"],
+                        message.conversation_type,
+                    )
                     self.inbox.finish(inbox_id, "ignored")
                     continue
                 self.handler(message)

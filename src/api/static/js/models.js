@@ -110,6 +110,13 @@ function initModels() {
 
     function applyModalityVisibility() {
         var modality = modalityEl.value;
+        var localTransformersOption = document.querySelector('#model-type option[value="local_transformers"]');
+        if (localTransformersOption) {
+            localTransformersOption.disabled = modality !== "rerank";
+            if (modality !== "rerank" && document.getElementById("model-type").value === "local_transformers") {
+                document.getElementById("model-type").value = "openai_compatible";
+            }
+        }
         var chatOn = modality === "chat";
         form.querySelectorAll(".chat-only").forEach(function (el) {
             el.style.display = chatOn ? "" : "none";

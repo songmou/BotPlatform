@@ -31,6 +31,7 @@ from src.api.routers import (
     tenants,
     model_analytics,
     v2,
+    workflows,
     tenant_env,
 )
 
@@ -48,7 +49,6 @@ def create_app(config, model_router, registry, conversation_store,
                model_analytics_store=None,
                admin_auth=None, admin_user_store=None, admin_role_store=None,
                script_service=None, script_registry=None,
-               script_schedule_service=None,
                settings_store=None, env_resolver=None,
                drive_service=None, drive_audit_store=None,
                channel_statuses=None,
@@ -57,6 +57,8 @@ def create_app(config, model_router, registry, conversation_store,
                credential_service=None,
                notification_service=None,
                datasource_service=None,
+               agent_service=None,
+               workflow_service=None,
                secure_cookies=False, owns_services=True) -> FastAPI:
     if organization_store is None:
         from src.core.storage.organizations import OrganizationStore
@@ -102,11 +104,25 @@ def create_app(config, model_router, registry, conversation_store,
                 storage_path=credential_root / "integration_credentials.json"
             ),
         )
+    if workflow_service is None:
+        from src.core.workflows import WorkflowService
+
+        workflow_service = WorkflowService(
+            organization_store,
+            resource_store,
+            model_router=model_router,
+            registry=registry,
+            tool_runtime=tool_runtime,
+            agent_service=agent_service,
+            knowledge_service=knowledge_service,
+            script_service=script_service,
+            datasource_service=datasource_service,
+            notification_service=notification_service,
+            credential_service=credential_service,
+            timezone_name=config.app.timezone,
+        )
     if scheduler is not None:
         try:
-            reload_scripts = getattr(scheduler, "reload_script_schedules", None)
-            if callable(reload_scripts):
-                reload_scripts()
             reload_organizations = getattr(
                 scheduler, "reload_organization_schedules", None
             )
@@ -122,15 +138,19 @@ def create_app(config, model_router, registry, conversation_store,
     # lifespan hook must not close the shared services a second time.
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        if not app.state.owns_services:
-            return
-        if app.state.scheduler is not None:
-            app.state.scheduler.shutdown()
-        if app.state.script_service is not None:
-            app.state.script_service.shutdown()
-        if app.state.tool_runtime is not None:
-            app.state.tool_runtime.close()
+        app.state.workflow_service.start()
+        try:
+            yield
+        finally:
+            app.state.workflow_service.shutdown()
+            if not app.state.owns_services:
+                return
+            if app.state.scheduler is not None:
+                app.state.scheduler.shutdown()
+            if app.state.script_service is not None:
+                app.state.script_service.shutdown()
+            if app.state.tool_runtime is not None:
+                app.state.tool_runtime.close()
 
     app = FastAPI(
         title="BotPlatform Web",
@@ -157,7 +177,6 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.admin_role_store = admin_role_store
     app.state.script_service = script_service
     app.state.script_registry = script_registry
-    app.state.script_schedule_service = script_schedule_service
     app.state.settings_store = settings_store
     app.state.env_resolver = env_resolver
     app.state.drive_service = drive_service
@@ -171,6 +190,8 @@ def create_app(config, model_router, registry, conversation_store,
     app.state.organization_control_store = organization_control_store
     app.state.credential_service = credential_service
     app.state.notification_service = notification_service
+    app.state.agent_service = agent_service
+    app.state.workflow_service = workflow_service
     app.state.secure_cookies = secure_cookies
     app.state.owns_services = owns_services
     if resource_store is not None:
@@ -320,6 +341,8 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(admins.router)
     app.include_router(tenant_env.router)
     app.include_router(v2.router)
+    app.include_router(workflows.router)
+    app.include_router(workflows.public_router)
     app.include_router(platform_runtime.router)
 
     return app

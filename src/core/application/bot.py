@@ -478,6 +478,8 @@ class MessageBot:
             )
         if tenant is not None and self.address_store is not None:
             endpoint = self.address_store.record_endpoint(tenant, message)
+            if self.script_service is not None:
+                self.script_service.trigger_endpoint_id = endpoint.endpoint_id
         if binding_completed:
             reply = "跨渠道身份绑定成功，当前渠道将使用同一租户数据。"
             self._reply(endpoint, reply, tenant)
@@ -1105,7 +1107,32 @@ class MessageBot:
             except Exception:  # noqa: BLE001 - best effort on the error reply
                 pass
             return
+        finally:
+            # Clear the transient trigger endpoint so it cannot leak into a
+            # later, unrelated message handled by the same service instance.
+            if self.script_service is not None:
+                self.script_service.trigger_endpoint_id = None
 
         self._track_approval_outcome(subject, endpoint, outcome)
         self._reply(endpoint, answer, tenant)
         self._log(self._direction("输出", endpoint), user_id, answer)
+        # If some proactive results (e.g. a script run) are stalled waiting for
+        # a fresh recipient context, tell the user so they know to nudge us.
+        if (
+            tenant is not None
+            and self.notification_dispatcher is not None
+            and message.conversation_type == DIRECT
+        ):
+            try:
+                waiting = self.notification_dispatcher.service.count_waiting_recipient(
+                    tenant.personal_tenant_id or tenant.tenant_id
+                )
+                if waiting:
+                    hint = (
+                        "（你有 {} 条待接收的打卡/任务结果，已为你重新尝试发送；"
+                        "若仍未收到，回复任意消息即可再次接收）".format(waiting)
+                    )
+                    self._reply(endpoint, hint, tenant)
+                    self._log(self._direction("输出", endpoint), user_id, hint)
+            except Exception as exc:  # noqa: BLE001 - best effort hint
+                print("提示待接收结果失败：{}".format(exc), file=sys.stderr)

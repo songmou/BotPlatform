@@ -14,6 +14,7 @@ from .adapters import (
     OpenAICompatibleAdapter,
     OpenAIEmbeddingAdapter,
     OpenAIRerankAdapter,
+    LocalTransformersRerankAdapter,
 )
 from .contracts import (
     EmbeddingClient,
@@ -125,6 +126,12 @@ def create_rerank_client(profile: ModelProfile) -> RerankClient:
         raise ModelError(
             "模型档案 {} 不是重排模型".format(profile.id),
             provider=profile.provider,
+        )
+    if profile.type == "local_transformers":
+        return LocalTransformersRerankAdapter(
+            profile_id=profile.id,
+            model=profile.model,
+            timeout_seconds=profile.timeout_seconds,
         )
     if profile.type != "openai_compatible":
         raise ModelError(

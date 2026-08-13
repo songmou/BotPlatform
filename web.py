@@ -202,9 +202,9 @@ def _run_combined(args) -> int:
                 admin_role_store=admin_role_store,
                 script_service=runtime.script_service,
                 script_registry=runtime.external_script_registry,
-                script_schedule_service=runtime.script_schedule_service,
                 channel_statuses=runtime.channel_statuses,
                 datasource_service=datasource_service,
+                agent_service=runtime.agent_service,
                 secure_cookies=args.behind_https,
                 owns_services=False,
             )
@@ -259,7 +259,6 @@ def _run_panel_only(args) -> int:
     from src.core.services.script import ScriptService
     from src.core.services.script_registry import ExternalScriptRegistry
     from src.core.services.env_resolver import EnvResolver
-    from src.core.services.script_schedule import ScriptScheduleService
     from src.core.storage.tenants import TenantStoreError, SettingsStore
     from src.core.storage.tool_audit import ToolAuditStore
     from src.core.storage.drive_audit import DriveAuditStore
@@ -321,11 +320,6 @@ def _run_panel_only(args) -> int:
         registry,
         external_registry=external_script_registry,
         env_resolver=env_resolver,
-    )
-    script_schedule_service = ScriptScheduleService(
-        registry,
-        script_service,
-        config.app.timezone,
     )
     from src.core.services.organization_schedule_tool import (
         OrganizationScheduleToolService,
@@ -411,7 +405,6 @@ def _run_panel_only(args) -> int:
         agent_service=agent_service,
         recipient_store=recipient_store,
         script_service=script_service,
-        script_schedule_service=script_schedule_service,
         tenant_registry=registry,
         schedule_store=schedule_store,
         plugin_manager=plugin_manager,
@@ -446,10 +439,10 @@ def _run_panel_only(args) -> int:
         admin_role_store=admin_role_store,
         script_service=script_service,
         script_registry=external_script_registry,
-        script_schedule_service=script_schedule_service,
         settings_store=settings_store,
         env_resolver=env_resolver,
         datasource_service=datasource_service,
+        agent_service=agent_service,
         secure_cookies=args.behind_https,
     )
 

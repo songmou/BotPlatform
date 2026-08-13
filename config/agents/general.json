@@ -108,8 +108,6 @@
     "解释一下什么是大语言模型",
     "查看当前目录下的文件"
   ],
-  "mcp_servers": [
-    "mcp_list"
-  ],
+  "mcp_servers": [],
   "temperature": 1.0
 }

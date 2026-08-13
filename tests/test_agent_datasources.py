@@ -20,6 +20,7 @@ exercises paths that do NOT require a live database driver or sqlglot.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock
 
 from src.core.config.loader import AgentPreset, Capability, ToolConfig
 from src.core.datasource.service import DataSourceService
@@ -165,6 +166,26 @@ class PromptBlockToleranceTest(unittest.TestCase):
             "legacy_db": {"id": "legacy_db", "engine": "mysql", "enabled": False}
         }
         self.assertEqual(service.prompt_block(["legacy_db"]), "")
+
+
+class ReadonlyQueryValidationTest(unittest.TestCase):
+    def test_validation_uses_configured_dialect_and_never_opens_pool(self):
+        service = DataSourceService()
+        service._configs = {
+            "sales": {
+                "id": "sales", "engine": "postgresql", "enabled": True,
+                "database": "public", "max_rows": 50,
+                "tables": [{"schema": "public", "name": "orders"}],
+            }
+        }
+        service._drivers = {"sales": MagicMock()}
+        service._get_pool = MagicMock(side_effect=AssertionError("校验不能连接数据库"))
+        result = service.validate_readonly_query(
+            "sales", "SELECT id FROM orders", limit=10
+        )
+        self.assertEqual(result["tables"], ["public.orders"])
+        self.assertEqual(result["limit"], 10)
+        service._get_pool.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

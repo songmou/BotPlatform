@@ -8,6 +8,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from src.core.services.resources import ResourceError, ScopedResourceStore
+from src.core.services.knowledge import KnowledgeService
 from src.core.storage.admin_users import AdminRoleStore, AdminUserStore
 from src.core.storage.organizations import OrganizationStore
 from src.core.storage.tenants import TenantRegistry
@@ -148,6 +149,25 @@ class PlatformCatalogStoreTest(unittest.TestCase):
                 "models", "test_model", self.user_id, revision=draft["revision"]
             )
 
+    def test_local_transformers_rerank_accepts_local_pseudo_url(self):
+        payload = {
+            "id": "local_rerank",
+            "enabled": True,
+            "modality": "rerank",
+            "type": "local_transformers",
+            "provider": "local",
+            "base_url": "local://transformers",
+            "model": "BAAI/bge-reranker-v2-m3",
+            "timeout_seconds": 120,
+        }
+
+        saved = self.store.upsert_public(
+            "models", "local_rerank", payload, self.user_id
+        )
+
+        self.assertEqual(saved["payload"]["type"], "local_transformers")
+        self.assertEqual(saved["activation_state"], "restart_required")
+
 
 class RetiredConfigurationApiTest(WebApiTestBase):
 
@@ -190,6 +210,35 @@ class RetiredConfigurationApiTest(WebApiTestBase):
             "/api/v2/platform/catalog/agents/direct_helper"
         )
         self.assertEqual(deleted.status_code, 200, deleted.text)
+
+    def test_new_platform_agent_can_bind_knowledge_without_restart(self):
+        self.app.state.knowledge_service = KnowledgeService(self.registry, None)
+        category = self.app.state.knowledge_service.create_category(
+            "public", "即时绑定库"
+        )
+        payload = {
+            "id": "binding_helper",
+            "name": "绑定助手",
+            "role": "assistant",
+            "description": "验证创建后即时绑定",
+            "system_prompt": "只使用知识库来源回答。",
+            "tools": [],
+            "plugin_tools": {},
+            "skills": [],
+            "mcp_servers": [],
+            "enabled": True,
+        }
+        created = self.client.put(
+            "/api/v2/platform/catalog/agents/binding_helper", json=payload
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        bound = self.client.put(
+            "/api/v2/platform/agents/binding_helper/knowledge-categories",
+            json={"category_ids": [category["category_id"]]},
+        )
+        self.assertEqual(bound.status_code, 200, bound.text)
+        self.assertEqual(bound.json()["category_ids"], [category["category_id"]])
 
     def test_platform_module_pages_and_tool_submenus_render(self):
         for path, marker in (

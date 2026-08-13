@@ -29,7 +29,6 @@ class ScriptsApiTest(WebApiTestBase):
     def setUp(self):
         self.script_registry = MagicMock()
         self.script_service = MagicMock()
-        self.script_schedules = MagicMock()
         super().setUp()
 
         self.script_registry.allowed_roots = ["/tmp/scripts"]
@@ -42,7 +41,6 @@ class ScriptsApiTest(WebApiTestBase):
         return {
             "script_registry": self.script_registry,
             "script_service": self.script_service,
-            "script_schedule_service": self.script_schedules,
         }
 
     # ---- listing / roots ----
@@ -111,7 +109,6 @@ class ScriptsApiTest(WebApiTestBase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["allowed_roots"], ["/srv/scripts"])
         self.script_service.reload_external_definitions.assert_called_once()
-        self.script_schedules.reload_scheduler.assert_called_once()
 
     def test_update_roots_rejects_non_list(self):
         response = self.client.put(
@@ -147,15 +144,7 @@ class ScriptsApiTest(WebApiTestBase):
         self.assertEqual(response.status_code, 200, response.text)
         self.script_registry.update.assert_called_once()
 
-    def test_delete_script_blocked_by_schedule_reference(self):
-        self.script_schedules.store.list.return_value = [
-            SimpleNamespace(script_id="demo")
-        ]
-        response = self.client.delete("/api/scripts/demo")
-        self.assertEqual(response.status_code, 409)
-
     def test_delete_script(self):
-        self.script_schedules.store.list.return_value = []
         response = self.client.delete("/api/scripts/demo")
         self.assertEqual(response.status_code, 200)
         self.script_registry.delete.assert_called_once_with("demo")
@@ -213,34 +202,13 @@ class ScriptsApiTest(WebApiTestBase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "cancelled")
 
-    # ---- tenant script schedules ----
-
-    def test_tenant_script_schedule_crud(self):
+    def test_retired_tenant_script_schedule_routes_return_404(self):
         tenant = self._make_tenant()
-        self.script_schedules.manage.return_value = {"schedule_id": "s1"}
-        response = self.client.post(
-            "/api/tenants/{}/script-schedules".format(tenant.tenant_id),
-            json={"script_id": "demo", "cron": "0 9 * * *"},
-        )
-        self.assertEqual(response.status_code, 201, response.text)
-
-        self.script_schedules.list_for_tenant.return_value = [{"schedule_id": "s1"}]
-        response = self.client.get(
-            "/api/tenants/{}/script-schedules".format(tenant.tenant_id)
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()[0]["schedule_id"], "s1")
-
-        response = self.client.put(
-            "/api/tenants/{}/script-schedules/s1".format(tenant.tenant_id),
-            json={"enabled": False},
-        )
-        self.assertEqual(response.status_code, 200)
-
-        response = self.client.delete(
-            "/api/tenants/{}/script-schedules/s1".format(tenant.tenant_id)
-        )
-        self.assertEqual(response.status_code, 200)
+        base = "/api/tenants/{}/script-schedules".format(tenant.tenant_id)
+        self.assertEqual(self.client.get(base).status_code, 404)
+        self.assertEqual(self.client.post(base, json={}).status_code, 404)
+        self.assertEqual(self.client.put(base + "/s1", json={}).status_code, 404)
+        self.assertEqual(self.client.delete(base + "/s1").status_code, 404)
 
     # ---- permissions ----
 

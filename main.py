@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility launcher for BotPlatform."""
+"""Command-line launcher for BotPlatform."""
 
 from src.core.application.cli import main
 

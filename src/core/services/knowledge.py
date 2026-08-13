@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 import uuid
 from array import array
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlencode
 
 from src.core.modeling import (
@@ -31,6 +32,25 @@ TEXT_SUFFIXES = {".txt", ".md", ".markdown"}
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | DOCUMENT_SUFFIXES
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
+# Increment whenever the text handed to the embedding model changes.  Keeping
+# this version in the stored fingerprint prevents an old, otherwise compatible
+# vector from being reused after an indexing-format change.
+EMBEDDING_TEXT_VERSION = "heading-body-v2"
+# Retrieve a wider pool before fusion/reranking.  The public result limit stays
+# unchanged; these constants only affect recall candidates.
+LEXICAL_CANDIDATES = 100
+VECTOR_CANDIDATES = 100
+RRF_K = 20
+LEXICAL_RRF_WEIGHT = 1.0
+VECTOR_RRF_WEIGHT = 1.0
+_LEXICAL_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
+    "can", "could", "did", "do", "does", "for", "from", "had", "has",
+    "have", "in", "into", "is", "it", "its", "may", "might", "no", "not",
+    "of", "on", "or", "our", "that", "the", "their", "there", "these",
+    "this", "those", "to", "used", "was", "were", "when", "which", "with",
+}
+_LEXICAL_WORD = re.compile(r"[A-Za-z0-9]+(?:[_+-][A-Za-z0-9]+)*")
 # Upper bound of fused candidates handed to the rerank model before trimming.
 RERANK_CANDIDATES = 32
 PUBLIC_DEFAULT_CATEGORY_ID = "public-default"
@@ -43,6 +63,24 @@ def _now() -> str:
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _fts_expression(query: str) -> str:
+    """Build a tolerant FTS5 expression for natural-language queries."""
+    words: List[str] = []
+    seen = set()
+    for match in _LEXICAL_WORD.finditer(query):
+        word = match.group(0).lower()
+        if word in _LEXICAL_STOPWORDS or (len(word) < 2 and not word.isdigit()):
+            continue
+        if word not in seen:
+            seen.add(word)
+            words.append(word)
+    if len(words) >= 2:
+        return " OR ".join(
+            '"{}"'.format(word.replace('"', '""')) for word in words[:24]
+        )
+    return '"{}"'.format(query.replace('"', '""'))
 
 
 def _clean_name(value: str, field: str) -> str:
@@ -105,10 +143,26 @@ class KnowledgeService:
         registry: TenantRegistry,
         embedding: Optional[EmbeddingClient] = None,
         rerank: Optional[RerankClient] = None,
+        *,
+        lexical_weight: float = LEXICAL_RRF_WEIGHT,
+        vector_weight: float = VECTOR_RRF_WEIGHT,
+        rrf_k: int = RRF_K,
+        candidate_pool: int = LEXICAL_CANDIDATES,
     ) -> None:
         self.registry = registry
         self.embedding = embedding
         self.rerank = rerank
+        if lexical_weight < 0 or vector_weight < 0 or not (
+            lexical_weight or vector_weight
+        ):
+            raise ValueError("混合检索权重必须至少有一个大于 0")
+        if rrf_k < 1 or candidate_pool < 1:
+            raise ValueError("混合检索参数必须为正整数")
+        self.lexical_weight = float(lexical_weight)
+        self.vector_weight = float(vector_weight)
+        self.rrf_k = int(rrf_k)
+        self.candidate_pool = int(candidate_pool)
+        self._search_context = threading.local()
         self.public_root = (registry.data_root / "public").resolve()
         self.public_root.mkdir(parents=True, exist_ok=True)
 
@@ -512,6 +566,21 @@ class KnowledgeService:
             source_id=source_id,
         )
 
+    @staticmethod
+    def _embedding_text(heading: str, content: str) -> str:
+        """Build the canonical text used by embedding and rerank models."""
+        clean_heading = (heading or "").strip()
+        clean_content = (content or "").strip()
+        if clean_heading:
+            return "标题：{}\n正文：{}".format(clean_heading, clean_content)
+        return clean_content
+
+    @property
+    def embedding_fingerprint(self) -> Optional[str]:
+        if self.embedding is None:
+            return None
+        return "{}|{}".format(self.embedding.fingerprint, EMBEDDING_TEXT_VERSION)
+
     def _embed_chunks(
         self, chunks: List[Tuple[str, str, str]]
     ) -> Optional[List[List[float]]]:
@@ -519,7 +588,10 @@ class KnowledgeService:
             return None
         vectors: List[List[float]] = []
         for offset in range(0, len(chunks), 32):
-            texts = [item[1] for item in chunks[offset : offset + 32]]
+            texts = [
+                self._embedding_text(item[0], item[1])
+                for item in chunks[offset : offset + 32]
+            ]
             vectors.extend(self.embedding.embed(texts))
         return vectors
 
@@ -715,7 +787,7 @@ class KnowledgeService:
                             vector,
                             body_hash,
                             _now(),
-                            self.embedding.fingerprint,
+                            self.embedding_fingerprint,
                         ),
                     )
         return {
@@ -1158,6 +1230,12 @@ class KnowledgeService:
         category_ids: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, Any]]:
         query = query.strip()
+        self._search_context.diagnostics = {
+            "vector_configured": self.embedding is not None,
+            "vector_degraded": False,
+            "rerank_configured": self.rerank is not None,
+            "rerank_degraded": False,
+        }
         if not query:
             return []
         limit = max(1, min(limit, 20))
@@ -1171,7 +1249,7 @@ class KnowledgeService:
         lexical: List[str] = []
         with self.registry.database.read() as connection:
             if len(query) >= 3:
-                expression = '"{}"'.format(query.replace('"', '""'))
+                expression = _fts_expression(query)
                 try:
                     rows = connection.execute(
                         "SELECT f.chunk_id FROM knowledge_fts f "
@@ -1179,7 +1257,9 @@ class KnowledgeService:
                         "JOIN knowledge_sources s ON s.source_id=c.source_id "
                         "WHERE knowledge_fts MATCH ? AND c.category_id IN ({}) "
                         "AND s.status IN ('ready','pending_embedding') "
-                        "ORDER BY bm25(knowledge_fts) LIMIT 40".format(placeholders),
+                        "ORDER BY bm25(knowledge_fts) LIMIT {}".format(
+                            placeholders, self.candidate_pool
+                        ),
                         [expression, *allowed],
                     ).fetchall()
                 except Exception:
@@ -1191,8 +1271,8 @@ class KnowledgeService:
                     "JOIN knowledge_sources s ON s.source_id=c.source_id "
                     "WHERE c.category_id IN ({}) "
                     "AND s.status IN ('ready','pending_embedding') "
-                    "AND (c.content LIKE ? OR c.heading LIKE ?) LIMIT 40".format(
-                        placeholders
+                    "AND (c.content LIKE ? OR c.heading LIKE ?) LIMIT {}".format(
+                        placeholders, self.candidate_pool
                     ),
                     [*allowed, "%" + query + "%", "%" + query + "%"],
                 ).fetchall()
@@ -1205,16 +1285,16 @@ class KnowledgeService:
                     query_vector = self.embedding.embed([query])[0]
                 except EmbeddingError:
                     query_vector = None
+                    self._search_context.diagnostics["vector_degraded"] = True
             if query_vector is not None:
                 rows = connection.execute(
                     "SELECT e.chunk_id, e.vector FROM knowledge_embeddings e "
                     "JOIN knowledge_chunks c ON c.chunk_id=e.chunk_id "
                     "JOIN knowledge_sources s ON s.source_id=c.source_id "
                     "WHERE c.category_id IN ({}) "
-                    "AND (e.model_fingerprint=? OR (e.model_fingerprint IS NULL "
-                    "AND e.model_id=?)) "
+                    "AND e.model_fingerprint=? "
                     "AND s.status='ready'".format(placeholders),
-                    [*allowed, self.embedding.fingerprint, self.embedding.model_id],
+                    [*allowed, self.embedding_fingerprint],
                 ).fetchall()
                 scored = []
                 for row in rows:
@@ -1223,21 +1303,32 @@ class KnowledgeService:
                         (self._cosine(query_vector, vector), str(row["chunk_id"]))
                     )
                 scored.sort(reverse=True)
-                vector_rank = [chunk_id for _, chunk_id in scored[:40]]
+                vector_rank = [
+                    chunk_id for _, chunk_id in scored[: max(
+                        self.candidate_pool, VECTOR_CANDIDATES
+                    )]
+                ]
 
             scores: Dict[str, float] = {}
-            for ranked in (lexical, vector_rank):
+            for ranked, weight in (
+                (lexical, self.lexical_weight),
+                (vector_rank, self.vector_weight),
+            ):
+                if weight <= 0:
+                    continue
                 for rank, chunk_id in enumerate(ranked, 1):
-                    scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+                    scores[chunk_id] = scores.get(chunk_id, 0.0) + weight / (
+                        self.rrf_k + rank
+                    )
             ordered = sorted(scores, key=scores.get, reverse=True)
             if not ordered:
                 return []
-            # A rerank model reorders a wider candidate pool before trimming;
-            # without one the fused ranking is trimmed directly.
+            # A rerank model receives the fixed top-32 fused chunk pool.  Final
+            # source-level diversification prevents duplicate citations in top-k.
             if self.rerank is not None and len(ordered) > 1:
                 candidates = ordered[:RERANK_CANDIDATES]
             else:
-                candidates = ordered[:limit]
+                candidates = ordered[: max(limit * 4, limit)]
             detail_placeholders = ",".join("?" for _ in candidates)
             rows = connection.execute(
                 "SELECT ch.chunk_id, ch.source_id, s.name AS source_name, "
@@ -1251,7 +1342,7 @@ class KnowledgeService:
                 ),
                 candidates,
             ).fetchall()
-        details = {str(row["chunk_id"]): row for row in rows}
+        details = {str(row["chunk_id"]): dict(row) for row in rows}
         selected = self._rerank_candidates(query, candidates, details, limit)
         citation_by_source: Dict[str, int] = {}
         hits: List[Dict[str, Any]] = []
@@ -1262,32 +1353,40 @@ class KnowledgeService:
             source_id = str(row["source_id"])
             if source_id not in citation_by_source:
                 citation_by_source[source_id] = len(citation_by_source) + 1
-            hits.append(
-                KnowledgeHit(
-                    chunk_id=chunk_id,
-                    source_id=source_id,
-                    source_name=str(row["source_name"]),
-                    source_type=str(row["source_type"]),
-                    category_id=str(row["category_id"]),
-                    category_name=str(row["category_name"]),
-                    category_scope=str(row["category_scope"]),
-                    heading=str(row["heading"] or ""),
-                    content=str(row["content"]),
-                    locator=str(row["locator"] or ""),
-                    score=scores[chunk_id],
-                    citation=citation_by_source[source_id],
-                    drive_scope=(
-                        str(row["drive_scope"]) if row["drive_scope"] else None
-                    ),
-                    drive_tenant_id=(
-                        str(row["drive_tenant_id"])
-                        if row["drive_tenant_id"]
-                        else None
-                    ),
-                    drive_path=str(row["drive_path"]) if row["drive_path"] else None,
-                ).to_dict()
-            )
+            hit = KnowledgeHit(
+                chunk_id=chunk_id,
+                source_id=source_id,
+                source_name=str(row["source_name"]),
+                source_type=str(row["source_type"]),
+                category_id=str(row["category_id"]),
+                category_name=str(row["category_name"]),
+                category_scope=str(row["category_scope"]),
+                heading=str(row["heading"] or ""),
+                content=str(row["content"]),
+                locator=str(row["locator"] or ""),
+                score=scores[chunk_id],
+                citation=citation_by_source[source_id],
+                drive_scope=(
+                    str(row["drive_scope"]) if row["drive_scope"] else None
+                ),
+                drive_tenant_id=(
+                    str(row["drive_tenant_id"])
+                    if row["drive_tenant_id"]
+                    else None
+                ),
+                drive_path=str(row["drive_path"]) if row["drive_path"] else None,
+            ).to_dict()
+            hit["retrieval_sources"] = [
+                name
+                for name, ranked in (("lexical", lexical), ("vector", vector_rank))
+                if chunk_id in ranked
+            ]
+            hits.append(hit)
         return hits
+
+    def last_search_diagnostics(self) -> Dict[str, bool]:
+        """Return diagnostics for the latest search on the current thread."""
+        return dict(getattr(self._search_context, "diagnostics", {}))
 
     def _rerank_candidates(
         self,
@@ -1296,23 +1395,28 @@ class KnowledgeService:
         details: Dict[str, Any],
         limit: int,
     ) -> List[str]:
-        """Reorder fused candidates with the rerank model, degrading silently."""
+        """Reorder fused candidates and select distinct sources, degrading silently."""
         if self.rerank is None or len(candidates) <= 1:
-            return candidates[:limit]
+            return self._distinct_source_candidates(candidates, details, limit)
         contents: List[str] = []
         valid_ids: List[str] = []
         for chunk_id in candidates:
             row = details.get(chunk_id)
             if row is None:
                 continue
-            contents.append(str(row["content"]))
+            contents.append(
+                self._embedding_text(str(row["heading"] or ""), str(row["content"]))
+            )
             valid_ids.append(chunk_id)
         if len(valid_ids) <= 1:
-            return valid_ids[:limit]
+            return self._distinct_source_candidates(valid_ids, details, limit)
         try:
-            ranked = self.rerank.rerank(query, contents, top_n=limit)
+            ranked = self.rerank.rerank(query, contents, top_n=len(valid_ids))
         except RerankError:
-            return valid_ids[:limit]
+            diagnostics = getattr(self._search_context, "diagnostics", None)
+            if isinstance(diagnostics, dict):
+                diagnostics["rerank_degraded"] = True
+            return self._distinct_source_candidates(valid_ids, details, limit)
         reordered = [
             valid_ids[index]
             for index, _ in ranked
@@ -1322,7 +1426,27 @@ class KnowledgeService:
         for chunk_id in valid_ids:
             if chunk_id not in seen:
                 reordered.append(chunk_id)
-        return reordered[:limit]
+        return self._distinct_source_candidates(reordered, details, limit)
+
+    @staticmethod
+    def _distinct_source_candidates(
+        candidates: Sequence[str], details: Mapping[str, Any], limit: int
+    ) -> List[str]:
+        """Keep the best chunk for each source so one document cannot fill top-k."""
+        selected: List[str] = []
+        seen_sources = set()
+        for chunk_id in candidates:
+            row = details.get(chunk_id)
+            if row is None:
+                continue
+            source_id = str(row["source_id"])
+            if source_id in seen_sources:
+                continue
+            seen_sources.add(source_id)
+            selected.append(chunk_id)
+            if len(selected) >= limit:
+                break
+        return selected
 
     @staticmethod
     def context_message(hits: Sequence[Dict[str, Any]]) -> str:
@@ -1399,16 +1523,15 @@ class KnowledgeService:
         placeholders = ",".join("?" for _ in allowed)
         with self.registry.database.read() as connection:
             sql = (
-                "SELECT c.chunk_id, c.content, c.content_hash FROM knowledge_chunks c "
+                "SELECT c.chunk_id, c.heading, c.content, c.content_hash "
+                "FROM knowledge_chunks c "
                 "JOIN knowledge_sources s ON s.source_id=c.source_id "
                 "LEFT JOIN knowledge_embeddings e ON e.chunk_id=c.chunk_id "
-                "AND (e.model_fingerprint=? OR (e.model_fingerprint IS NULL "
-                "AND e.model_id=?)) "
+                "AND e.model_fingerprint=? "
                 "WHERE c.category_id IN ({}) AND s.status IN ('ready','pending_embedding') "
             ).format(placeholders)
             params: List[Any] = [
-                self.embedding.fingerprint,
-                self.embedding.model_id,
+                self.embedding_fingerprint,
                 *allowed,
             ]
             if not force:
@@ -1420,7 +1543,14 @@ class KnowledgeService:
         for offset in range(0, len(rows), 32):
             batch = rows[offset : offset + 32]
             try:
-                vectors = self.embedding.embed([str(row["content"]) for row in batch])
+                vectors = self.embedding.embed(
+                    [
+                        self._embedding_text(
+                            str(row["heading"] or ""), str(row["content"])
+                        )
+                        for row in batch
+                    ]
+                )
             except EmbeddingError as exc:
                 errors.append("向量化失败：{}".format(exc))
                 break
@@ -1438,7 +1568,7 @@ class KnowledgeService:
                             array("f", vector).tobytes(),
                             row["content_hash"],
                             _now(),
-                            self.embedding.fingerprint,
+                            self.embedding_fingerprint,
                         ),
                     )
                     completed += 1
@@ -1448,12 +1578,11 @@ class KnowledgeService:
                 "WHERE category_id IN ({}) AND status='pending_embedding' "
                 "AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c "
                 "LEFT JOIN knowledge_embeddings e ON e.chunk_id=c.chunk_id "
-                "AND (e.model_fingerprint=? OR (e.model_fingerprint IS NULL "
-                "AND e.model_id=?)) "
+                "AND e.model_fingerprint=? "
                 "WHERE c.source_id=knowledge_sources.source_id AND e.chunk_id IS NULL)".format(
                     placeholders
                 ),
-                [_now(), self.embedding.fingerprint, self.embedding.model_id, *allowed],
+                [_now(), *allowed, self.embedding_fingerprint],
             )
         return {
             "completed": completed,
@@ -1477,7 +1606,7 @@ class KnowledgeService:
         source_placeholders = ",".join("?" for _ in ids)
         with self.registry.database.read() as connection:
             rows = connection.execute(
-                "SELECT c.chunk_id, c.content, c.content_hash, c.source_id "
+                "SELECT c.chunk_id, c.heading, c.content, c.content_hash, c.source_id "
                 "FROM knowledge_chunks c "
                 "JOIN knowledge_sources s ON s.source_id=c.source_id "
                 "WHERE c.category_id IN ({}) AND c.source_id IN ({}) "
@@ -1497,7 +1626,14 @@ class KnowledgeService:
             if not chunks:
                 continue
             try:
-                vectors = self.embedding.embed([str(r["content"]) for r in chunks])
+                vectors = self.embedding.embed(
+                    [
+                        self._embedding_text(
+                            str(row["heading"] or ""), str(row["content"])
+                        )
+                        for row in chunks
+                    ]
+                )
             except EmbeddingError as exc:
                 failed += 1
                 errors.append({"source_id": source_id, "error": str(exc)})
@@ -1527,7 +1663,7 @@ class KnowledgeService:
                             array("f", vector).tobytes(),
                             row["content_hash"],
                             _now(),
-                            self.embedding.fingerprint,
+                            self.embedding_fingerprint,
                         ),
                     )
                 connection.execute(
@@ -1555,7 +1691,7 @@ class KnowledgeService:
             return {
                 "configured": self.embedding is not None,
                 "current_fingerprint": (
-                    self.embedding.fingerprint if self.embedding is not None else None
+                    self.embedding_fingerprint
                 ),
                 "total": 0,
                 "stale": 0,
@@ -1574,7 +1710,7 @@ class KnowledgeService:
         by_fingerprint: Dict[str, int] = {}
         total = 0
         stale = 0
-        current = self.embedding.fingerprint if self.embedding is not None else None
+        current = self.embedding_fingerprint
         for row in rows:
             key = row["model_fingerprint"] or row["model_id"]
             cnt = int(row["cnt"])

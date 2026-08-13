@@ -67,6 +67,31 @@ def _format_mcp_error(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
+# Substrings that, appearing in a tool-call failure, indicate the remote MCP
+# server rejected the auth token (expired / invalid).  Such failures must
+# trigger a token refresh + reconnect rather than being surfaced to the agent.
+_AUTH_ERROR_MARKERS = (
+    "401",
+    "unauthorized",
+    "unauthenticated",
+    "forbidden",
+    "token expired",
+    "invalid token",
+    "tenant_access_token",
+    "access token",
+    "鉴权",
+    "令牌",
+    "未授权",
+    "-32003",
+)
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """Report whether a failure is an auth-token rejection worth refreshing."""
+    message = _format_mcp_error(exc).lower()
+    return any(marker in message for marker in _AUTH_ERROR_MARKERS)
+
+
 class _Connection:
     """A live MCP session plus the tools discovered on one server.
 
@@ -101,6 +126,8 @@ class McpClientManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._connections: Dict[str, _Connection] = {}
+        self._token_providers: Dict[str, Any] = {}
+        self._provider_lock = threading.RLock()
         self._lock = threading.RLock()
         self._started = False
 
@@ -224,11 +251,19 @@ class McpClientManager:
         try:
             result = self._run(self._call(session, real_name, arguments))
         except Exception as exc:  # noqa: BLE001 - retried once when disconnected
-            if not _is_disconnected(exc):
+            if _is_disconnected(exc):
+                logger.warning("MCP 服务 %s 连接已断开，正在重连", server_id)
+                session, real_name = self._reconnect(server_id, name)
+                result = self._run(self._call(session, real_name, arguments))
+            elif _is_auth_error(exc):
+                # Token likely expired mid-session.  Force a fresh token and
+                # reconnect so the next attempt carries a valid credential.
+                logger.warning("MCP 服务 %s 鉴权失败，强制刷新令牌并重连", server_id)
+                self._invalidate_provider(server_id)
+                session, real_name = self._reconnect(server_id, name)
+                result = self._run(self._call(session, real_name, arguments))
+            else:
                 raise
-            logger.warning("MCP 服务 %s 连接已断开，正在重连", server_id)
-            session, real_name = self._reconnect(server_id, name)
-            result = self._run(self._call(session, real_name, arguments))
         return self._serialize_result(result)
 
     def _resolve_target(self, name: str) -> Optional[tuple]:
@@ -276,6 +311,11 @@ class McpClientManager:
                         del headers[existing]
                     headers[header_name] = value
                 headers = headers or None
+                provider_cfg = cfg.get("token_provider")
+                if isinstance(provider_cfg, dict) and provider_cfg.get("kind"):
+                    provider = self._resolve_provider(cfg)
+                    provider_headers = await provider.get_headers()
+                    headers = {**(headers or {}), **provider_headers}
                 if transport == "sse":
                     from mcp.client.sse import sse_client
 
@@ -342,6 +382,9 @@ class McpClientManager:
         conn = self._connections.pop(server_id, None)
         if conn is None:
             return
+        # Drop any cached token provider so the next connect re-resolves the
+        # secret and re-fetches a fresh token.
+        self._invalidate_provider(server_id)
         try:
             asyncio.run_coroutine_threadsafe(
                 self._set_event(conn.stop_event), self._loop
@@ -352,6 +395,33 @@ class McpClientManager:
                 "关闭 MCP 服务 %s 失败：%s", server_id, _format_mcp_error(exc), exc_info=exc
             )
             conn.task_future.cancel()
+
+    def _resolve_provider(self, cfg: Dict[str, Any]) -> Any:
+        """Return the (cached) token provider for a server, building it if needed.
+
+        Providers are cached per server id so a TAT stays in memory across the
+        lifetime of a connection.  The cache is cleared on disconnect/reconnect
+        (see ``_invalidate_provider``) so a reconnect always re-fetches.
+        """
+        from src.core.tooling.mcp_token_providers import build_provider
+
+        server_id = cfg.get("id")
+        provider_cfg = cfg.get("token_provider")
+        if not isinstance(provider_cfg, dict) or not provider_cfg.get("kind"):
+            raise RuntimeError(
+                "MCP 服务 {} 的 token_provider 配置无效".format(server_id)
+            )
+        with self._provider_lock:
+            cached = self._token_providers.get(server_id)
+            if cached is not None:
+                return cached
+            provider = build_provider(server_id, provider_cfg)
+            self._token_providers[server_id] = provider
+            return provider
+
+    def _invalidate_provider(self, server_id: str) -> None:
+        with self._provider_lock:
+            self._token_providers.pop(server_id, None)
 
     async def _call(self, session: Any, real_name: str, arguments: Dict[str, Any]) -> Any:
         return await asyncio.wait_for(
