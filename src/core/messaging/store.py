@@ -42,6 +42,18 @@ class ChannelAddressStore:
     def __init__(self, registry: TenantRegistry) -> None:
         self.registry = registry
 
+    def organization_for_channel(self, channel_id: str) -> Optional[str]:
+        """Return the owner of an organization-managed channel instance."""
+        if not channel_id:
+            return None
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT organization_id FROM organization_channels "
+                "WHERE channel_instance_id=?",
+                (channel_id,),
+            ).fetchone()
+        return str(row["organization_id"]) if row is not None else None
+
     @staticmethod
     def _identity(row: Any) -> str:
         return str(row["identity_id"])
@@ -251,10 +263,9 @@ class ChannelAddressStore:
                             raise ChannelBindingError(
                                 "当前账号没有可用组织，请联系平台管理员邀请加入组织"
                             )
-            tenant = replace(
-                self.registry.get(tenant_id),
-                member_user_id=member_user_id,
-                personal_tenant_id=(
+            personal_tenant_id = None
+            if fixed_channel is None:
+                personal_tenant_id = (
                     self.registry.member_personal_context(
                         tenant_id, member_user_id
                     ).tenant_id
@@ -264,19 +275,16 @@ class ChannelAddressStore:
                         if str(row["tenant_id"]) != tenant_id
                         else None
                     )
-                ),
+                )
+            tenant = replace(
+                self.registry.get(tenant_id),
+                member_user_id=member_user_id,
+                personal_tenant_id=personal_tenant_id,
             )
         else:
             if fixed_channel is not None:
                 organization_id = str(fixed_channel["organization_id"])
-                personal = self.registry.resolve(
-                    "organization-channel:{}".format(message.channel_id),
-                    "{}:{}".format(message.platform, message.sender_id),
-                )
-                tenant = replace(
-                    self.registry.get(organization_id),
-                    personal_tenant_id=personal.tenant_id,
-                )
+                tenant = self.registry.get(organization_id)
             else:
                 legacy_bot_id = (
                     message.account_id
@@ -316,9 +324,13 @@ class ChannelAddressStore:
                     message.account_id,
                     message.sender_id,
                     (
-                        tenant.tenant_id
-                        if tenant.personal_tenant_id is not None
-                        else None
+                        str(fixed_channel["organization_id"])
+                        if fixed_channel is not None
+                        else (
+                            tenant.tenant_id
+                            if tenant.personal_tenant_id is not None
+                            else None
+                        )
                     ),
                     seen_at,
                     seen_at,
@@ -330,8 +342,6 @@ class ChannelAddressStore:
         self, message: InboundMessage, tenant: TenantContext
     ) -> Optional[str]:
         """Create the shared conversation projection for an organization channel."""
-        if not tenant.personal_tenant_id:
-            return None
         with self.registry.database.read() as connection:
             channel = connection.execute(
                 "SELECT channel_instance_id FROM organization_channels "
@@ -605,23 +615,28 @@ class ChannelAddressStore:
     def personal_tenant_for_endpoint(
         self, tenant_id: str, endpoint_id: str
     ) -> Optional[str]:
-        """Return the personal tenant behind one organization delivery endpoint.
+        """Return the private tenant behind a legacy delivery endpoint.
 
-        Mirrors the derivation performed by ``resolve()`` so scheduled jobs see
-        the very same personal tenant an inbound chat message would produce.
+        Organization-owned channels always use the organization tenant. Legacy
+        channels retain their existing member/private resolution behavior.
         """
         if not tenant_id or not endpoint_id:
             return None
         with self.registry.database.read() as connection:
             row = connection.execute(
-                "SELECT identity.tenant_id AS identity_tenant_id, identity.user_id "
+                "SELECT identity.tenant_id AS identity_tenant_id, identity.user_id, "
+                "channel.organization_id AS channel_organization_id "
                 "FROM delivery_endpoints endpoint "
                 "JOIN channel_identities identity "
                 "ON identity.identity_id=endpoint.identity_id "
+                "LEFT JOIN organization_channels channel "
+                "ON channel.channel_instance_id=endpoint.channel_id "
                 "WHERE endpoint.endpoint_id=?",
                 (endpoint_id,),
             ).fetchone()
         if row is None:
+            return None
+        if row["channel_organization_id"] is not None:
             return None
         if row["user_id"] is not None:
             try:

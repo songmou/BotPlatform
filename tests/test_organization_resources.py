@@ -629,7 +629,7 @@ class OrganizationResourceApiTest(WebApiTestBase):
         inbound_a = message(first["channel_instance_id"], "event-a")
         tenant_a = store.resolve(inbound_a)
         self.assertEqual(tenant_a.tenant_id, org_a)
-        self.assertIsNotNone(tenant_a.personal_tenant_id)
+        self.assertIsNone(tenant_a.personal_tenant_id)
         conversation_a = store.ensure_organization_conversation(
             inbound_a, tenant_a
         )
@@ -637,17 +637,23 @@ class OrganizationResourceApiTest(WebApiTestBase):
         inbound_b = message(second["channel_instance_id"], "event-b")
         tenant_b = store.resolve(inbound_b)
         self.assertEqual(tenant_b.tenant_id, org_b)
-        self.assertNotEqual(tenant_a.personal_tenant_id, tenant_b.personal_tenant_id)
+        self.assertIsNone(tenant_b.personal_tenant_id)
         self.assertIsNotNone(conversation_a)
+        with self.registry.database.read() as connection:
+            private_count = connection.execute(
+                "SELECT COUNT(*) FROM tenants "
+                "WHERE bot_id LIKE 'organization-channel:%'"
+            ).fetchone()[0]
+        self.assertEqual(private_count, 0)
         self.assertEqual(
             len(self.app.state.organization_store.list_members(org_a)), 1
         )
         shared = owner_a.get(
             "/api/v2/orgs/{}/conversations".format(org_a)
         ).json()
-        # Channel-bound conversations are stored for audit but not shown in
-        # the chat page conversation list.
-        self.assertEqual(shared, [])
+        self.assertEqual([item["id"] for item in shared], [conversation_a])
+        self.assertEqual(shared[0]["source"], "channel")
+        self.assertTrue(all(item["organization_id"] == org_a for item in shared))
 
     def test_channel_conversations_are_queryable_by_channel_and_aggregated(self):
         from src.core.messaging import ChannelAddressStore, InboundMessage
@@ -691,6 +697,38 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(per_items[0]["channel_instance_id"], channel_instance_id)
         self.assertEqual(per_items[0]["source"], "channel")
 
+        web_conversation = owner_a.post(
+            "/api/v2/orgs/{}/conversations".format(org_a)
+        )
+        self.assertEqual(
+            web_conversation.status_code, 201, web_conversation.text
+        )
+        web_conv_id = web_conversation.json()["id"]
+        system_conv_id = "system-chan-conv"
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE organization_conversations SET updated_at=? "
+                "WHERE conversation_id=?",
+                ("2026-08-14T03:00:00+00:00", per_items[0]["id"]),
+            )
+            connection.execute(
+                "UPDATE organization_conversations SET updated_at=? "
+                "WHERE conversation_id=?",
+                ("2026-08-14T02:00:00+00:00", web_conv_id),
+            )
+            connection.execute(
+                "INSERT INTO organization_conversations("
+                "conversation_id, organization_id, source, title, created_at, updated_at"
+                ") VALUES (?, ?, 'system', ?, ?, ?)",
+                (
+                    system_conv_id,
+                    org_a,
+                    "系统会话",
+                    "2026-08-14T04:00:00+00:00",
+                    "2026-08-14T04:00:00+00:00",
+                ),
+            )
+
         # Cross-channel aggregate also returns it.
         aggregate = owner_a.get(
             "/api/v2/orgs/{}/channel-conversations".format(org_a)
@@ -698,10 +736,22 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(aggregate.status_code, 200, aggregate.text)
         self.assertEqual(len(aggregate.json()), 1)
 
-        # Regression: the web chat conversation list still excludes channels.
-        web_list = owner_a.get("/api/v2/orgs/{}/conversations".format(org_a))
-        self.assertEqual(web_list.status_code, 200, web_list.text)
-        self.assertEqual(web_list.json(), [])
+        unified_list = owner_a.get(
+            "/api/v2/orgs/{}/conversations".format(org_a)
+        )
+        self.assertEqual(unified_list.status_code, 200, unified_list.text)
+        unified_items = unified_list.json()
+        self.assertEqual(
+            [item["id"] for item in unified_items],
+            [system_conv_id, per_items[0]["id"], web_conv_id],
+        )
+        self.assertEqual(
+            [item["source"] for item in unified_items],
+            ["system", "channel", "web"],
+        )
+        self.assertTrue(
+            all(item["organization_id"] == org_a for item in unified_items)
+        )
 
         # Web-mode GET-by-id endpoint returns the channel conversation meta.
         conv_id = per_items[0]["id"]
@@ -731,6 +781,45 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(history_messages[0]["role"], "user")
         self.assertEqual(history_messages[0]["content"], "你好")
         self.assertEqual(history_messages[1]["role"], "assistant")
+
+        member = self._invite_member(owner_a, org_a, "chan-conv-member")
+        member_visible = member.get(
+            "/api/v2/orgs/{}/conversations".format(org_a)
+        )
+        self.assertEqual(member_visible.status_code, 200, member_visible.text)
+        self.assertIn(
+            conv_id, [item["id"] for item in member_visible.json()]
+        )
+        denied_update = member.patch(
+            "/api/v2/orgs/{}/conversations/{}".format(org_a, conv_id),
+            json={"title": "成员不能修改渠道会话"},
+        )
+        self.assertEqual(denied_update.status_code, 403, denied_update.text)
+        denied_delete = member.delete(
+            "/api/v2/orgs/{}/conversations/{}".format(org_a, conv_id)
+        )
+        self.assertEqual(denied_delete.status_code, 404, denied_delete.text)
+
+        renamed = owner_a.patch(
+            "/api/v2/orgs/{}/conversations/{}".format(org_a, conv_id),
+            json={"title": "渠道客户会话"},
+        )
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        self.assertEqual(renamed.json()["title"], "渠道客户会话")
+        archived = owner_a.patch(
+            "/api/v2/orgs/{}/conversations/{}".format(org_a, conv_id),
+            json={"status": "archived"},
+        )
+        self.assertEqual(archived.status_code, 200, archived.text)
+        restored = owner_a.patch(
+            "/api/v2/orgs/{}/conversations/{}".format(org_a, conv_id),
+            json={"status": "active"},
+        )
+        self.assertEqual(restored.status_code, 200, restored.text)
+        deleted = owner_a.delete(
+            "/api/v2/orgs/{}/conversations/{}".format(org_a, conv_id)
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
 
     def test_member_collaborates_but_sensitive_governance_stays_restricted(self):
         org_id, owner = self._create_owner("controls")
@@ -898,6 +987,26 @@ class OrganizationResourceApiTest(WebApiTestBase):
             )
         )
         self.assertEqual(denied.status_code, 404)
+        member_conversation = member.post(
+            "/api/v2/orgs/{}/conversations".format(org_id)
+        )
+        self.assertEqual(
+            member_conversation.status_code, 201, member_conversation.text
+        )
+        member_conversation_id = member_conversation.json()["id"]
+        renamed = member.patch(
+            "/api/v2/orgs/{}/conversations/{}".format(
+                org_id, member_conversation_id
+            ),
+            json={"title": "成员自己的会话"},
+        )
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        deleted = member.delete(
+            "/api/v2/orgs/{}/conversations/{}".format(
+                org_id, member_conversation_id
+            )
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
         history = member.get(
             "/api/v2/orgs/{}/conversations/{}/history".format(
                 org_id, conversation_id
@@ -1221,12 +1330,74 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(response.status_code, 400, response.text)
 
     def test_channel_test_sends_message_to_latest_endpoint(self):
+        from unittest.mock import MagicMock
+
+        from src.core.messaging.contracts import DeliveryEndpoint
+        from src.core.messaging.router import MessageRouter
+
+        org_id, owner = self._create_owner("channel-test-send")
+        channel_instance_id = self._make_channel(org_id, owner, "channel-test-send")
+        self._configure_channel_credentials(org_id, owner)
+
+        fake_adapter = MagicMock()
+        fake_adapter.channel_id = channel_instance_id
+        endpoint = DeliveryEndpoint(
+            channel_id=channel_instance_id,
+            platform="wecom_aibot",
+            account_id="bot",
+            conversation_type="direct",
+            conversation_id="user-1",
+            recipient_id="user-1",
+        )
+        address_store = MagicMock()
+        address_store.latest_endpoint.return_value = endpoint
+        notification = MagicMock()
+        notification.address_store = address_store
+        notification.message_router = MessageRouter([fake_adapter])
+        self.app.state.notification_service = notification
+
+        response = owner.post(
+            "/api/v2/orgs/{}/channels/main/test".format(org_id)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["state"], "message_sent")
+        self.assertIn("user-1", payload["detail"])
+        fake_adapter.send.assert_called_once()
+        sent_endpoint, sent_message = fake_adapter.send.call_args.args
+        self.assertEqual(sent_endpoint.recipient_id, "user-1")
+        self.assertIn("BotPlatform", sent_message.text)
+        # 运行中适配器由 ChannelManager 持有，测试接口不负责关闭它。
+        fake_adapter.close.assert_not_called()
+
+    def test_channel_test_without_recipient_reports_valid_credentials(self):
+        from unittest.mock import MagicMock
+
+        org_id, owner = self._create_owner("channel-test-norecip")
+        self._make_channel(org_id, owner, "channel-test-norecip")
+        self._configure_channel_credentials(org_id, owner)
+
+        address_store = MagicMock()
+        address_store.latest_endpoint.return_value = None
+        notification = MagicMock()
+        notification.address_store = address_store
+        self.app.state.notification_service = notification
+
+        response = owner.post(
+            "/api/v2/orgs/{}/channels/main/test".format(org_id)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["state"], "credentials_valid")
+        self.assertIn("收件人", payload["detail"])
+
+    def test_channel_test_without_running_adapter_falls_back_to_temp(self):
         from unittest.mock import MagicMock, patch
 
         from src.core.messaging.contracts import DeliveryEndpoint
 
-        org_id, owner = self._create_owner("channel-test-send")
-        channel_instance_id = self._make_channel(org_id, owner, "channel-test-send")
+        org_id, owner = self._create_owner("channel-test-fallback")
+        channel_instance_id = self._make_channel(org_id, owner, "channel-test-fallback")
         self._configure_channel_credentials(org_id, owner)
 
         fake_adapter = MagicMock()
@@ -1240,8 +1411,11 @@ class OrganizationResourceApiTest(WebApiTestBase):
         )
         address_store = MagicMock()
         address_store.latest_endpoint.return_value = endpoint
-        self.app.state.notification_service = MagicMock()
-        self.app.state.notification_service.address_store = address_store
+        # 没有运行中的适配器（message_router 为 None），应回退到临时 adapter。
+        notification = MagicMock()
+        notification.address_store = address_store
+        notification.message_router = None
+        self.app.state.notification_service = notification
 
         with patch(
             "src.api.routers.v2.build_channel_adapter", return_value=fake_adapter
@@ -1252,38 +1426,35 @@ class OrganizationResourceApiTest(WebApiTestBase):
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertEqual(payload["state"], "message_sent")
-        self.assertIn("user-1", payload["detail"])
         fake_adapter.send.assert_called_once()
-        sent_endpoint, sent_message = fake_adapter.send.call_args.args
-        self.assertEqual(sent_endpoint.recipient_id, "user-1")
-        self.assertIn("BotPlatform", sent_message.text)
         fake_adapter.close.assert_called_once()
 
-    def test_channel_test_without_recipient_reports_valid_credentials(self):
+    def test_channel_test_long_connection_not_connected_returns_clear_error(self):
         from unittest.mock import MagicMock, patch
 
-        org_id, owner = self._create_owner("channel-test-norecip")
-        self._make_channel(org_id, owner, "channel-test-norecip")
+        from src.core.messaging.errors import TransientTransportError
+
+        org_id, owner = self._create_owner("channel-test-noconn")
+        self._make_channel(org_id, owner, "channel-test-noconn")
         self._configure_channel_credentials(org_id, owner)
 
-        fake_adapter = MagicMock()
         address_store = MagicMock()
-        address_store.latest_endpoint.return_value = None
-        self.app.state.notification_service = MagicMock()
-        self.app.state.notification_service.address_store = address_store
+        address_store.latest_endpoint.return_value = MagicMock()
+        notification = MagicMock()
+        notification.address_store = address_store
+        notification.message_router = None
+        self.app.state.notification_service = notification
 
+        # 连接型渠道未连接时，临时 adapter 的 send 会抛出「消息渠道尚未连接」。
         with patch(
-            "src.api.routers.v2.build_channel_adapter", return_value=fake_adapter
+            "src.api.routers.v2.build_channel_adapter",
+            side_effect=TransientTransportError("消息渠道尚未连接"),
         ):
             response = owner.post(
                 "/api/v2/orgs/{}/channels/main/test".format(org_id)
             )
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertEqual(payload["state"], "credentials_valid")
-        self.assertIn("收件人", payload["detail"])
-        fake_adapter.send.assert_not_called()
-        fake_adapter.close.assert_called_once()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("尚未连接", response.json()["detail"])
 
 
 class ToolRuntimeThreadBindingTest(unittest.TestCase):

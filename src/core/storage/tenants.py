@@ -107,6 +107,7 @@ class TenantRegistry:
         if (
             organizations is not None
             and not bot_id.startswith("member-personal:")
+            and not bot_id.startswith("organization-channel:")
         ):
             organizations.ensure_legacy_organization(context.tenant_id)
         return context
@@ -137,7 +138,12 @@ class TenantRegistry:
         self, include_internal: bool = False
     ) -> List[TenantContext]:
         internal_clause = (
-            "" if include_internal else "AND bot_id NOT LIKE 'member-personal:%' "
+            ""
+            if include_internal
+            else (
+                "AND bot_id NOT LIKE 'member-personal:%' "
+                "AND bot_id NOT LIKE 'organization-channel:%' "
+            )
         )
         with self.database.read() as connection:
             rows = connection.execute(
@@ -152,7 +158,10 @@ class TenantRegistry:
         internal_clause = (
             ""
             if include_internal
-            else "AND t.bot_id NOT LIKE 'member-personal:%' "
+            else (
+                "AND t.bot_id NOT LIKE 'member-personal:%' "
+                "AND t.bot_id NOT LIKE 'organization-channel:%' "
+            )
         )
         with self.database.read() as connection:
             rows = connection.execute(

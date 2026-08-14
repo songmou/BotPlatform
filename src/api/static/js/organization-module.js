@@ -1212,7 +1212,9 @@ function initOrganizationModule(requestedModule) {
                 row.addEventListener("click", function () {
                     var convId = row.getAttribute("data-conv");
                     modal.style.display = "none";
-                    window.location.href = "/chat?conversation=" + encodeURIComponent(convId);
+                    window.location.href = "/organization/chat?organization_id=" +
+                        encodeURIComponent(activeOrganizationId()) +
+                        "&conversation=" + encodeURIComponent(convId);
                 });
             });
         }).catch(function (err) {

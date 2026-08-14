@@ -120,8 +120,13 @@ class IntegrationService:
                 },
             )
             name = SUPPORTED_INTEGRATIONS[pending.integration_id]
+            next_step = {
+                "ctsehr": "现在可直接发送“查看打卡”查询考勤。",
+                "ctsoa": "现在可直接发送“查看 OA 待办”查询审批待办。",
+                "autogen": "现在可以重新运行对应的悟空 AI 任务。",
+            }[pending.integration_id]
             self._pending.pop(tenant_id, None)
-            return True, "{} 凭据已安全保存。".format(name)
+            return True, "{} 凭据已安全保存。{}".format(name, next_step)
 
     def status(self, tenant: TenantContext, integration_id: str = "") -> str:
         ids = [integration_id.lower()] if integration_id else sorted(SUPPORTED_INTEGRATIONS)

@@ -681,6 +681,14 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("chat-messages", response.text)
 
+    def test_channel_conversation_navigation_preserves_organization(self):
+        response = self.client.get("/static/js/organization-module.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            '"/organization/chat?organization_id="', response.text
+        )
+        self.assertIn('"&conversation="', response.text)
+
     def test_chat_uses_local_markdown_dependencies_under_csp(self):
         response = self.client.get("/organization/chat", params=self._auth_params())
         self.assertEqual(response.status_code, 200)

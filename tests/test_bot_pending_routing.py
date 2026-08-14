@@ -19,6 +19,7 @@ class FakeScriptService:
         self.resumed = False
         self.resumed_text: str = ""
         self.cleared = False
+        self.fail_resume = False
 
     def set_pending(self) -> None:
         self._pending = PendingScriptInput(
@@ -46,8 +47,11 @@ class FakeScriptService:
         self._pending = None
 
     def resume_pending_input(self, tenant, pending, text):
+        if self.fail_resume:
+            raise ValueError("temporary failure")
         self.resumed = True
         self.resumed_text = text
+        self._pending = None
         return {"run_id": "x"}
 
 
@@ -122,6 +126,37 @@ class PendingScriptRoutingTests(unittest.TestCase):
         self.assertFalse(handled)
         self.assertFalse(self.script_service.resumed)
         self.assertIsNotNone(self.script_service.peek_pending_input(self.tenant))
+
+    def test_unrelated_ehr_query_passes_through_and_keeps_oa_pending(self) -> None:
+        self.script_service.set_pending()
+        handled = self.bot._route_pending_script_input(
+            self._msg(), self.tenant, self.endpoint, "member", "查看打卡", False
+        )
+        self.assertFalse(handled)
+        self.assertFalse(self.script_service.resumed)
+        self.assertIsNotNone(self.script_service.peek_pending_input(self.tenant))
+
+    def test_same_oa_query_prompts_for_pending_input_instead_of_resuming(self) -> None:
+        self.script_service.set_pending()
+        handled = self.bot._route_pending_script_input(
+            self._msg(), self.tenant, self.endpoint, "member", "查看 OA 待办", False
+        )
+        self.assertTrue(handled)
+        self.assertFalse(self.script_service.resumed)
+        self.assertIsNotNone(self.script_service.peek_pending_input(self.tenant))
+        self.assertTrue(any("等待你的输入" in text for text, _ in self.replies))
+
+    def test_resume_failure_keeps_pending_and_does_not_record_secret(self) -> None:
+        self.script_service.set_pending()
+        self.script_service.fail_resume = True
+        handled = self.bot._route_pending_script_input(
+            self._msg(), self.tenant, self.endpoint, "member", "6841", False
+        )
+        self.assertTrue(handled)
+        self.assertIsNotNone(self.script_service.peek_pending_input(self.tenant))
+        context = self.conversation_store.load_context(self.tenant.tenant_id)
+        self.assertFalse(any("6841" in msg.content for msg in context))
+        self.assertTrue(any("输入仍然有效" in text for text, _ in self.replies))
 
     def test_no_pending_passes_through(self) -> None:
         handled = self.bot._route_pending_script_input(

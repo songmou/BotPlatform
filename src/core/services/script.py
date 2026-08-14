@@ -634,7 +634,9 @@ class ScriptService:
                 pass
             artifacts.append((run.run_id, position, str(relative), digest))
         parameters = json.dumps(run.parameters, ensure_ascii=False, separators=(",", ":"))
-        with self.tenant_registry.database.transaction(immediate=True) as connection:
+        with self.tenant_registry.database.transaction(
+            immediate=True
+        ) as connection:
             connection.execute(
                 "INSERT INTO script_runs(run_id, tenant_id, script_id, script_name, trigger, "
                 "parameters_json, status, summary, created_at, started_at, finished_at, exit_code, "
@@ -884,7 +886,35 @@ class ScriptService:
         self, tenant: TenantContext, pending: PendingScriptInput, text: str
     ) -> Dict[str, Any]:
         """Re-submit the script with the user's reply mapped to ``pending.param``."""
-        return self.submit_for_tenant(tenant, pending.script_id, {pending.param: text})
+        result = self.submit_for_tenant(
+            tenant, pending.script_id, {pending.param: text}
+        )
+        successor_run_id = str(result.get("run_id", "")).strip()
+        if not successor_run_id or result.get("status") != "running":
+            raise ValueError(
+                str(result.get("summary", "")).strip()
+                or "脚本续跑未成功提交"
+            )
+        # Consume only the entry that was resumed. A very fast successor may
+        # already have registered a fresh challenge for the same session.
+        self.input_registry.consume(
+            tenant.tenant_id,
+            session_key=pending.session_key,
+            expected_run_id=pending.run_id,
+        )
+        with self.tenant_registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE script_runs SET status='success', summary=? "
+                "WHERE run_id=? AND tenant_id=? AND status='awaiting_input'",
+                (
+                    "已收到用户输入，任务已续跑为 {}。请以后续任务结果为准。".format(
+                        successor_run_id
+                    ),
+                    pending.run_id,
+                    tenant.tenant_id,
+                ),
+            )
+        return result
 
     def _apply_child_result(
         self,

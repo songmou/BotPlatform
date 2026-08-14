@@ -276,9 +276,11 @@ function initChat() {
                 deleteConversation(c.id);
             });
             item.appendChild(title);
-            var canDelete = !organizationMode() || canWriteOrganization() ||
-                c.creator_user_id === BP_CONTEXT.user.user_id;
-            if (organizationMode() && canDelete) {
+            var canManageConversation = !organizationMode() ||
+                canManageOrganization() ||
+                (c.source === "web" && BP_CONTEXT && BP_CONTEXT.user &&
+                    c.creator_user_id === BP_CONTEXT.user.user_id);
+            if (organizationMode() && canManageConversation) {
                 title.title = "双击重命名";
                 title.addEventListener("dblclick", function (event) {
                     event.stopPropagation();
@@ -298,7 +300,7 @@ function initChat() {
                 });
                 item.appendChild(archive);
             }
-            if (canDelete) item.appendChild(del);
+            if (canManageConversation) item.appendChild(del);
             item.addEventListener("click", function () { selectConversation(c.id); });
             convListEl.appendChild(item);
         });
