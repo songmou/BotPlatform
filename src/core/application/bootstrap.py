@@ -58,7 +58,6 @@ from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
 from src.core.services.script_registry import ExternalScriptRegistry
 from src.core.services.env_resolver import EnvResolver
-from src.core.services.script_schedule import ScriptScheduleService
 from src.core.services.organization_schedule_tool import (
     OrganizationScheduleToolService,
 )
@@ -109,7 +108,6 @@ class BotRuntime:
     notification_dispatcher: NotificationDispatcher
     external_script_registry: ExternalScriptRegistry
     script_service: ScriptService
-    script_schedule_service: ScriptScheduleService
     plugin_context: PluginContext
     plugin_manager: PluginManager
     mcp_manager: Optional[Any]
@@ -207,15 +205,8 @@ def build_bot_runtime(
             env_resolver=env_resolver,
             address_store=address_store,
         )
-        script_schedule_service = ScriptScheduleService(
-            tenant_registry,
-            script_service,
-            project_config.app.timezone,
-        )
-        # Chat-facing bridge to organization_schedules (system C). The
-        # SchedulerService keeps its own ScriptScheduleService reference for
-        # the legacy tenant_script_schedules table; this one is only for the
-        # list/manage chat tools.
+        # Chat tools and the scheduler share the organization-scoped schedule
+        # store used by the Web panel.
         organization_schedule_service = OrganizationScheduleToolService(
             services.organization_control_store,
             services.organization_store,
@@ -303,7 +294,6 @@ def build_bot_runtime(
             plugin_manager=plugin_manager,
             memory_service=memory_service,
             notification_service=notification_service,
-            script_schedule_service=script_schedule_service,
             organization_control_store=services.organization_control_store,
         )
     except Exception:
@@ -323,7 +313,6 @@ def build_bot_runtime(
         notification_dispatcher=notification_dispatcher,
         external_script_registry=external_script_registry,
         script_service=script_service,
-        script_schedule_service=script_schedule_service,
         plugin_context=plugin_context,
         plugin_manager=plugin_manager,
         mcp_manager=mcp_manager,
@@ -413,7 +402,11 @@ def run_channel_loop(runtime: BotRuntime, project_config: ProjectConfig) -> int:
                         raise ChannelCredentialError(
                             "渠道 {} 尚未配置凭据".format(channel_config.id)
                         )
-                    adapter = build_channel_adapter(channel_config, credentials)
+                    adapter = build_channel_adapter(
+                        channel_config,
+                        credentials,
+                        token_resolver=runtime.address_store.latest_context_token,
+                    )
                 except Exception as exc:
                     runtime.channel_statuses.set(
                         channel_config.id,

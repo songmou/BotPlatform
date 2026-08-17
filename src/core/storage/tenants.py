@@ -109,6 +109,7 @@ class TenantRegistry:
         if (
             organizations is not None
             and not bot_id.startswith("member-personal:")
+            and not bot_id.startswith("organization-channel:")
         ):
             organizations.ensure_legacy_organization(context.tenant_id)
         return context
@@ -139,7 +140,12 @@ class TenantRegistry:
         self, include_internal: bool = False
     ) -> List[TenantContext]:
         internal_clause = (
-            "" if include_internal else "AND bot_id NOT LIKE 'member-personal:%' "
+            ""
+            if include_internal
+            else (
+                "AND bot_id NOT LIKE 'member-personal:%' "
+                "AND bot_id NOT LIKE 'organization-channel:%' "
+            )
         )
         with self.database.read() as connection:
             rows = connection.execute(
@@ -154,7 +160,10 @@ class TenantRegistry:
         internal_clause = (
             ""
             if include_internal
-            else "AND t.bot_id NOT LIKE 'member-personal:%' "
+            else (
+                "AND t.bot_id NOT LIKE 'member-personal:%' "
+                "AND t.bot_id NOT LIKE 'organization-channel:%' "
+            )
         )
         with self.database.read() as connection:
             rows = connection.execute(
@@ -306,6 +315,45 @@ class ConversationStore:
                         (tenant_id, session_key, user_id, self.max_messages),
                     ).fetchall()
         return [CanonicalMessage(str(row["role"]), str(row["content"])) for row in reversed(rows)]
+
+    def load_transcript(
+        self,
+        tenant_id: str,
+        session_key: str = "direct",
+    ) -> List[CanonicalMessage]:
+        """Return the durable conversation transcript for display/history.
+
+        Unlike :meth:`load_context` (which returns the rolling LLM context
+        window from ``conversation_context_messages``), this reads the
+        append-only ``conversation_events`` log. That log also captures
+        channel-sourced organization conversations, whose messages are only
+        ever written there (the bot appends a transcript event but never
+        touches the rolling context). ``context_cleared`` markers truncate the
+        visible history so the clear-context action is still honoured.
+        """
+        with self.lock_for(tenant_id, session_key):
+            with self.registry.database.read() as connection:
+                rows = connection.execute(
+                    "SELECT event_id, role, content, event_type "
+                    "FROM conversation_events "
+                    "WHERE tenant_id=? AND session_key=? "
+                    "ORDER BY event_id ASC",
+                    (tenant_id, session_key),
+                ).fetchall()
+        last_clear = -1
+        for row in rows:
+            if row["event_type"] == "context_cleared":
+                last_clear = row["event_id"]
+        messages: List[CanonicalMessage] = []
+        for row in rows:
+            if row["event_id"] <= last_clear:
+                continue
+            if row["event_type"] != "message":
+                continue
+            messages.append(
+                CanonicalMessage(str(row["role"]), str(row["content"]))
+            )
+        return messages
 
     def save_context(
         self,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
@@ -26,6 +27,9 @@ from src.core.messaging.errors import (
 )
 
 from .async_base import AsyncAdapterBridge
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 FEISHU = "feishu"
@@ -173,7 +177,17 @@ class FeishuAdapter(AsyncAdapterBridge):
             _value(message, "chat_type", default=_value(event, "chat_type", default=""))
             or ""
         ).lower()
-        conversation_type = DIRECT if chat_type in {"p2p", "direct", "private"} else GROUP
+        # 仅以 chat_type == "group" 判定群聊；其余（含 p2p/direct/private 及任何未知值）
+        # 一律按私聊处理，确保用户主动发起的私聊必然回复而非被静默忽略。
+        if chat_type == "group":
+            conversation_type = GROUP
+        else:
+            if chat_type and chat_type not in {"p2p", "direct", "private"}:
+                LOGGER.warning(
+                    "飞书消息 chat_type=%r 非预期，暂按私聊处理以保证主动私聊可回复",
+                    chat_type,
+                )
+            conversation_type = DIRECT
         content = _content_mapping(message)
         text = str(
             _value(
@@ -328,7 +342,8 @@ class FeishuAdapter(AsyncAdapterBridge):
                     return
                 try:
                     message = self.normalize(event)
-                except ValueError:
+                except ValueError as exc:
+                    LOGGER.warning("飞书消息被丢弃：%s（event=%s）", exc, event)
                     return
                 emit(message)
 

@@ -19,6 +19,7 @@ OPEN_PATHS = {
     "/login",
     "/api/auth/login",
     "/api/v2/invitations/accept",
+    "/api/workflows/v1",
 }
 
 # Panel templates rely on inline scripts/styles and only load local assets,

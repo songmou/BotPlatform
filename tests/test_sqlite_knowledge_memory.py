@@ -234,6 +234,23 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending_embedding")
         self.assertEqual(len(service.search(self.tenant.tenant_id, "全文检索")), 1)
 
+    def test_english_natural_language_query_uses_tolerant_fts_terms(self):
+        service = KnowledgeService(self.registry, None)
+        service.add_text(
+            self.tenant.tenant_id,
+            "Filariasis review",
+            "Regional programs substantially reduced lymphatic filariasis prevalence.",
+        )
+
+        hits = service.search(
+            self.tenant.tenant_id,
+            "Ivermectin is used to treat lymphatic filariasis.",
+        )
+
+        self.assertTrue(hits)
+        self.assertIn("lymphatic filariasis", hits[0]["content"])
+        self.assertEqual(hits[0]["retrieval_sources"], ["lexical"])
+
     def test_rerank_reorders_candidates_and_degrades_silently(self):
         docs = [
             ("苹果", "苹果是一种常见水果，可以直接食用。"),
@@ -267,6 +284,21 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
             for hit in degraded_service.search(self.tenant.tenant_id, "水果", limit=3)
         ]
         self.assertEqual(degraded, baseline)
+
+    def test_final_ranking_keeps_only_best_chunk_per_source(self):
+        candidates = ["a1", "a2", "b1", "c1"]
+        details = {
+            "a1": {"source_id": "source-a"},
+            "a2": {"source_id": "source-a"},
+            "b1": {"source_id": "source-b"},
+            "c1": {"source_id": "source-c"},
+        }
+
+        selected = KnowledgeService._distinct_source_candidates(
+            candidates, details, limit=3
+        )
+
+        self.assertEqual(selected, ["a1", "b1", "c1"])
 
     def test_memory_review_conflict_secret_and_forget(self):
         extractor = FakeExtractor([

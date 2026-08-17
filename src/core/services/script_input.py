@@ -108,8 +108,9 @@ class ScriptInputRegistry:
         tenant_id: str,
         session_key: str = "direct",
         now: Optional[float] = None,
+        expected_run_id: Optional[str] = None,
     ) -> Optional[PendingScriptInput]:
-        """Return and remove the pending input; clears expired entries."""
+        """Remove the pending input when it still belongs to the expected run."""
         stamp = now if now is not None else time.time()
         with self._lock:
             key = self._key(tenant_id, session_key)
@@ -118,6 +119,8 @@ class ScriptInputRegistry:
                 return None
             if stamp >= pending.expires_at:
                 self._items.pop(key, None)
+                return None
+            if expected_run_id and pending.run_id != expected_run_id:
                 return None
             return self._items.pop(key, None)
 

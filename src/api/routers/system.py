@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlencode
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -29,13 +27,6 @@ def _page(request: Request, name: str, active: str, **context):
             **context,
         },
     )
-
-
-def _redirect(path: str, request: Request) -> RedirectResponse:
-    organization_id = str(request.query_params.get("organization_id") or "")
-    if organization_id:
-        path += "?" + urlencode({"organization_id": organization_id})
-    return RedirectResponse(path, status_code=308)
 
 
 def _validate_organization_page(request: Request) -> None:
@@ -119,6 +110,18 @@ def page_platform_agents(
     request: Request, _principal=Depends(require_permission("panel.read"))
 ):
     return _page(request, "agents.html", "platform-agents")
+
+
+@router.get("/platform/workflows", response_class=HTMLResponse)
+def page_platform_workflows(
+    request: Request, _principal=Depends(require_permission("panel.read"))
+):
+    return _page(
+        request,
+        "workflows.html",
+        "platform-workflows",
+        workflow_mode="platform",
+    )
 
 
 @router.get("/platform/tools", response_class=HTMLResponse)
@@ -205,6 +208,17 @@ def page_organization_chat(request: Request):
 @router.get("/organization/agents", response_class=HTMLResponse)
 def page_organization_agents(request: Request):
     return _organization_page(request, "agents")
+
+
+@router.get("/organization/workflows", response_class=HTMLResponse)
+def page_organization_workflows(request: Request):
+    return _organization_page(
+        request,
+        "workflows",
+        template="workflows.html",
+        active="organization-workflows",
+        workflow_mode="organization",
+    )
 
 
 @router.get("/organization/knowledge", response_class=HTMLResponse)
@@ -310,112 +324,3 @@ def page_platform_audit(
 @router.get("/docs", response_class=HTMLResponse)
 def page_docs(request: Request):
     return _page(request, "docs.html", "docs")
-
-
-# Unambiguous legacy page aliases. No alias stores organization selection.
-@router.get("/admin")
-def legacy_admin(request: Request):
-    return _redirect("/platform/organizations", request)
-
-
-@router.get("/app")
-def legacy_app(request: Request):
-    return _redirect("/organization/overview", request)
-
-
-@router.get("/chat")
-def legacy_chat(request: Request):
-    return _redirect("/organization/chat", request)
-
-
-@router.get("/models")
-def legacy_models(request: Request):
-    return _redirect("/platform/models", request)
-
-
-@router.get("/agents")
-def legacy_agents(request: Request):
-    principal = getattr(request.state, "principal", None)
-    target = (
-        "/platform/agent-templates"
-        if principal is not None and principal.allows("admins.manage")
-        else "/organization/agents"
-    )
-    return _redirect(target, request)
-
-
-@router.get("/tools")
-def legacy_tools(request: Request):
-    return _redirect("/platform/tools", request)
-
-
-@router.get("/plugins")
-def legacy_plugins(request: Request):
-    return _redirect("/platform/plugins", request)
-
-
-@router.get("/scripts")
-def legacy_scripts(request: Request):
-    return _redirect("/platform/scripts", request)
-
-
-@router.get("/knowledge")
-def legacy_knowledge(request: Request):
-    principal = getattr(request.state, "principal", None)
-    if request.query_params.get("organization_id"):
-        return _redirect("/organization/knowledge", request)
-    target = (
-        "/platform/knowledge"
-        if principal is not None and principal.allows("knowledge.read")
-        else "/organization/knowledge"
-    )
-    return _redirect(target, request)
-
-
-@router.get("/drive")
-def legacy_drive(request: Request):
-    principal = getattr(request.state, "principal", None)
-    if request.query_params.get("organization_id"):
-        return _redirect("/organization/drive", request)
-    target = (
-        "/platform/drive"
-        if principal is not None and principal.allows("drive.read")
-        else "/organization/drive"
-    )
-    return _redirect(target, request)
-
-
-@router.get("/channels")
-def legacy_channels(request: Request):
-    return _redirect("/organization/channels", request)
-
-
-@router.get("/schedules")
-def legacy_schedules(request: Request):
-    return _redirect("/organization/schedules", request)
-
-
-@router.get("/members")
-def legacy_members(request: Request):
-    return _redirect("/organization/members", request)
-
-
-@router.get("/analytics")
-def legacy_analytics(request: Request):
-    return _redirect("/organization/analytics", request)
-
-
-@router.get("/audit")
-def legacy_audit(request: Request):
-    return _redirect("/organization/audit", request)
-
-
-@router.get("/users")
-def legacy_users(request: Request):
-    principal = getattr(request.state, "principal", None)
-    target = (
-        "/platform/organizations"
-        if principal is not None and principal.allows("admins.manage")
-        else "/organization/members"
-    )
-    return _redirect(target, request)

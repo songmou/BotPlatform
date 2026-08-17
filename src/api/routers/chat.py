@@ -19,6 +19,7 @@ from src.api.deps import (
     get_conversation_store,
     get_model_analytics_store,
     get_organization_store,
+    get_principal,
     get_resource_store,
     get_router,
     require_permission,
@@ -605,6 +606,23 @@ def create_conversation(
     )
 
 
+@router.get("/conversations/{conv_id}")
+def get_conversation_by_id(
+    conv_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    organizations = get_organization_store(request)
+    try:
+        return organizations.get_conversation(
+            principal.user.user_id,
+            conv_id,
+            allow_delegation=principal.allows("admins.manage"),
+        )
+    except OrganizationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.delete("/conversations/{conv_id}")
 def delete_conversation(
     conv_id: str,
@@ -1043,7 +1061,7 @@ def chat_history(
         return ChatHistoryResponse(messages=[])
     store = get_conversation_store(request)
     organization_id = str(conversation["organization_id"])
-    messages = store.load_context(
+    messages = store.load_transcript(
         organization_id,
         session_key="organization:{}".format(conversation_id),
     )

@@ -12,6 +12,8 @@ import json
 import unittest
 from pathlib import Path
 
+from src.core.services.script_intent import classify_integration_script_query
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JOBS_ROOT = REPO_ROOT / "src" / "core" / "jobs"
 GENERAL_AGENT = REPO_ROOT / "config" / "agents" / "general.json"
@@ -27,6 +29,28 @@ def _script_descriptions() -> dict[str, str]:
 
 
 class IntentRoutingConfigTests(unittest.TestCase):
+    def test_explicit_integration_queries_are_classified_without_todo_leakage(self) -> None:
+        self.assertEqual(
+            classify_integration_script_query("查看打卡"), ("ctsehr_check",)
+        )
+        self.assertEqual(
+            classify_integration_script_query("请查看 OA 待办"), ("ctsoa_check",)
+        )
+        self.assertEqual(
+            classify_integration_script_query("查看打卡和 OA 审批待办"),
+            ("ctsehr_check", "ctsoa_check"),
+        )
+        self.assertEqual(classify_integration_script_query("查看待办"), ())
+        self.assertEqual(
+            classify_integration_script_query("查看 roadmap 待办"), ()
+        )
+        self.assertEqual(
+            classify_integration_script_query("OA 和 EHR 有什么区别？"), ()
+        )
+        self.assertEqual(
+            classify_integration_script_query("如何配置 CTSEHR？"), ()
+        )
+
     def test_ctsehr_description_is_ehr_scoped_without_oa_contamination(self) -> None:
         desc = _script_descriptions()["ctsehr_check"]
         # Positive scope: clearly EHR attendance.
@@ -67,6 +91,16 @@ class IntentRoutingConfigTests(unittest.TestCase):
         self.assertNotIn("OA双日考勤汇总", source)
         self.assertNotIn("OA 双日考勤汇总", source)
         self.assertNotIn("企业OA双日考勤汇总助手", source)
+        for stale_label in (
+            "OA 密码",
+            "OA 登录失败",
+            "OA 凭据不可用",
+            "OA 监控配置无效",
+            "OA 监控运行失败",
+            "OA 考勤与待审批",
+        ):
+            self.assertNotIn(stale_label, source)
+        self.assertIn("CTS EHR 监控运行失败", source)
 
 
 if __name__ == "__main__":

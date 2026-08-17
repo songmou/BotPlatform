@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from src.core.config.loader import ChannelConfig
 from src.core.integrations.ilink import Credentials, ILinkClient
@@ -14,7 +14,7 @@ from .credentials import validate_channel_credentials
 
 
 AdapterBuilder = Callable[
-    [ChannelConfig, Mapping[str, str]],
+    [ChannelConfig, Mapping[str, str], Optional[Any]],
     MessagingAdapter,
 ]
 
@@ -34,24 +34,28 @@ class ChannelProvider:
         self,
         config: ChannelConfig,
         credentials: Mapping[str, str],
+        token_resolver: Optional[Any] = None,
     ) -> MessagingAdapter:
-        return self.builder(config, credentials)
+        return self.builder(config, credentials, token_resolver)
 
 
 def _build_ilink(
     config: ChannelConfig,
     credentials: Mapping[str, str],
+    token_resolver: Optional[Any] = None,
 ) -> MessagingAdapter:
     parsed = Credentials.from_dict(dict(credentials))
     return WeChatILinkAdapter(
         ILinkClient(credentials=parsed),
         channel_id=config.id,
+        token_resolver=token_resolver,
     )
 
 
 def _build_wecom(
     config: ChannelConfig,
     credentials: Mapping[str, str],
+    token_resolver: Optional[Any] = None,
 ) -> MessagingAdapter:
     return WeComAIBotAdapter(
         credentials["bot_id"],
@@ -63,6 +67,7 @@ def _build_wecom(
 def _build_feishu(
     config: ChannelConfig,
     credentials: Mapping[str, str],
+    token_resolver: Optional[Any] = None,
 ) -> MessagingAdapter:
     return FeishuAdapter(
         credentials["app_id"],
@@ -110,7 +115,8 @@ def list_channel_providers() -> Tuple[ChannelProvider, ...]:
 def build_channel_adapter(
     config: ChannelConfig,
     credentials: Mapping[str, str],
+    token_resolver: Optional[Any] = None,
 ) -> MessagingAdapter:
     provider = channel_provider(config.type)
     normalized = provider.validate_credentials(credentials)
-    return provider.build(config, normalized)
+    return provider.build(config, normalized, token_resolver)

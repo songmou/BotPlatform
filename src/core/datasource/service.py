@@ -411,6 +411,41 @@ class DataSourceService:
     # Query execution
     # ------------------------------------------------------------------
 
+    def validate_readonly_query(
+        self,
+        datasource_id: str,
+        sql: str,
+        *,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Validate SQL and table access without opening a database connection."""
+        _driver, cfg = self._get_driver_and_cfg(datasource_id)
+        dialect = dialect_for(cfg.get("engine", ""))
+        default_schema = cfg.get("database", "")
+        allowed_tables: Set[str] = set()
+        for table in cfg.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            schema = table.get("schema") or default_schema
+            name = table.get("name", "")
+            if name:
+                allowed_tables.add("{}.{}".format(schema.lower(), name.lower()))
+        max_rows = int(cfg.get("max_rows", 200))
+        if limit is not None and limit > 0:
+            max_rows = min(limit, max_rows)
+        safe_sql, used_tables, effective_limit = compile_readonly(
+            sql,
+            dialect=dialect,
+            allowed_tables=allowed_tables,
+            max_rows=max_rows,
+            default_schema=default_schema,
+        )
+        return {
+            "sql": safe_sql,
+            "tables": used_tables,
+            "limit": effective_limit,
+        }
+
     def query(
         self,
         datasource_id: str,
@@ -419,32 +454,12 @@ class DataSourceService:
         limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute a read-only SQL query against the datasource."""
-        driver, cfg = self._get_driver_and_cfg(datasource_id)
-        engine = cfg.get("engine", "")
-        dialect = dialect_for(engine)
-        default_schema = cfg.get("database", "")
-
-        authorised = cfg.get("tables") or []
-        allowed_tables: Set[str] = set()
-        for tbl in authorised:
-            if not isinstance(tbl, dict):
-                continue
-            schema = tbl.get("schema") or default_schema
-            name = tbl.get("name", "")
-            if name:
-                allowed_tables.add("{}.{}".format(schema.lower(), name.lower()))
-
-        max_rows = int(cfg.get("max_rows", 200))
-        if limit is not None and limit > 0:
-            max_rows = min(limit, max_rows)
-
-        safe_sql, used_tables, effective_limit = compile_readonly(
-            sql,
-            dialect=dialect,
-            allowed_tables=allowed_tables,
-            max_rows=max_rows,
-            default_schema=default_schema,
-        )
+        driver, _cfg = self._get_driver_and_cfg(datasource_id)
+        validated = self.validate_readonly_query(datasource_id, sql, limit=limit)
+        safe_sql = str(validated["sql"])
+        used_tables = list(validated["tables"])
+        effective_limit = int(validated["limit"])
+        cfg = self.get_config(datasource_id) or {}
 
         pool = self._get_pool(datasource_id)
         item = pool.get()

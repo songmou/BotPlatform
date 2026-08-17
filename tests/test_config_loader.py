@@ -63,12 +63,16 @@ class ConfigLoaderTests(unittest.TestCase):
         reminder = next(
             task for task in config.schedules if task.id == "inactive_user_reminder"
         )
-        self.assertTrue(reminder.enabled)
+        self.assertTrue(all(not task.enabled for task in config.schedules))
         self.assertEqual(reminder.condition.type, "inactivity_once")
         self.assertEqual(reminder.condition.after_hours, 20)
         self.assertEqual(reminder.condition.before_hours, 24)
         self.assertTrue(config.tools.enabled)
-        self.assertTrue(config.plugins["ocr"].enabled)
+        self.assertTrue(config.plugins["todo"].enabled)
+        self.assertFalse(config.plugins["browser_automation"].enabled)
+        self.assertFalse(config.plugins["web_research"].enabled)
+        self.assertFalse(config.plugins["codex_tasks"].enabled)
+        self.assertFalse(config.plugins["ocr"].enabled)
         self.assertTrue(config.plugins["ocr"].settings["auto_process_chat_images"])
         self.assertEqual(config.plugins["ocr"].settings["model_tier"], "small")
         self.assertEqual(config.plugins["ocr"].settings["max_pdf_pages"], 10)
@@ -77,6 +81,9 @@ class ConfigLoaderTests(unittest.TestCase):
             "ocr_extract_text", config.active_agent.plugin_tools.get("ocr", [])
         )
         self.assertIn("run_command", config.active_agent.tools)
+        self.assertEqual(config.active_agent.mcp_servers, [])
+        self.assertEqual(config.mcp_servers, [])
+        self.assertEqual(config.datasources, [])
         self.assertEqual(config.app.active_model, "deepseek_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
         self.assertTrue(config.active_model.enabled)
@@ -696,8 +703,15 @@ class ConfigLoaderTests(unittest.TestCase):
                 "timeout_seconds": 60,
             }
             self.save_json(path, data)
-            with self.assertRaisesRegex(ConfigError, "重排模型仅支持 openai_compatible"):
+            with self.assertRaisesRegex(ConfigError, "重排模型仅支持 openai_compatible 或 local_transformers"):
                 load_project_config(config_dir)
+
+    def test_local_transformers_rerank_profile_is_valid(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        profile = config.models["bge_reranker_v2_m3_local"]
+        self.assertEqual(profile.modality, "rerank")
+        self.assertEqual(profile.type, "local_transformers")
+        self.assertEqual(profile.base_url, "local://transformers")
 
     def test_role_binding_modalities_are_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

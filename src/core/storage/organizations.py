@@ -41,7 +41,81 @@ class OrganizationStore:
         self.registry = registry
         self.database = registry.database
         registry.organization_store = self
+        self.cleanup_channel_personal_spaces()
         self.bootstrap_legacy_organizations()
+
+    def cleanup_channel_personal_spaces(self) -> None:
+        """Remove obsolete private tenants created for organization channels."""
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT tenant_id FROM tenants WHERE deleting=0 "
+                "AND bot_id LIKE 'organization-channel:%' ORDER BY created_at"
+            ).fetchall()
+        if not isinstance(rows, (list, tuple)) or not rows:
+            return
+
+        from src.core.integrations.keychain import (
+            KeychainError,
+            KeychainReference,
+            KeychainService,
+        )
+
+        keychain = KeychainService(
+            storage_path=self.registry.system_root / "integration_credentials.json"
+        )
+        for row in rows:
+            tenant_id = str(row["tenant_id"])
+            with self.database.read() as connection:
+                integrations = connection.execute(
+                    "SELECT integration_id, metadata_json FROM integrations "
+                    "WHERE tenant_id=?",
+                    (tenant_id,),
+                ).fetchall()
+            for integration in integrations:
+                try:
+                    metadata = json.loads(str(integration["metadata_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                fallback = keychain.reference(
+                    tenant_id, str(integration["integration_id"])
+                )
+                reference = KeychainReference(
+                    str(metadata.get("keychain_service") or fallback.service),
+                    str(metadata.get("keychain_account") or fallback.account),
+                )
+                try:
+                    keychain.delete_secret(reference)
+                except KeychainError as exc:
+                    raise OrganizationError(
+                        "清理旧渠道个人空间凭据失败"
+                    ) from exc
+
+            with self.database.transaction(immediate=True) as connection:
+                identities = connection.execute(
+                    "SELECT identity.identity_id, identity.active_organization_id "
+                    "FROM channel_identities identity "
+                    "JOIN organization_channels channel "
+                    "ON channel.channel_instance_id=identity.channel_id "
+                    "AND channel.organization_id=identity.active_organization_id "
+                    "WHERE identity.tenant_id=?",
+                    (tenant_id,),
+                ).fetchall()
+                for identity in identities:
+                    identity_id = str(identity["identity_id"])
+                    organization_id = str(identity["active_organization_id"])
+                    connection.execute(
+                        "UPDATE delivery_endpoints SET tenant_id=? "
+                        "WHERE identity_id=?",
+                        (organization_id, identity_id),
+                    )
+                    connection.execute(
+                        "UPDATE channel_identities SET tenant_id=? "
+                        "WHERE identity_id=?",
+                        (organization_id, identity_id),
+                    )
+            self.registry.delete(self.registry.get(tenant_id))
 
     def bootstrap_legacy_organizations(self) -> None:
         """Turn every pre-v24 tenant into an unclaimed single-owner organization."""
@@ -50,6 +124,7 @@ class OrganizationStore:
             rows = connection.execute(
                 "SELECT tenant_id, user_id, created_at FROM tenants "
                 "WHERE deleting=0 AND bot_id NOT LIKE 'member-personal:%' "
+                "AND bot_id NOT LIKE 'organization-channel:%' "
                 "ORDER BY created_at"
             ).fetchall()
             for row in rows:
@@ -97,7 +172,8 @@ class OrganizationStore:
             row = connection.execute(
                 "SELECT tenant_id, user_id, created_at FROM tenants "
                 "WHERE tenant_id=? AND deleting=0 "
-                "AND bot_id NOT LIKE 'member-personal:%'",
+                "AND bot_id NOT LIKE 'member-personal:%' "
+                "AND bot_id NOT LIKE 'organization-channel:%'",
                 (organization_id,),
             ).fetchone()
             if row is not None:
@@ -558,6 +634,35 @@ class OrganizationStore:
                 "created_at, updated_at FROM organization_conversations "
                 "WHERE organization_id=? ORDER BY updated_at DESC",
                 (organization_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_channel_conversations(
+        self,
+        user_id: int,
+        organization_id: str,
+        channel_instance_id: str,
+        allow_delegation: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List conversations bound to a single message channel.
+
+        Channel conversations are stored with ``source='channel'`` and a
+        ``channel_instance_id`` taken from the inbound message's channel id, so
+        they are excluded from the web chat list but remain queryable here.
+        """
+        if allow_delegation:
+            self.get(organization_id)
+        else:
+            self.membership(user_id, organization_id)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT conversation_id AS id, title, organization_id, "
+                "creator_user_id, source, channel_instance_id, "
+                "external_participant_ref, external_participant_name, status, "
+                "created_at, updated_at FROM organization_conversations "
+                "WHERE organization_id=? AND channel_instance_id=? "
+                "AND source='channel' ORDER BY updated_at DESC",
+                (organization_id, channel_instance_id),
             ).fetchall()
         return [dict(row) for row in rows]
 

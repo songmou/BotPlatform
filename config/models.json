@@ -76,6 +76,14 @@
       "model": "bge-m3",
       "dimensions": 1024,
       "timeout_seconds": 60
+    },
+    "bge_reranker_v2_m3_local": {
+      "enabled": true,
+      "modality": "rerank",
+      "type": "local_transformers",
+      "provider": "local",
+      "model": "BAAI/bge-reranker-v2-m3",
+      "timeout_seconds": 120
     }
   }
 }

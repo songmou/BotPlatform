@@ -7,7 +7,7 @@
     },
     {
       "id": "browser_automation",
-      "enabled": true,
+      "enabled": false,
       "settings": {
         "headless": true,
         "navigation_timeout_seconds": 30,
@@ -19,7 +19,7 @@
     },
     {
       "id": "web_research",
-      "enabled": true,
+      "enabled": false,
       "settings": {
         "timeout_seconds": 20,
         "max_results": 8,
@@ -28,11 +28,9 @@
     },
     {
       "id": "codex_tasks",
-      "enabled": true,
+      "enabled": false,
       "settings": {
-        "allowed_tenant_ids": [
-          "f4f767c5-17f8-493e-b9a8-55c912dbe8e5"
-        ],
+        "allowed_tenant_ids": [],
         "projects": [
           {
             "id": "botplatform",
@@ -45,7 +43,7 @@
     },
     {
       "id": "ocr",
-      "enabled": true,
+      "enabled": false,
       "settings": {
         "auto_process_chat_images": true,
         "engine": "paddleocr",

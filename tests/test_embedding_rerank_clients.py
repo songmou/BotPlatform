@@ -12,6 +12,9 @@ from src.core.modeling import ModelCapabilities
 from src.core.modeling.adapters.ollama_embedding import OllamaEmbeddingAdapter
 from src.core.modeling.adapters.openai_embedding import OpenAIEmbeddingAdapter
 from src.core.modeling.adapters.openai_rerank import OpenAIRerankAdapter
+from src.core.modeling.adapters.local_transformers_rerank import (
+    LocalTransformersRerankAdapter,
+)
 from src.core.modeling.contracts import EmbeddingError, ModelError, RerankError
 from src.core.modeling.factory import (
     create_embedding_client,
@@ -297,6 +300,19 @@ class FactoryDispatchTest(unittest.TestCase):
         profile = _profile(modality="rerank", type="ollama", dimensions=None)
         with self.assertRaises(ModelError):
             create_rerank_client(profile)
+
+    def test_rerank_dispatch_local_transformers(self):
+        profile = _profile(
+            modality="rerank",
+            type="local_transformers",
+            provider="local",
+            base_url="local://transformers",
+            model="BAAI/bge-reranker-v2-m3",
+            dimensions=None,
+        )
+        client = create_rerank_client(profile)
+        self.assertIsInstance(client, LocalTransformersRerankAdapter)
+        client.close()
 
     def test_chat_factory_rejects_embedding_modality(self):
         with self.assertRaises(ModelError):

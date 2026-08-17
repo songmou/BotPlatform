@@ -1,23 +1,197 @@
-"""Versioned SQLite schema scripts for the BotPlatform database.
-
-Each ``SCHEMA_V{n}`` script upgrades the schema from version ``n - 1`` to
-``n``. Versions 12, 13, 22, 23, and 24 additionally need Python-side inspection and are
-applied by dedicated ``Database`` methods instead of ``SCHEMA_SCRIPTS``.
-"""
+"""Canonical SQLite schema for new BotPlatform databases."""
 
 from __future__ import annotations
 
+SCHEMA_FORMAT_VERSION = 2
 
-LATEST_SCHEMA_VERSION = 37
 
-
-SCHEMA_V1 = r"""
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
+WORKFLOW_SCHEMA_V2 = r"""
+CREATE TABLE organization_workflows (
+    workflow_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    workflow_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (
+        status IN ('draft', 'published', 'disabled', 'archived')
+    ),
+    draft_json TEXT NOT NULL,
+    draft_revision INTEGER NOT NULL DEFAULT 1,
+    published_version INTEGER,
+    template_resource_id TEXT,
+    template_revision INTEGER,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (organization_id, workflow_key)
 );
 
-CREATE TABLE IF NOT EXISTS tenants (
+CREATE INDEX ix_organization_workflows_status
+    ON organization_workflows(organization_id, status, updated_at DESC);
+
+CREATE TABLE organization_workflow_versions (
+    workflow_id TEXT NOT NULL
+        REFERENCES organization_workflows(workflow_id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    definition_json TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    dependency_json TEXT NOT NULL DEFAULT '{}',
+    published_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    published_at TEXT NOT NULL,
+    PRIMARY KEY (workflow_id, version)
+);
+
+CREATE TABLE workflow_trigger_bindings (
+    trigger_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL
+        REFERENCES organization_workflows(workflow_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    trigger_key TEXT NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+        trigger_type IN ('manual', 'api', 'webhook', 'schedule')
+    ),
+    config_json TEXT NOT NULL DEFAULT '{}',
+    published_version INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    secret_hash TEXT NOT NULL DEFAULT '',
+    next_fire_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (workflow_id, trigger_key)
+);
+
+CREATE INDEX ix_workflow_triggers_due
+    ON workflow_trigger_bindings(trigger_type, enabled, next_fire_at);
+
+CREATE TABLE workflow_access_tokens (
+    token_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL
+        REFERENCES organization_workflows(workflow_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    label TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT,
+    last_used_at TEXT
+);
+
+CREATE TABLE workflow_runs (
+    run_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL
+        REFERENCES organization_workflows(workflow_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    workflow_version INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL,
+    trigger_ref TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'queued', 'running', 'waiting', 'succeeded', 'failed',
+            'canceled', 'timed_out', 'needs_attention'
+        )
+    ),
+    input_json TEXT NOT NULL DEFAULT '{}',
+    output_json TEXT,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    error_json TEXT,
+    initiated_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    test_mode INTEGER NOT NULL DEFAULT 0 CHECK (test_mode IN (0, 1)),
+    allow_side_effects INTEGER NOT NULL DEFAULT 0 CHECK (allow_side_effects IN (0, 1)),
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    wake_at TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE UNIQUE INDEX ix_workflow_runs_idempotency
+    ON workflow_runs(workflow_id, trigger_ref, idempotency_key)
+    WHERE idempotency_key <> '';
+
+CREATE INDEX ix_workflow_runs_queue
+    ON workflow_runs(status, wake_at, lease_expires_at, created_at);
+
+CREATE INDEX ix_workflow_runs_org_time
+    ON workflow_runs(organization_id, created_at DESC);
+
+CREATE TABLE workflow_node_runs (
+    node_run_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    node_type TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'queued', 'running', 'waiting', 'succeeded', 'failed',
+            'skipped', 'needs_attention'
+        )
+    ),
+    input_json TEXT NOT NULL DEFAULT '{}',
+    output_json TEXT,
+    error_json TEXT,
+    operation_key TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    UNIQUE (run_id, node_id, attempt)
+);
+
+CREATE INDEX ix_workflow_node_runs_run
+    ON workflow_node_runs(run_id, started_at);
+
+CREATE TABLE workflow_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    node_id TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX ix_workflow_events_run
+    ON workflow_events(run_id, event_id);
+
+CREATE TABLE workflow_waits (
+    wait_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+    organization_id TEXT NOT NULL
+        REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    wait_type TEXT NOT NULL CHECK (
+        wait_type IN ('approval', 'input', 'delay', 'attention')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'approved', 'rejected', 'resolved', 'expired', 'canceled')
+    ),
+    assignees_json TEXT NOT NULL DEFAULT '{}',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    payload_hash TEXT NOT NULL,
+    response_json TEXT,
+    expires_at TEXT,
+    resolved_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX ix_workflow_waits_org_status
+    ON workflow_waits(organization_id, status, created_at DESC);
+"""
+
+CURRENT_SCHEMA = r"""
+CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    format_version INTEGER NOT NULL
+);
+
+CREATE TABLE tenants (
     tenant_id TEXT PRIMARY KEY,
     bot_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -26,70 +200,76 @@ CREATE TABLE IF NOT EXISTS tenants (
     UNIQUE (bot_id, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS tenant_settings (
+CREATE TABLE tenant_settings (
     tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     model_mode TEXT NOT NULL DEFAULT 'auto'
 );
 
-CREATE TABLE IF NOT EXISTS conversation_events (
+CREATE TABLE conversation_events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
     content TEXT NOT NULL,
     image INTEGER NOT NULL DEFAULT 0 CHECK (image IN (0, 1)),
     event_type TEXT NOT NULL DEFAULT 'message',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    session_key TEXT NOT NULL DEFAULT 'direct',
+    user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL,
+    actor_type TEXT NOT NULL DEFAULT 'system',
+    actor_account TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS ix_conversation_events_tenant_time
+
+CREATE INDEX ix_conversation_events_tenant_time
     ON conversation_events(tenant_id, event_id);
 
-CREATE TABLE IF NOT EXISTS conversation_context_messages (
+CREATE TABLE conversation_context_messages (
     message_id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_context_tenant_message
-    ON conversation_context_messages(tenant_id, message_id);
+, session_key TEXT NOT NULL DEFAULT 'direct', user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL);
 
-CREATE TABLE IF NOT EXISTS recipients (
+CREATE TABLE recipients (
     tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     user_id TEXT NOT NULL,
     context_token TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS recipient_task_attempts (
+
+CREATE TABLE recipient_task_attempts (
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     task_id TEXT NOT NULL,
     interaction_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, task_id)
 );
 
-CREATE TABLE IF NOT EXISTS schedule_subscriptions (
+CREATE TABLE schedule_subscriptions (
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     task_id TEXT NOT NULL,
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     PRIMARY KEY (tenant_id, task_id)
 );
-CREATE INDEX IF NOT EXISTS ix_schedule_enabled
+
+CREATE INDEX ix_schedule_enabled
     ON schedule_subscriptions(task_id, enabled);
-CREATE TABLE IF NOT EXISTS schedule_attempts (
+
+CREATE TABLE schedule_attempts (
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     task_id TEXT NOT NULL,
     interaction_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, task_id)
 );
 
-CREATE TABLE IF NOT EXISTS integrations (
+CREATE TABLE integrations (
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     integration_id TEXT NOT NULL,
     metadata_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL,
     PRIMARY KEY (tenant_id, integration_id)
 );
 
-CREATE TABLE IF NOT EXISTS script_runs (
+CREATE TABLE script_runs (
     run_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     script_id TEXT NOT NULL,
@@ -103,11 +283,14 @@ CREATE TABLE IF NOT EXISTS script_runs (
     finished_at TEXT,
     exit_code INTEGER,
     error TEXT,
-    notification_error TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_script_runs_tenant_created
+    notification_error TEXT,
+    trigger_endpoint_id TEXT
+, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL);
+
+CREATE INDEX ix_script_runs_tenant_created
     ON script_runs(tenant_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS script_run_artifacts (
+
+CREATE TABLE script_run_artifacts (
     run_id TEXT NOT NULL REFERENCES script_runs(run_id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
     relative_path TEXT NOT NULL,
@@ -115,7 +298,7 @@ CREATE TABLE IF NOT EXISTS script_run_artifacts (
     PRIMARY KEY (run_id, position)
 );
 
-CREATE TABLE IF NOT EXISTS todos (
+CREATE TABLE todos (
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     todo_number INTEGER NOT NULL,
     title TEXT NOT NULL,
@@ -124,67 +307,29 @@ CREATE TABLE IF NOT EXISTS todos (
     updated_at TEXT NOT NULL,
     completed_at TEXT,
     archived_at TEXT,
+    reminder_at TEXT,
+    is_one_off INTEGER NOT NULL DEFAULT 0 CHECK (is_one_off IN (0, 1)),
+    user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL,
     PRIMARY KEY (tenant_id, todo_number)
 );
-CREATE INDEX IF NOT EXISTS ix_todos_tenant_status
+
+CREATE INDEX ix_todos_tenant_status
     ON todos(tenant_id, status, todo_number);
 
-CREATE TABLE IF NOT EXISTS deletion_audit (
+CREATE TABLE deletion_audit (
     audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id TEXT NOT NULL,
     deleted_at TEXT NOT NULL,
     status TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS tenant_cleanup_jobs (
+
+CREATE TABLE tenant_cleanup_jobs (
     tenant_id TEXT PRIMARY KEY,
     requested_at TEXT NOT NULL,
     last_error TEXT
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_sources (
-    source_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    source_type TEXT NOT NULL CHECK (source_type IN ('text', 'file')),
-    name TEXT NOT NULL,
-    relative_path TEXT,
-    content_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('ready', 'pending_embedding', 'failed')),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (tenant_id, source_type, name)
-);
-CREATE INDEX IF NOT EXISTS ix_knowledge_sources_tenant
-    ON knowledge_sources(tenant_id, updated_at DESC);
-CREATE TABLE IF NOT EXISTS knowledge_chunks (
-    chunk_id TEXT PRIMARY KEY,
-    source_id TEXT NOT NULL REFERENCES knowledge_sources(source_id) ON DELETE CASCADE,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    heading TEXT,
-    content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    locator TEXT,
-    UNIQUE (source_id, position)
-);
-CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_tenant
-    ON knowledge_chunks(tenant_id, source_id, position);
-CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-    chunk_id UNINDEXED,
-    tenant_id UNINDEXED,
-    heading,
-    content,
-    tokenize='trigram'
-);
-CREATE TABLE IF NOT EXISTS knowledge_embeddings (
-    chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(chunk_id) ON DELETE CASCADE,
-    model_id TEXT NOT NULL,
-    dimensions INTEGER NOT NULL,
-    vector BLOB NOT NULL,
-    content_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS memory_items (
+CREATE TABLE memory_items (
     memory_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('preference', 'identity', 'goal', 'constraint')),
@@ -196,32 +341,17 @@ CREATE TABLE IF NOT EXISTS memory_items (
     superseded_by TEXT REFERENCES memory_items(memory_id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    last_used_at TEXT
+    last_used_at TEXT,
+    evidence_type TEXT NOT NULL DEFAULT 'legacy'
+        CHECK (evidence_type IN ('explicit', 'inferred', 'legacy')),
+    confirmed_at TEXT,
+    user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL
 );
-CREATE INDEX IF NOT EXISTS ix_memory_tenant_status
+
+CREATE INDEX ix_memory_tenant_status
     ON memory_items(tenant_id, status, updated_at DESC);
-"""
 
-
-SCHEMA_V2 = "-- Retired legacy plugin schema."
-
-
-SCHEMA_V3 = "-- Retired legacy import bookkeeping."
-
-
-SCHEMA_V4 = "-- Retired legacy plugin schema."
-
-
-SCHEMA_V5 = "-- Retired legacy plugin schema."
-
-
-SCHEMA_V6 = "-- Retired legacy plugin schema."
-
-
-SCHEMA_V7 = r"""
-ALTER TABLE todos ADD COLUMN reminder_at TEXT;
-
-CREATE TABLE IF NOT EXISTS todo_reminder_events (
+CREATE TABLE todo_reminder_events (
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     todo_number INTEGER NOT NULL,
     due_at TEXT NOT NULL,
@@ -235,21 +365,11 @@ CREATE TABLE IF NOT EXISTS todo_reminder_events (
     last_error TEXT,
     PRIMARY KEY (tenant_id, todo_number)
 );
-CREATE INDEX IF NOT EXISTS ix_todo_reminders_due
+
+CREATE INDEX ix_todo_reminders_due
     ON todo_reminder_events(delivery_status, due_at, tenant_id, todo_number);
-"""
 
-
-SCHEMA_V8 = r"""
-ALTER TABLE todos ADD COLUMN is_one_off INTEGER NOT NULL DEFAULT 0 CHECK (is_one_off IN (0, 1));
-"""
-
-SCHEMA_V9 = r"""
-ALTER TABLE memory_items ADD COLUMN evidence_type TEXT NOT NULL DEFAULT 'legacy'
-    CHECK (evidence_type IN ('explicit', 'inferred', 'legacy'));
-ALTER TABLE memory_items ADD COLUMN confirmed_at TEXT;
-
-CREATE TABLE IF NOT EXISTS soul_profiles (
+CREATE TABLE soul_profiles (
     tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     revision INTEGER NOT NULL DEFAULT 0,
     content_hash TEXT NOT NULL DEFAULT '',
@@ -259,58 +379,12 @@ CREATE TABLE IF NOT EXISTS soul_profiles (
     generated_at TEXT,
     compacted_at TEXT,
     last_error TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_soul_profiles_dirty
+, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL);
+
+CREATE INDEX ix_soul_profiles_dirty
     ON soul_profiles(dirty, tenant_id);
-"""
 
-
-SCHEMA_V10 = r"""
--- Reminder times are one-shot by default. Repair reminders that were already
--- delivered under v8/v9 but remained pending because is_one_off defaulted to 0.
-UPDATE todos
-SET status='completed',
-    completed_at=COALESCE(
-        (
-            SELECT event.sent_at
-            FROM todo_reminder_events AS event
-            WHERE event.tenant_id=todos.tenant_id
-              AND event.todo_number=todos.todo_number
-        ),
-        updated_at
-    ),
-    updated_at=COALESCE(
-        (
-            SELECT event.sent_at
-            FROM todo_reminder_events AS event
-            WHERE event.tenant_id=todos.tenant_id
-              AND event.todo_number=todos.todo_number
-        ),
-        updated_at
-    ),
-    reminder_at=NULL,
-    is_one_off=1
-WHERE status='pending'
-  AND reminder_at IS NOT NULL
-  AND EXISTS (
-      SELECT 1
-      FROM todo_reminder_events AS event
-      WHERE event.tenant_id=todos.tenant_id
-        AND event.todo_number=todos.todo_number
-        AND event.due_at=todos.reminder_at
-        AND event.delivery_status='sent'
-  );
-
--- Existing reminders that have not fired yet should follow the corrected
--- one-shot default as well.
-UPDATE todos
-SET is_one_off=1
-WHERE status='pending' AND reminder_at IS NOT NULL;
-"""
-
-
-SCHEMA_V11 = r"""
-CREATE TABLE IF NOT EXISTS notification_outbox (
+CREATE TABLE "notification_outbox" (
     outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
     notification_id TEXT NOT NULL UNIQUE,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -333,46 +407,15 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     lease_expires_at TEXT,
     created_at TEXT NOT NULL,
     sent_at TEXT,
-    last_error TEXT,
+    last_error TEXT, selected_endpoint_id TEXT, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL,
     UNIQUE (tenant_id, source_type, source_key)
 );
-CREATE INDEX IF NOT EXISTS ix_notification_outbox_delivery
-    ON notification_outbox(delivery_status, next_attempt_at, lease_expires_at);
-CREATE INDEX IF NOT EXISTS ix_notification_outbox_tenant_order
-    ON notification_outbox(tenant_id, outbox_id);
-"""
 
-SCHEMA_V12_OUTBOX_TABLE = r"""
-CREATE TABLE notification_outbox_v12 (
-    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    notification_id TEXT NOT NULL UNIQUE,
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    batch_id TEXT NOT NULL,
-    batch_position INTEGER NOT NULL DEFAULT 0,
-    source_type TEXT NOT NULL,
-    source_key TEXT,
-    source_ref TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),
-    text_payload TEXT,
-    image_path TEXT,
-    delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (
-        delivery_status IN (
-            'pending', 'sending', 'retry', 'waiting_recipient',
-            'sent', 'failed', 'cancelled'
-        )
-    ),
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT,
-    lease_expires_at TEXT,
-    created_at TEXT NOT NULL,
-    sent_at TEXT,
-    last_error TEXT,
-    UNIQUE (tenant_id, source_type, source_key)
-);
-"""
+CREATE INDEX ix_notification_outbox_delivery ON notification_outbox(delivery_status, next_attempt_at, lease_expires_at);
 
-SCHEMA_V13 = r"""
-CREATE TABLE IF NOT EXISTS channel_identities (
+CREATE INDEX ix_notification_outbox_tenant_order ON notification_outbox(tenant_id, outbox_id);
+
+CREATE TABLE channel_identities (
     identity_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     channel_id TEXT NOT NULL,
@@ -381,12 +424,15 @@ CREATE TABLE IF NOT EXISTS channel_identities (
     external_user_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
+    user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL,
+    active_organization_id TEXT REFERENCES tenants(tenant_id) ON DELETE SET NULL,
     UNIQUE (channel_id, account_id, external_user_id)
 );
-CREATE INDEX IF NOT EXISTS ix_channel_identities_tenant
+
+CREATE INDEX ix_channel_identities_tenant
     ON channel_identities(tenant_id, last_seen_at DESC);
 
-CREATE TABLE IF NOT EXISTS delivery_endpoints (
+CREATE TABLE delivery_endpoints (
     endpoint_id TEXT PRIMARY KEY,
     identity_id TEXT NOT NULL REFERENCES channel_identities(identity_id)
         ON DELETE CASCADE,
@@ -410,10 +456,11 @@ CREATE TABLE IF NOT EXISTS delivery_endpoints (
         conversation_id, recipient_id, thread_id
     )
 );
-CREATE INDEX IF NOT EXISTS ix_delivery_endpoints_tenant_active
+
+CREATE INDEX ix_delivery_endpoints_tenant_active
     ON delivery_endpoints(tenant_id, status, last_seen_at DESC);
 
-CREATE TABLE IF NOT EXISTS message_inbox (
+CREATE TABLE message_inbox (
     inbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id TEXT NOT NULL,
     event_id TEXT NOT NULL,
@@ -429,13 +476,11 @@ CREATE TABLE IF NOT EXISTS message_inbox (
     last_error TEXT,
     UNIQUE (channel_id, event_id)
 );
-CREATE INDEX IF NOT EXISTS ix_message_inbox_delivery
+
+CREATE INDEX ix_message_inbox_delivery
     ON message_inbox(status, next_attempt_at, lease_expires_at, inbox_id);
-"""
 
-
-SCHEMA_V14 = r"""
-CREATE TABLE IF NOT EXISTS tool_audit_log (
+CREATE TABLE tool_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
     tenant_id TEXT,
@@ -447,14 +492,13 @@ CREATE TABLE IF NOT EXISTS tool_audit_log (
     output_bytes INTEGER NOT NULL DEFAULT 0,
     args_hash TEXT,
     error TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tool_audit_ts ON tool_audit_log(ts);
-CREATE INDEX IF NOT EXISTS idx_tool_audit_tool ON tool_audit_log(tool_name);
-"""
+, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL);
 
+CREATE INDEX idx_tool_audit_ts ON tool_audit_log(ts);
 
-SCHEMA_V15 = r"""
-CREATE TABLE IF NOT EXISTS admin_roles (
+CREATE INDEX idx_tool_audit_tool ON tool_audit_log(tool_name);
+
+CREATE TABLE admin_roles (
     role_id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
@@ -462,7 +506,7 @@ CREATE TABLE IF NOT EXISTS admin_roles (
     builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1))
 );
 
-CREATE TABLE IF NOT EXISTS admin_users (
+CREATE TABLE admin_users (
     user_id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
@@ -472,7 +516,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
     last_login_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS admin_sessions (
+CREATE TABLE admin_sessions (
     session_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES admin_users(user_id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
@@ -480,48 +524,21 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     ip TEXT,
     user_agent TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_admin_sessions_user ON admin_sessions(user_id);
-CREATE INDEX IF NOT EXISTS ix_admin_sessions_exp ON admin_sessions(expires_at);
 
-INSERT OR IGNORE INTO admin_roles(code, name, permissions, builtin) VALUES
-    ('admin', '管理员', '["*"]', 1),
-    ('editor', '编辑', '["tenants.read","tenants.delete","panel.read","panel.write"]', 1),
-    ('viewer', '只读', '["tenants.read","panel.read"]', 1);
-"""
+CREATE INDEX ix_admin_sessions_user ON admin_sessions(user_id);
 
-SCHEMA_V16 = r"""
-CREATE TABLE IF NOT EXISTS conversation_delivery_receipts (
+CREATE INDEX ix_admin_sessions_exp ON admin_sessions(expires_at);
+
+CREATE TABLE conversation_delivery_receipts (
     delivery_key TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     recorded_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_conversation_delivery_receipts_tenant
+
+CREATE INDEX ix_conversation_delivery_receipts_tenant
     ON conversation_delivery_receipts(tenant_id);
-"""
 
-SCHEMA_V17 = r"""
-CREATE TABLE IF NOT EXISTS tenant_script_schedules (
-    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    schedule_id TEXT NOT NULL,
-    script_id TEXT NOT NULL,
-    parameters_json TEXT NOT NULL,
-    crons_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
-    authorized_sha256 TEXT NOT NULL,
-    authorized_at TEXT NOT NULL,
-    authorized_by TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    last_run_id TEXT,
-    last_status TEXT,
-    PRIMARY KEY (tenant_id, schedule_id)
-);
-CREATE INDEX IF NOT EXISTS ix_tenant_script_schedules_enabled
-    ON tenant_script_schedules(enabled, tenant_id, schedule_id);
-"""
-
-SCHEMA_V18 = r"""
-CREATE TABLE IF NOT EXISTS model_runs (
+CREATE TABLE model_runs (
     run_id TEXT PRIMARY KEY,
     tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     source TEXT NOT NULL CHECK (source IN ('wechat', 'web', 'schedule', 'internal')),
@@ -534,15 +551,18 @@ CREATE TABLE IF NOT EXISTS model_runs (
     finished_at TEXT,
     response_event_id INTEGER REFERENCES conversation_events(event_id) ON DELETE SET NULL,
     error_category TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_model_runs_started
+, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL);
+
+CREATE INDEX ix_model_runs_started
     ON model_runs(started_at DESC);
-CREATE INDEX IF NOT EXISTS ix_model_runs_tenant_started
+
+CREATE INDEX ix_model_runs_tenant_started
     ON model_runs(tenant_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS ix_model_runs_agent_started
+
+CREATE INDEX ix_model_runs_agent_started
     ON model_runs(agent_id, started_at DESC);
 
-CREATE TABLE IF NOT EXISTS model_calls (
+CREATE TABLE model_calls (
     call_id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL REFERENCES model_runs(run_id) ON DELETE CASCADE,
     sequence INTEGER NOT NULL,
@@ -582,14 +602,17 @@ CREATE TABLE IF NOT EXISTS model_calls (
     ),
     UNIQUE (run_id, sequence)
 );
-CREATE INDEX IF NOT EXISTS ix_model_calls_run
+
+CREATE INDEX ix_model_calls_run
     ON model_calls(run_id, sequence);
-CREATE INDEX IF NOT EXISTS ix_model_calls_profile_time
+
+CREATE INDEX ix_model_calls_profile_time
     ON model_calls(profile_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS ix_model_calls_status_time
+
+CREATE INDEX ix_model_calls_status_time
     ON model_calls(status, started_at DESC);
 
-CREATE TABLE IF NOT EXISTS model_feedback (
+CREATE TABLE model_feedback (
     feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL REFERENCES model_runs(run_id) ON DELETE CASCADE,
     actor_type TEXT NOT NULL CHECK (actor_type IN ('tenant', 'admin')),
@@ -601,12 +624,14 @@ CREATE TABLE IF NOT EXISTS model_feedback (
     updated_at TEXT NOT NULL,
     UNIQUE (run_id, actor_type, actor_ref)
 );
-CREATE INDEX IF NOT EXISTS ix_model_feedback_run
+
+CREATE INDEX ix_model_feedback_run
     ON model_feedback(run_id);
-CREATE INDEX IF NOT EXISTS ix_model_feedback_rating_time
+
+CREATE INDEX ix_model_feedback_rating_time
     ON model_feedback(rating, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS model_budgets (
+CREATE TABLE model_budgets (
     budget_id INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_type TEXT NOT NULL CHECK (
         scope_type IN ('global', 'tenant', 'profile', 'agent')
@@ -620,7 +645,7 @@ CREATE TABLE IF NOT EXISTS model_budgets (
     UNIQUE (scope_type, scope_id)
 );
 
-CREATE TABLE IF NOT EXISTS model_budget_alerts (
+CREATE TABLE model_budget_alerts (
     alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
     budget_id INTEGER NOT NULL REFERENCES model_budgets(budget_id) ON DELETE CASCADE,
     period TEXT NOT NULL,
@@ -629,32 +654,11 @@ CREATE TABLE IF NOT EXISTS model_budget_alerts (
     created_at TEXT NOT NULL,
     UNIQUE (budget_id, period, threshold)
 );
-CREATE INDEX IF NOT EXISTS ix_model_budget_alerts_time
+
+CREATE INDEX ix_model_budget_alerts_time
     ON model_budget_alerts(created_at DESC);
 
-UPDATE admin_roles
-SET permissions = CASE
-    WHEN trim(permissions) = '[]' THEN '["model_analytics.read"]'
-    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
-         || ',"model_analytics.read"]'
-END
-WHERE code IN ('editor', 'viewer')
-  AND instr(permissions, '"model_analytics.read"') = 0;
-
-UPDATE admin_roles
-SET permissions = CASE
-    WHEN trim(permissions) = '[]' THEN '["model_analytics.manage"]'
-    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
-         || ',"model_analytics.manage"]'
-END
-WHERE code = 'editor'
-  AND instr(permissions, '"model_analytics.manage"') = 0;
-"""
-
-
-# V19: audit log table for the network drive (file management) module.
-SCHEMA_V19 = r"""
-CREATE TABLE IF NOT EXISTS drive_audit_log (
+CREATE TABLE drive_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
     operator TEXT NOT NULL,
@@ -667,14 +671,11 @@ CREATE TABLE IF NOT EXISTS drive_audit_log (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     error TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_drive_audit_ts ON drive_audit_log(ts);
-"""
+, user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL);
 
+CREATE INDEX ix_drive_audit_ts ON drive_audit_log(ts);
 
-# V20: scoped knowledge categories, agent bindings, and drive-backed sources.
-SCHEMA_V20 = r"""
-CREATE TABLE IF NOT EXISTS knowledge_categories (
+CREATE TABLE knowledge_categories (
     category_id TEXT PRIMARY KEY,
     scope TEXT NOT NULL CHECK (scope IN ('public', 'tenant')),
     tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -687,34 +688,14 @@ CREATE TABLE IF NOT EXISTS knowledge_categories (
         OR (scope = 'tenant' AND tenant_id IS NOT NULL)
     )
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_knowledge_categories_public_name
+
+CREATE UNIQUE INDEX ux_knowledge_categories_public_name
     ON knowledge_categories(name) WHERE scope = 'public';
-CREATE UNIQUE INDEX IF NOT EXISTS ux_knowledge_categories_tenant_name
+
+CREATE UNIQUE INDEX ux_knowledge_categories_tenant_name
     ON knowledge_categories(tenant_id, name) WHERE scope = 'tenant';
 
-INSERT OR IGNORE INTO knowledge_categories(
-    category_id, scope, tenant_id, name, description, created_at, updated_at
-) VALUES (
-    'public-default', 'public', NULL, '公共知识库', '平台公共知识',
-    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-);
-
-INSERT OR IGNORE INTO knowledge_categories(
-    category_id, scope, tenant_id, name, description, created_at, updated_at
-)
-SELECT
-    'tenant-default-' || tenant_id,
-    'tenant',
-    tenant_id,
-    '默认知识库',
-    '由升级迁移生成的默认知识库',
-    MIN(created_at),
-    MAX(updated_at)
-FROM knowledge_sources
-GROUP BY tenant_id;
-
-CREATE TABLE knowledge_sources_v20 (
+CREATE TABLE "knowledge_sources" (
     source_id TEXT PRIMARY KEY,
     category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE RESTRICT,
     tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -738,37 +719,9 @@ CREATE TABLE knowledge_sources_v20 (
     updated_at TEXT NOT NULL
 );
 
-INSERT INTO knowledge_sources_v20(
-    source_id, category_id, tenant_id, source_type, name, relative_path,
-    drive_scope, drive_tenant_id, drive_path, file_size, file_mtime_ns,
-    content_hash, status, last_error, created_at, updated_at
-)
-SELECT
-    source_id,
-    'tenant-default-' || tenant_id,
-    tenant_id,
-    source_type,
-    name,
-    relative_path,
-    CASE WHEN source_type = 'file' THEN 'tenant' ELSE NULL END,
-    CASE WHEN source_type = 'file' THEN tenant_id ELSE NULL END,
-    CASE
-        WHEN source_type = 'file' AND relative_path IS NOT NULL
-        THEN 'workspace/' || relative_path
-        ELSE NULL
-    END,
-    NULL,
-    NULL,
-    content_hash,
-    status,
-    NULL,
-    created_at,
-    updated_at
-FROM knowledge_sources;
-
-CREATE TABLE knowledge_chunks_v20 (
+CREATE TABLE "knowledge_chunks" (
     chunk_id TEXT PRIMARY KEY,
-    source_id TEXT NOT NULL REFERENCES knowledge_sources_v20(source_id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL REFERENCES "knowledge_sources"(source_id) ON DELETE CASCADE,
     category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE CASCADE,
     tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
@@ -779,58 +732,35 @@ CREATE TABLE knowledge_chunks_v20 (
     UNIQUE (source_id, position)
 );
 
-INSERT INTO knowledge_chunks_v20(
-    chunk_id, source_id, category_id, tenant_id, position, heading,
-    content, content_hash, locator
-)
-SELECT
-    c.chunk_id,
-    c.source_id,
-    s.category_id,
-    c.tenant_id,
-    c.position,
-    c.heading,
-    c.content,
-    c.content_hash,
-    c.locator
-FROM knowledge_chunks c
-JOIN knowledge_sources_v20 s ON s.source_id = c.source_id;
-
-CREATE TABLE knowledge_embeddings_v20 (
-    chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks_v20(chunk_id) ON DELETE CASCADE,
+CREATE TABLE "knowledge_embeddings" (
+    chunk_id TEXT PRIMARY KEY REFERENCES "knowledge_chunks"(chunk_id) ON DELETE CASCADE,
     model_id TEXT NOT NULL,
     dimensions INTEGER NOT NULL,
     vector BLOB NOT NULL,
     content_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
-);
-INSERT INTO knowledge_embeddings_v20
-SELECT chunk_id, model_id, dimensions, vector, content_hash, created_at
-FROM knowledge_embeddings;
-
-DROP TABLE knowledge_embeddings;
-DROP TABLE knowledge_chunks;
-DROP TABLE knowledge_sources;
-DROP TABLE knowledge_fts;
-
-ALTER TABLE knowledge_sources_v20 RENAME TO knowledge_sources;
-ALTER TABLE knowledge_chunks_v20 RENAME TO knowledge_chunks;
-ALTER TABLE knowledge_embeddings_v20 RENAME TO knowledge_embeddings;
+, model_fingerprint TEXT);
 
 CREATE INDEX ix_knowledge_sources_category
     ON knowledge_sources(category_id, updated_at DESC);
+
 CREATE INDEX ix_knowledge_sources_tenant
     ON knowledge_sources(tenant_id, updated_at DESC);
+
 CREATE UNIQUE INDEX ux_knowledge_sources_text_name
     ON knowledge_sources(category_id, name) WHERE source_type = 'text';
+
 CREATE UNIQUE INDEX ux_knowledge_sources_drive_path
     ON knowledge_sources(
         category_id, drive_scope, COALESCE(drive_tenant_id, ''), drive_path
     ) WHERE source_type = 'file';
+
 CREATE INDEX ix_knowledge_sources_drive
     ON knowledge_sources(drive_scope, drive_tenant_id, drive_path);
+
 CREATE INDEX ix_knowledge_chunks_category
     ON knowledge_chunks(category_id, source_id, position);
+
 CREATE INDEX ix_knowledge_chunks_tenant
     ON knowledge_chunks(tenant_id, source_id, position);
 
@@ -842,77 +772,29 @@ CREATE VIRTUAL TABLE knowledge_fts USING fts5(
     content,
     tokenize='trigram'
 );
-INSERT INTO knowledge_fts(chunk_id, category_id, tenant_id, heading, content)
-SELECT chunk_id, category_id, COALESCE(tenant_id, ''), heading, content
-FROM knowledge_chunks;
 
-CREATE TABLE IF NOT EXISTS agent_knowledge_categories (
+CREATE TABLE agent_knowledge_categories (
     agent_id TEXT NOT NULL,
     category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, category_id)
 );
-CREATE INDEX IF NOT EXISTS ix_agent_knowledge_categories_category
+
+CREATE INDEX ix_agent_knowledge_categories_category
     ON agent_knowledge_categories(category_id, agent_id);
 
-CREATE TABLE IF NOT EXISTS knowledge_bootstrap_state (
+CREATE TABLE knowledge_bootstrap_state (
     key TEXT PRIMARY KEY,
     completed_at TEXT NOT NULL
 );
-"""
 
-
-# V21: rename the seeded public default category so the category picker no
-# longer duplicates the "公共知识库" scope label. Guarded by NOT EXISTS to
-# respect the unique public-name index when users already created one.
-SCHEMA_V21 = r"""
-UPDATE knowledge_categories SET
-    name = '默认知识库',
-    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-WHERE category_id = 'public-default'
-    AND scope = 'public'
-    AND name = '公共知识库'
-    AND NOT EXISTS (
-        SELECT 1 FROM knowledge_categories
-        WHERE scope = 'public' AND name = '默认知识库'
-    );
-"""
-
-
-SCHEMA_V22 = r"""
-DROP TABLE IF EXISTS codex_task_events;
-DROP TABLE IF EXISTS codex_task_interactions;
-DROP TABLE IF EXISTS codex_task_runs;
-"""
-
-SCHEMA_V22_PERMISSIONS = r"""
-UPDATE admin_roles
-SET permissions = CASE
-    WHEN trim(permissions) = '[]' THEN '["plugins.read"]'
-    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
-         || ',"plugins.read"]'
-END
-WHERE code IN ('editor', 'viewer')
-  AND instr(permissions, '"plugins.read"') = 0;
-
-UPDATE admin_roles
-SET permissions = CASE
-    WHEN trim(permissions) = '[]' THEN '["plugins.manage"]'
-    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
-         || ',"plugins.manage"]'
-END
-WHERE code = 'editor'
-  AND instr(permissions, '"plugins.manage"') = 0;
-"""
-
-SCHEMA_V23 = r"""
-DROP INDEX IF EXISTS ix_context_tenant_message;
-CREATE INDEX IF NOT EXISTS ix_context_tenant_session_message
+CREATE INDEX ix_context_tenant_session_message
     ON conversation_context_messages(tenant_id, session_key, message_id);
-CREATE INDEX IF NOT EXISTS ix_conversation_events_tenant_session_time
+
+CREATE INDEX ix_conversation_events_tenant_session_time
     ON conversation_events(tenant_id, session_key, event_id);
 
-CREATE TABLE IF NOT EXISTS channel_binding_codes (
+CREATE TABLE channel_binding_codes (
     token_hash TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     identity_id TEXT REFERENCES channel_identities(identity_id) ON DELETE CASCADE,
@@ -920,52 +802,31 @@ CREATE TABLE IF NOT EXISTS channel_binding_codes (
     expires_at TEXT NOT NULL,
     used_at TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_channel_binding_codes_expiry
+
+CREATE INDEX ix_channel_binding_codes_expiry
     ON channel_binding_codes(expires_at, used_at);
 
-CREATE TABLE IF NOT EXISTS channel_binding_attempts (
+CREATE TABLE channel_binding_attempts (
     attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id TEXT NOT NULL,
     account_id TEXT NOT NULL,
     external_user_id TEXT NOT NULL,
     attempted_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_channel_binding_attempts_identity_time
+
+CREATE INDEX ix_channel_binding_attempts_identity_time
     ON channel_binding_attempts(
         channel_id, account_id, external_user_id, attempted_at
     );
-"""
 
-SCHEMA_V23_PERMISSIONS = r"""
-UPDATE admin_roles
-SET permissions = CASE
-    WHEN trim(permissions) = '[]' THEN '["channels.read"]'
-    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
-         || ',"channels.read"]'
-END
-WHERE code IN ('editor', 'viewer')
-  AND instr(permissions, '"channels.read"') = 0;
-
-UPDATE admin_roles
-SET permissions = CASE
-    WHEN trim(permissions) = '[]' THEN '["channels.manage"]'
-    ELSE substr(trim(permissions), 1, length(trim(permissions)) - 1)
-         || ',"channels.manage"]'
-END
-WHERE code = 'editor'
-  AND instr(permissions, '"channels.manage"') = 0;
-"""
-
-
-SCHEMA_V24 = r"""
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
     user_id INTEGER PRIMARY KEY REFERENCES admin_users(user_id) ON DELETE CASCADE,
     display_name TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS organizations (
+CREATE TABLE organizations (
     organization_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK (
@@ -976,7 +837,7 @@ CREATE TABLE IF NOT EXISTS organizations (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS organization_memberships (
+CREATE TABLE organization_memberships (
     membership_id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
@@ -990,13 +851,15 @@ CREATE TABLE IF NOT EXISTS organization_memberships (
     updated_at TEXT NOT NULL,
     UNIQUE (organization_id, user_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ix_org_memberships_legacy_owner
+
+CREATE UNIQUE INDEX ix_org_memberships_legacy_owner
     ON organization_memberships(organization_id, legacy_subject_id)
     WHERE legacy_subject_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS ix_org_memberships_user
+
+CREATE INDEX ix_org_memberships_user
     ON organization_memberships(user_id, status, organization_id);
 
-CREATE TABLE IF NOT EXISTS organization_invitations (
+CREATE TABLE organization_invitations (
     invitation_id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
@@ -1008,30 +871,11 @@ CREATE TABLE IF NOT EXISTS organization_invitations (
     accepted_at TEXT,
     accepted_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE INDEX IF NOT EXISTS ix_org_invitations_expiry
+
+CREATE INDEX ix_org_invitations_expiry
     ON organization_invitations(expires_at, accepted_at);
 
-CREATE TABLE IF NOT EXISTS user_organization_preferences (
-    user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-    active_organization_id TEXT
-        REFERENCES organizations(organization_id) ON DELETE SET NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS web_conversations (
-    conversation_id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL
-        REFERENCES organizations(organization_id) ON DELETE CASCADE,
-    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    title TEXT NOT NULL DEFAULT '新对话',
-    legacy_tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_web_conversations_owner
-    ON web_conversations(organization_id, user_id, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS organization_agent_knowledge_categories (
+CREATE TABLE organization_agent_knowledge_categories (
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL,
@@ -1041,67 +885,6 @@ CREATE TABLE IF NOT EXISTS organization_agent_knowledge_categories (
     created_at TEXT NOT NULL,
     PRIMARY KEY (organization_id, agent_id, category_id)
 );
-"""
-
-
-SCHEMA_V24_PERMISSIONS = r"""
-INSERT OR IGNORE INTO admin_roles(code, name, permissions, builtin) VALUES
-    ('tenant_user', '租户用户', '[]', 1);
-"""
-
-SCHEMA_V25 = r"""
-CREATE TABLE IF NOT EXISTS credential_metadata (
-    credential_id TEXT NOT NULL,
-    organization_id TEXT NOT NULL
-        REFERENCES organizations(organization_id) ON DELETE CASCADE,
-    user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
-    credential_scope TEXT NOT NULL CHECK (
-        credential_scope IN ('organization', 'personal')
-    ),
-    resource_type TEXT NOT NULL,
-    resource_id TEXT NOT NULL,
-    label TEXT NOT NULL DEFAULT '',
-    secret_service TEXT NOT NULL,
-    secret_account TEXT NOT NULL,
-    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    CHECK (
-        (credential_scope='organization' AND user_id IS NULL)
-        OR (credential_scope='personal' AND user_id IS NOT NULL)
-    ),
-    PRIMARY KEY (organization_id, credential_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ix_credential_org_resource
-    ON credential_metadata(organization_id, resource_type, resource_id)
-    WHERE credential_scope='organization';
-CREATE UNIQUE INDEX IF NOT EXISTS ix_credential_personal_resource
-    ON credential_metadata(
-        organization_id, user_id, resource_type, resource_id
-    )
-    WHERE credential_scope='personal';
-
-CREATE TABLE IF NOT EXISTS security_audit_log (
-    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    occurred_at TEXT NOT NULL,
-    request_id TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL,
-    actor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-    organization_id TEXT,
-    action TEXT NOT NULL,
-    resource TEXT NOT NULL DEFAULT '',
-    status_code INTEGER NOT NULL,
-    detail TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS ix_security_audit_org_time
-    ON security_audit_log(organization_id, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS ix_security_audit_actor_time
-    ON security_audit_log(actor_user_id, occurred_at DESC);
-"""
-
-
-SCHEMA_V26 = r"""
-ALTER TABLE credential_metadata RENAME TO credential_metadata_v25;
 
 CREATE TABLE credential_metadata (
     credential_id TEXT NOT NULL,
@@ -1126,32 +909,15 @@ CREATE TABLE credential_metadata (
     PRIMARY KEY (organization_id, credential_id)
 );
 
-INSERT INTO credential_metadata(
-    credential_id, organization_id, user_id, credential_scope,
-    resource_type, resource_id, label, secret_service, secret_account,
-    created_by, created_at, updated_at
-)
-SELECT
-    credential_id, organization_id, user_id, credential_scope,
-    resource_type, resource_id, label, secret_service, secret_account,
-    created_by, created_at, updated_at
-FROM credential_metadata_v25;
-
-DROP TABLE credential_metadata_v25;
-
 CREATE UNIQUE INDEX ix_credential_org_resource
     ON credential_metadata(organization_id, resource_type, resource_id)
     WHERE credential_scope='organization';
+
 CREATE UNIQUE INDEX ix_credential_personal_resource
     ON credential_metadata(
         organization_id, user_id, resource_type, resource_id
     )
     WHERE credential_scope='personal';
-"""
-
-
-SCHEMA_V27 = r"""
-ALTER TABLE security_audit_log RENAME TO security_audit_log_v26;
 
 CREATE TABLE security_audit_log (
     audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1166,26 +932,13 @@ CREATE TABLE security_audit_log (
     detail TEXT NOT NULL DEFAULT ''
 );
 
-INSERT INTO security_audit_log(
-    audit_id, occurred_at, request_id, source, actor_user_id,
-    organization_id, action, resource, status_code, detail
-)
-SELECT
-    audit_id, occurred_at, request_id, source, actor_user_id,
-    organization_id, action, resource, status_code, detail
-FROM security_audit_log_v26;
-
-DROP TABLE security_audit_log_v26;
-
 CREATE INDEX ix_security_audit_org_time
     ON security_audit_log(organization_id, occurred_at DESC);
+
 CREATE INDEX ix_security_audit_actor_time
     ON security_audit_log(actor_user_id, occurred_at DESC);
-"""
 
-
-SCHEMA_V28 = r"""
-CREATE TABLE IF NOT EXISTS organization_conversations (
+CREATE TABLE organization_conversations (
     conversation_id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
@@ -1202,14 +955,16 @@ CREATE TABLE IF NOT EXISTS organization_conversations (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_org_conversations_time
+
+CREATE INDEX ix_org_conversations_time
     ON organization_conversations(organization_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS ix_org_conversations_channel
+
+CREATE INDEX ix_org_conversations_channel
     ON organization_conversations(
         organization_id, channel_instance_id, external_participant_ref
     );
 
-CREATE TABLE IF NOT EXISTS organization_channels (
+CREATE TABLE organization_channels (
     channel_instance_id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
@@ -1226,10 +981,11 @@ CREATE TABLE IF NOT EXISTS organization_channels (
     updated_at TEXT NOT NULL,
     UNIQUE (organization_id, channel_id)
 );
-CREATE INDEX IF NOT EXISTS ix_org_channels_enabled
+
+CREATE INDEX ix_org_channels_enabled
     ON organization_channels(enabled, organization_id);
 
-CREATE TABLE IF NOT EXISTS organization_schedules (
+CREATE TABLE organization_schedules (
     schedule_id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
@@ -1248,10 +1004,11 @@ CREATE TABLE IF NOT EXISTS organization_schedules (
     updated_at TEXT NOT NULL,
     UNIQUE (organization_id, schedule_key)
 );
-CREATE INDEX IF NOT EXISTS ix_org_schedules_enabled
+
+CREATE INDEX ix_org_schedules_enabled
     ON organization_schedules(enabled, organization_id);
 
-CREATE TABLE IF NOT EXISTS organization_agent_settings (
+CREATE TABLE organization_agent_settings (
     organization_id TEXT PRIMARY KEY
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
     default_agent_id TEXT NOT NULL DEFAULT '',
@@ -1259,7 +1016,7 @@ CREATE TABLE IF NOT EXISTS organization_agent_settings (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS organization_schedule_runs (
+CREATE TABLE organization_schedule_runs (
     run_id TEXT PRIMARY KEY,
     schedule_id TEXT NOT NULL
         REFERENCES organization_schedules(schedule_id) ON DELETE CASCADE,
@@ -1271,11 +1028,12 @@ CREATE TABLE IF NOT EXISTS organization_schedule_runs (
     detail TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     finished_at TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_org_schedule_runs_time
+, script_run_id TEXT);
+
+CREATE INDEX ix_org_schedule_runs_time
     ON organization_schedule_runs(organization_id, started_at DESC);
 
-CREATE TABLE IF NOT EXISTS organization_runtime_revisions (
+CREATE TABLE organization_runtime_revisions (
     organization_id TEXT PRIMARY KEY
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
     channels_revision INTEGER NOT NULL DEFAULT 0,
@@ -1283,13 +1041,7 @@ CREATE TABLE IF NOT EXISTS organization_runtime_revisions (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS organization_data_migrations (
-    migration_key TEXT PRIMARY KEY,
-    detail TEXT NOT NULL DEFAULT '',
-    applied_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS organization_content_ownership (
+CREATE TABLE organization_content_ownership (
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
     resource_type TEXT NOT NULL CHECK (
@@ -1300,15 +1052,13 @@ CREATE TABLE IF NOT EXISTS organization_content_ownership (
     created_at TEXT NOT NULL,
     PRIMARY KEY (organization_id, resource_type, resource_key)
 );
-CREATE INDEX IF NOT EXISTS ix_org_content_creator
+
+CREATE INDEX ix_org_content_creator
     ON organization_content_ownership(
         organization_id, creator_user_id, resource_type
     );
-"""
 
-
-SCHEMA_V29 = r"""
-CREATE TABLE IF NOT EXISTS platform_resources (
+CREATE TABLE platform_resources (
     resource_pk INTEGER PRIMARY KEY AUTOINCREMENT,
     resource_type TEXT NOT NULL,
     resource_id TEXT NOT NULL,
@@ -1327,10 +1077,11 @@ CREATE TABLE IF NOT EXISTS platform_resources (
     updated_at TEXT NOT NULL,
     UNIQUE (resource_type, resource_id)
 );
-CREATE INDEX IF NOT EXISTS ix_platform_resources_type
+
+CREATE INDEX ix_platform_resources_type
     ON platform_resources(resource_type, resource_id);
 
-CREATE TABLE IF NOT EXISTS platform_resource_versions (
+CREATE TABLE platform_resource_versions (
     resource_pk INTEGER NOT NULL
         REFERENCES platform_resources(resource_pk) ON DELETE CASCADE,
     revision INTEGER NOT NULL,
@@ -1347,10 +1098,11 @@ CREATE TABLE IF NOT EXISTS platform_resource_versions (
     published_at TEXT,
     PRIMARY KEY (resource_pk, revision)
 );
-CREATE INDEX IF NOT EXISTS ix_platform_resource_versions_lifecycle
+
+CREATE INDEX ix_platform_resource_versions_lifecycle
     ON platform_resource_versions(resource_pk, lifecycle, revision DESC);
 
-CREATE TABLE IF NOT EXISTS organization_agents (
+CREATE TABLE organization_agents (
     organization_id TEXT NOT NULL
         REFERENCES organizations(organization_id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL,
@@ -1365,51 +1117,16 @@ CREATE TABLE IF NOT EXISTS organization_agents (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (organization_id, agent_id)
 );
-CREATE INDEX IF NOT EXISTS ix_organization_agents_enabled
+
+CREATE INDEX ix_organization_agents_enabled
     ON organization_agents(organization_id, enabled, agent_id);
 
-CREATE TABLE IF NOT EXISTS platform_catalog_migrations (
-    migration_key TEXT PRIMARY KEY,
-    detail TEXT NOT NULL DEFAULT '',
-    applied_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS legacy_organization_credentials (
-    organization_id TEXT NOT NULL,
-    credential_id TEXT NOT NULL,
-    user_id INTEGER,
-    credential_scope TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    resource_id TEXT NOT NULL,
-    label TEXT NOT NULL DEFAULT '',
-    secret_service TEXT NOT NULL,
-    secret_account TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    archived_at TEXT NOT NULL,
-    PRIMARY KEY (organization_id, credential_id)
-);
-
-DROP TABLE IF EXISTS user_organization_preferences;
-"""
-
-SCHEMA_V30 = r"""
-CREATE TABLE IF NOT EXISTS tenant_env (
+CREATE TABLE tenant_env (
     tenant_id TEXT PRIMARY KEY,
     env_json TEXT NOT NULL DEFAULT '{}'
 );
-"""
 
-
-# Script actions only record the dispatch outcome; the real result lands in
-# script_runs. Keeping the script run id lets the panel follow that link.
-SCHEMA_V31 = r"""
-ALTER TABLE organization_schedule_runs ADD COLUMN script_run_id TEXT;
-"""
-
-
-SCHEMA_V32 = r"""
-CREATE TABLE IF NOT EXISTS datasource_query_audit (
+CREATE TABLE datasource_query_audit (
     audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id TEXT,
     agent_id TEXT,
@@ -1426,34 +1143,11 @@ CREATE TABLE IF NOT EXISTS datasource_query_audit (
     error TEXT,
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_datasource_query_audit_time
+
+CREATE INDEX ix_datasource_query_audit_time
     ON datasource_query_audit(datasource_id, created_at DESC);
-"""
 
-
-SCHEMA_V33 = r"""
-CREATE TABLE IF NOT EXISTS personal_channel_connections (
-    connection_id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    organization_id TEXT NOT NULL REFERENCES organizations(organization_id)
-        ON DELETE CASCADE,
-    channel_instance_id TEXT NOT NULL UNIQUE
-        REFERENCES organization_channels(channel_instance_id) ON DELETE CASCADE,
-    platform TEXT NOT NULL CHECK (platform IN ('wechat', 'wecom')),
-    bot_account_id TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS ix_personal_connections_user
-    ON personal_channel_connections(user_id, created_at DESC);
-"""
-
-
-SCHEMA_V34 = r"""
--- SQLite cannot alter a CHECK constraint in place, so the table is rebuilt
--- to allow the feishu platform for personal connections.
-CREATE TABLE IF NOT EXISTS personal_channel_connections_v34 (
+CREATE TABLE "personal_channel_connections" (
     connection_id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     organization_id TEXT NOT NULL REFERENCES organizations(organization_id)
@@ -1466,83 +1160,28 @@ CREATE TABLE IF NOT EXISTS personal_channel_connections_v34 (
     updated_at TEXT NOT NULL
 );
 
-INSERT INTO personal_channel_connections_v34(
-    connection_id, user_id, organization_id, channel_instance_id,
-    platform, bot_account_id, created_at, updated_at
-)
-SELECT connection_id, user_id, organization_id, channel_instance_id,
-       platform, bot_account_id, created_at, updated_at
-FROM personal_channel_connections;
-
-DROP TABLE personal_channel_connections;
-
-ALTER TABLE personal_channel_connections_v34
-    RENAME TO personal_channel_connections;
-
-CREATE INDEX IF NOT EXISTS ix_personal_connections_user
+CREATE INDEX ix_personal_connections_user
     ON personal_channel_connections(user_id, created_at DESC);
-"""
 
+""" + WORKFLOW_SCHEMA_V2 + r"""
 
-SCHEMA_V35 = r"""
--- Fix legacy data: a user may only have one active connection per platform
--- (the feishu SDK supports a single live WS connection per process). Keep
--- the most recently updated connection enabled and pause the rest.
-UPDATE organization_channels
-SET enabled = 0
-WHERE enabled = 1
-AND channel_instance_id IN (
-    SELECT c.channel_instance_id
-    FROM personal_channel_connections c
-    WHERE c.channel_instance_id != (
-        SELECT c2.channel_instance_id
-        FROM personal_channel_connections c2
-        JOIN organization_channels o2
-            ON o2.channel_instance_id = c2.channel_instance_id
-        WHERE o2.enabled = 1
-        AND c2.user_id = c.user_id
-        AND c2.platform = c.platform
-        ORDER BY c2.updated_at DESC, c2.created_at DESC
-        LIMIT 1
-    )
+INSERT INTO schema_metadata(singleton, format_version)
+VALUES (1, __SCHEMA_FORMAT_VERSION__);
+INSERT INTO admin_roles(role_id, code, name, permissions, builtin) VALUES
+    (1, 'admin', '管理员', '["*"]', 1),
+    (2, 'editor', '编辑',
+        '["tenants.read","tenants.delete","panel.read","panel.write",' ||
+        '"model_analytics.read","model_analytics.manage","plugins.read",' ||
+        '"plugins.manage","channels.read","channels.manage"]', 1),
+    (3, 'viewer', '只读',
+        '["tenants.read","panel.read","model_analytics.read",' ||
+        '"plugins.read","channels.read"]', 1),
+    (4, 'tenant_user', '租户用户', '[]', 1);
+INSERT INTO knowledge_categories(
+    category_id, scope, tenant_id, name, description, created_at, updated_at
+) VALUES (
+    'public-default', 'public', NULL, '默认知识库', '平台公共知识',
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 );
 """
-
-
-# Versions applied as plain SQL scripts. Specialized versions with inspection
-# or permission backfills are dispatched through dedicated Database methods.
-SCHEMA_SCRIPTS: dict[int, str] = {
-    1: SCHEMA_V1,
-    2: SCHEMA_V2,
-    3: SCHEMA_V3,
-    4: SCHEMA_V4,
-    5: SCHEMA_V5,
-    6: SCHEMA_V6,
-    7: SCHEMA_V7,
-    8: SCHEMA_V8,
-    9: SCHEMA_V9,
-    10: SCHEMA_V10,
-    11: SCHEMA_V11,
-    14: SCHEMA_V14,
-    15: SCHEMA_V15,
-    16: SCHEMA_V16,
-    17: SCHEMA_V17,
-    18: SCHEMA_V18,
-    19: SCHEMA_V19,
-    20: SCHEMA_V20,
-    21: SCHEMA_V21,
-    22: SCHEMA_V22,
-    23: SCHEMA_V23,
-    24: SCHEMA_V24,
-    25: SCHEMA_V25,
-    26: SCHEMA_V26,
-    27: SCHEMA_V27,
-    28: SCHEMA_V28,
-    29: SCHEMA_V29,
-    30: SCHEMA_V30,
-    31: SCHEMA_V31,
-    32: SCHEMA_V32,
-    33: SCHEMA_V33,
-    34: SCHEMA_V34,
-    35: SCHEMA_V35,
-}

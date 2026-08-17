@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.core.integrations.keychain import (
     KeychainError,
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MCP_HEADERS_FILE = SYSTEM_DATA_DIR / "mcp_headers.json"
 
 _SERVICE = "mcp.headers"
+_SECRET_SERVICE = "mcp.secret"
 
 
 def _reference(server_id: str) -> KeychainReference:
@@ -79,3 +80,32 @@ def merge_headers(servers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         headers.update(stored)
         merged.append({**server, "headers": headers})
     return merged
+
+
+def _secret_reference(server_id: str) -> KeychainReference:
+    return KeychainReference(_SECRET_SERVICE, server_id)
+
+
+def load_secret(server_id: str) -> Optional[str]:
+    """Return the stored app secret for a server, or ``None`` if absent."""
+    try:
+        raw = _store().get_secret(_secret_reference(server_id))
+    except KeychainError:
+        return None
+    return raw or None
+
+
+def save_secret(server_id: str, secret: str) -> None:
+    """Persist an app secret (e.g. Feishu app_secret) for a server."""
+    if not secret:
+        delete_secret(server_id)
+        return
+    _store().set_secret(_secret_reference(server_id), str(secret))
+
+
+def delete_secret(server_id: str) -> None:
+    """Remove a stored app secret for a server."""
+    try:
+        _store().delete_secret(_secret_reference(server_id))
+    except KeychainError:
+        logger.warning("无法删除 MCP 服务 %s 的密钥存储", server_id)

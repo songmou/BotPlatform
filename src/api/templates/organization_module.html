@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}组织工作台 - BotPlatform{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/organization-module.css?v=20260804b"><link rel="stylesheet" href="/static/css/agents.css?v=20260806b"><link rel="stylesheet" href="/static/css/schedules.css">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/organization-module.css?v=20260813a"><link rel="stylesheet" href="/static/css/agents.css?v=20260806b"><link rel="stylesheet" href="/static/css/schedules.css">{% endblock %}
 {% block content %}
 <div class="organization-page" id="organization-page" data-module="{{ module }}">
     <div class="page-header organization-page-header">
@@ -11,6 +11,7 @@
         </div>
         <div class="organization-actions">
             <button id="organization-primary-action" class="btn-primary" type="button" hidden></button>
+            {% if module == 'channels' %}<button id="organization-channel-conversations-btn" class="btn-secondary" type="button">跨渠道会话</button>{% endif %}
             <button id="organization-refresh" class="btn-secondary" type="button">刷新</button>
         </div>
     </div>
@@ -163,6 +164,17 @@
             </div>
             <div class="modal-footer"><button type="button" id="organization-channel-modal-cancel" class="btn-secondary">取消</button><button type="button" id="organization-channel-step-back" class="btn-secondary" style="display:none">上一步</button><button type="button" id="organization-channel-step-next" class="btn-primary">下一步</button><button type="submit" id="organization-channel-bind-save" class="btn-primary" style="display:none">保存</button><button type="button" id="organization-channel-done" class="btn-primary" style="display:none">完成</button></div>
         </form>
+    </div>
+</div>
+
+<!-- Channel conversations panel -->
+<div id="organization-conversations-modal" class="modal-overlay" style="display:none">
+    <div class="modal organization-conversations-modal">
+        <div class="modal-header">
+            <h3>渠道会话</h3>
+            <button class="modal-close-btn" type="button">&times;</button>
+        </div>
+        <div class="modal-body organization-conversations-body"></div>
     </div>
 </div>
 {% endblock %}

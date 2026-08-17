@@ -707,7 +707,7 @@ def _load_app(path: Path) -> AppConfig:
     )
 
 
-_MODEL_TYPES = {"ollama", "openai_compatible"}
+_MODEL_TYPES = {"ollama", "openai_compatible", "local_transformers"}
 _MODEL_MODALITIES = {"chat", "embedding", "rerank"}
 _RESERVED_REQUEST_FIELDS = {
     "model",
@@ -796,18 +796,35 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
         adapter_type = _required_nested_string(raw, "type", field_base + ".type", path)
         if adapter_type not in _MODEL_TYPES:
             raise _error(path, field_base + ".type", "是不支持的适配器类型")
-        if modality == "rerank" and adapter_type != "openai_compatible":
+        if adapter_type == "local_transformers" and modality != "rerank":
             raise _error(
-                path, field_base + ".type", "重排模型仅支持 openai_compatible 适配器"
+                path, field_base + ".type", "local_transformers 仅支持重排模型"
+            )
+        if modality == "rerank" and adapter_type not in {
+            "openai_compatible", "local_transformers"
+        }:
+            raise _error(
+                path,
+                field_base + ".type",
+                "重排模型仅支持 openai_compatible 或 local_transformers 适配器",
             )
         provider = _required_nested_string(
             raw, "provider", field_base + ".provider", path
         )
-        base_url = _validate_model_url(
-            _required_nested_string(raw, "base_url", field_base + ".base_url", path),
-            field_base + ".base_url",
-            path,
-        )
+        if adapter_type == "local_transformers":
+            if "base_url" in raw:
+                raise _error(
+                    path, field_base + ".base_url", "本地重排模型不能配置 URL"
+                )
+            base_url = "local://transformers"
+        else:
+            base_url = _validate_model_url(
+                _required_nested_string(
+                    raw, "base_url", field_base + ".base_url", path
+                ),
+                field_base + ".base_url",
+                path,
+            )
         model = _required_nested_string(raw, "model", field_base + ".model", path)
         timeout_seconds = _model_number(
             raw, "timeout_seconds", field_base + ".timeout_seconds", path
@@ -1719,7 +1736,7 @@ KNOWN_MCP_TRANSPORTS = {"stdio", "sse", "streamablehttp", "http"}
 _SKILL_FIELDS = {"id", "name", "description", "prompt", "enabled"}
 _MCP_SERVER_FIELDS = {
     "id", "name", "transport", "command", "args", "env", "url",
-    "headers", "enabled",
+    "headers", "enabled", "token_provider",
 }
 
 
@@ -1822,6 +1839,9 @@ def validate_mcp_server_entries(entries: Any, source: Any) -> List[Dict[str, Any
             raise _entry_error(source, field + ".args", "必须是字符串数组")
         _validated_string_map(entry, "env", field + ".env", source)
         _validated_string_map(entry, "headers", field + ".headers", source)
+        token_provider = entry.get("token_provider")
+        if token_provider is not None and not isinstance(token_provider, dict):
+            raise _entry_error(source, field + ".token_provider", "必须是对象")
         if "enabled" in entry and not isinstance(entry["enabled"], bool):
             raise _entry_error(source, field + ".enabled", "必须是布尔值")
         validated.append(dict(entry))

@@ -24,6 +24,7 @@ from src.core.services.knowledge import SUPPORTED_SUFFIXES
 
 
 router = APIRouter(prefix="/api/v2", tags=["content-v2"])
+KNOWLEDGE_DRIVE_IMPORT_MAX_FILES = 1000
 
 _KNOWLEDGE_UPLOAD_BYTES = 20 * 1024 * 1024
 _KNOWLEDGE_UPLOAD_DIR = "knowledge_uploads"
@@ -364,8 +365,8 @@ def import_platform_drive_knowledge(
     category_id = str(body.get("category_id") or "")
     _category(service, category_id, "public", None)
     paths = list(dict.fromkeys(body.get("paths") or []))
-    if not paths or len(paths) > 100:
-        raise HTTPException(status_code=400, detail="每次请选择 1 到 100 个文件")
+    if not paths or len(paths) > KNOWLEDGE_DRIVE_IMPORT_MAX_FILES:
+        raise HTTPException(status_code=400, detail="每次请选择 1 到 1000 个文件")
     items = []
     for path in paths:
         try:
@@ -565,8 +566,8 @@ def import_organization_drive_knowledge(
     category_id = str(body.get("category_id") or "")
     _organization_writable_category(service, category_id, organization_id)
     paths = list(dict.fromkeys(body.get("paths") or []))
-    if not paths or len(paths) > 100:
-        raise HTTPException(status_code=400, detail="每次请选择 1 到 100 个文件")
+    if not paths or len(paths) > KNOWLEDGE_DRIVE_IMPORT_MAX_FILES:
+        raise HTTPException(status_code=400, detail="每次请选择 1 到 1000 个文件")
     items = []
     for path in paths:
         try:

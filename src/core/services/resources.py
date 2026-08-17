@@ -22,7 +22,13 @@ from src.core.config.loader import (
     ScriptParameter,
     ToolConfig,
 )
-from src.core.config.mcp_headers import delete_headers, merge_headers, save_headers
+from src.core.config.mcp_headers import (
+    delete_headers,
+    delete_secret,
+    merge_headers,
+    save_headers,
+    save_secret,
+)
 from src.core.config.model_api_keys import (
     delete_model_api_key,
     model_api_key_set,
@@ -43,6 +49,7 @@ RESOURCE_TYPES = {
     "tools",
     "scripts",
     "settings",
+    "workflows",
 }
 RESTART_RESOURCE_TYPES = {"plugins", "scripts"}
 # settings/runtime fields that cannot be rebound without a process restart.
@@ -422,20 +429,36 @@ class ScopedResourceStore:
             ):
                 raise ResourceError("不能禁用默认智能体")
         elif resource_type == "models":
-            base_url = str(payload.get("base_url") or "")
-            if base_url:
-                parsed = urlparse(base_url)
-                loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
-                if parsed.scheme.lower() != "https" and not (
-                    parsed.scheme.lower() == "http" and loopback
-                ):
-                    raise ResourceError("模型地址必须使用 HTTPS；仅本机回环可使用 HTTP")
+            adapter_type = str(payload.get("type") or "").strip().lower()
+            modality = str(payload.get("modality") or "chat").strip().lower()
+            if adapter_type == "local_transformers":
+                if modality != "rerank":
+                    raise ResourceError("local_transformers 仅支持重排模型")
+            else:
+                base_url = str(payload.get("base_url") or "")
+                if base_url:
+                    parsed = urlparse(base_url)
+                    loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+                    if parsed.scheme.lower() != "https" and not (
+                        parsed.scheme.lower() == "http" and loopback
+                    ):
+                        raise ResourceError("模型地址必须使用 HTTPS；仅本机回环可使用 HTTP")
         elif resource_type == "mcp":
             transport = str(payload.get("transport") or "stdio").lower()
             if transport in {"sse", "streamablehttp"}:
                 url = urlparse(str(payload.get("url") or ""))
                 if url.scheme.lower() != "https" or not url.netloc:
                     raise ResourceError("远程 MCP 地址必须使用 HTTPS")
+        elif resource_type == "workflows":
+            from src.core.workflows.definition import (
+                WorkflowValidationError,
+                validate_definition,
+            )
+
+            try:
+                validate_definition(payload)
+            except WorkflowValidationError as exc:
+                raise ResourceError(str(exc)) from exc
         if payload.get("enabled") is False:
             # Only block when an *enabled* record is being switched off. A
             # referenced model that is already disabled must still be editable
@@ -647,6 +670,18 @@ class ScopedResourceStore:
             if isinstance(headers, dict) and headers:
                 save_headers(resource_id, headers)
                 payload = {**payload, "headers": {}}
+            # A token_provider may embed an app secret (e.g. Feishu app_secret
+            # for TAT auto-refresh).  Route it to the keychain too and strip it
+            # from the persisted payload so it never lands in the catalog DB.
+            provider = payload.get("token_provider")
+            if isinstance(provider, dict):
+                app_secret = provider.get("app_secret")
+                if isinstance(app_secret, str) and app_secret:
+                    save_secret(resource_id, app_secret)
+                provider = {
+                    k: v for k, v in provider.items() if k != "app_secret"
+                }
+                payload = {**payload, "token_provider": provider}
         elif resource_type == "models":
             # Model API keys are entered on the page and must never be persisted
             # to the catalog DB.  Stash the raw secret in the keychain (keyed by
@@ -709,6 +744,7 @@ class ScopedResourceStore:
                     raise ResourceError("运行时应用失败：{}".format(exc)) from exc
             if resource_type == "mcp":
                 delete_headers(resource_id)
+                delete_secret(resource_id)
             elif resource_type == "models":
                 delete_model_api_key(resource_id)
             with self.database.transaction(immediate=True) as connection:

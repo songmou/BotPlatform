@@ -96,7 +96,7 @@
             }).then(function (r) {
                 if (r.ok) {
                     return r.json().then(function (me) {
-                        var defaultTarget = (me.permissions || []).length ? "/admin" : "/app";
+                        var defaultTarget = "/";
                         var next = params.get("next") || defaultTarget;
                         if (next.charAt(0) !== "/" || next.charAt(1) === "/") {
                             next = defaultTarget;

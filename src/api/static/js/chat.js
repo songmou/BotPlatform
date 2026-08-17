@@ -18,7 +18,7 @@ function initChat() {
     (window.BP_CONTEXT_READY || Promise.resolve()).then(function () {
         if (!activeOrganizationId()) return;
         loadAgentSelector();
-        initConversations();
+        initConversations().then(openConversationFromUrl);
     });
 
     function organizationMode() {
@@ -171,23 +171,72 @@ function initChat() {
         try { localStorage.setItem("bp-current-conv", id || ""); } catch (e) {}
     }
 
+    function conversationIdFromUrl() {
+        try {
+            return new URLSearchParams(window.location.search).get("conversation");
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function openConversationFromUrl() {
+        var urlId = conversationIdFromUrl();
+        if (urlId) openConversationById(urlId);
+    }
+
+    function openConversationById(id) {
+        var existing = conversations.filter(function (c) { return c.id === id; })[0];
+        function go() {
+            currentConvId = id;
+            saveConvId(id);
+            clearMessages();
+            renderConvList();
+            loadCurrentHistory();
+        }
+        if (existing) {
+            if (currentConvId !== id) selectConversation(id);
+            else go();
+            return;
+        }
+        // Not in the current list (e.g. a channel conversation from another
+        // org); fetch metadata for the sidebar title, fall back to a label.
+        fetch(conversationItemUrl(id))
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (conv) {
+                conversations.push(conv || { id: id, title: "渠道会话" });
+                go();
+            })
+            .catch(function () {
+                conversations.push({ id: id, title: "渠道会话" });
+                go();
+            });
+    }
+
     function initConversations() {
-        fetch(conversationCollectionUrl())
+        var pendingId = conversationIdFromUrl();
+        return fetch(conversationCollectionUrl())
             .then(function (r) { return r.json(); })
             .then(function (convs) {
                 conversations = convs;
-                if (conversations.length === 0) {
+                if (conversations.length === 0 && !pendingId) {
                     currentConvId = null;
                     saveConvId("");
                     renderConvList();
                     return;
                 }
-                var saved = savedConvId();
-                var exists = conversations.some(function (c) { return c.id === saved; });
-                currentConvId = exists ? saved : conversations[0].id;
-                saveConvId(currentConvId);
+                var target = null;
+                if (pendingId && conversations.some(function (c) { return c.id === pendingId; })) {
+                    target = pendingId;
+                } else if (!pendingId) {
+                    var saved = savedConvId();
+                    target = conversations.some(function (c) { return c.id === saved; })
+                        ? saved
+                        : (conversations[0] ? conversations[0].id : null);
+                }
+                currentConvId = target;
+                if (target) saveConvId(target);
                 renderConvList();
-                loadCurrentHistory();
+                if (target) loadCurrentHistory();
             });
     }
 
@@ -227,9 +276,11 @@ function initChat() {
                 deleteConversation(c.id);
             });
             item.appendChild(title);
-            var canDelete = !organizationMode() || canWriteOrganization() ||
-                c.creator_user_id === BP_CONTEXT.user.user_id;
-            if (organizationMode() && canDelete) {
+            var canManageConversation = !organizationMode() ||
+                canManageOrganization() ||
+                (c.source === "web" && BP_CONTEXT && BP_CONTEXT.user &&
+                    c.creator_user_id === BP_CONTEXT.user.user_id);
+            if (organizationMode() && canManageConversation) {
                 title.title = "双击重命名";
                 title.addEventListener("dblclick", function (event) {
                     event.stopPropagation();
@@ -249,7 +300,7 @@ function initChat() {
                 });
                 item.appendChild(archive);
             }
-            if (canDelete) item.appendChild(del);
+            if (canManageConversation) item.appendChild(del);
             item.addEventListener("click", function () { selectConversation(c.id); });
             convListEl.appendChild(item);
         });

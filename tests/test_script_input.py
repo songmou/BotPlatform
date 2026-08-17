@@ -43,6 +43,13 @@ class ScriptInputRegistryTests(unittest.TestCase):
         self.assertIsNone(self.registry.peek("t1"))
         self.assertIsNone(self.registry.consume("t1"))
 
+    def test_consume_expected_run_does_not_remove_newer_entry(self) -> None:
+        self.registry.register("t1", "new-run", "s", "n", self._await())
+        self.assertIsNone(
+            self.registry.consume("t1", expected_run_id="old-run")
+        )
+        self.assertEqual(self.registry.peek("t1").run_id, "new-run")
+
     def test_clear_removes_entry(self) -> None:
         self.registry.register("t1", "r", "s", "n", self._await())
         self.registry.clear("t1")

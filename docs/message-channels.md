@@ -74,7 +74,7 @@ BotPlatform 将微信 iLink、企业微信智能机器人和飞书机器人统�
 - `token`、`secret`、`password` 等凭据字段禁止写入此文件；
 - 可以临时禁用全部渠道进入维护状态；管理面板与其他服务仍可运行。
 
-管理面板 `/channels` 为只读监控页，按渠道类型分区展示各实例的连接状态；渠道实例的新增、修改、删除请在 `/agents` 智能体管理页的编辑弹窗中完成。渠道类型（微信 iLink、企业微信、飞书）为系统内置，不可增删。Web 与 CLI 保存配置后都会提示重启。
+管理面板 `/organization/channels` 展示各渠道实例的连接状态并提供管理入口；智能体绑定在 `/organization/agents` 中维护。渠道类型（微信 iLink、企业微信、飞书）为系统内置，不可增删。Web 与 CLI 保存配置后都会提示重启。
 
 ## 4. 微信 iLink 接入
 
@@ -98,7 +98,7 @@ iLink 默认只处理私聊。原有通知端点和 `context_token` 继续使用
 ## 5. 企业微信接入
 
 1. 在企业微信管理后台创建“智能机器人”，选择 API 模式和长连接，取得 Bot ID 与 Secret。
-2. 在 `/channels` 添加 `wecom_aibot` 渠道；或先把上面的 `wecom-main` 配置加入 `channels.json`。
+2. 在 `/organization/channels` 添加 `wecom_aibot` 渠道；或先把上面的 `wecom-main` 配置加入 `channels.json`。
 3. 通过标准输入保存凭据，避免密钥进入命令历史：
 
    ```bash
@@ -120,7 +120,7 @@ iLink 默认只处理私聊。原有通知端点和 `context_token` 继续使用
 
 1. 在飞书开放平台创建企业自建应用，启用机器人能力。
 2. 为应用开通接收与发送消息所需权限，选择长连接接收事件，发布应用并把机器人加入目标会话。
-3. 在 `/channels` 添加 `feishu` 渠道，或更新 `channels.json`。
+3. 在 `/organization/channels` 添加 `feishu` 渠道，或更新 `channels.json`。
 4. 通过标准输入保存 App ID 和 App Secret：
 
    ```bash
@@ -160,7 +160,7 @@ iLink 默认只处理私聊。原有通知端点和 `context_token` 继续使用
 4. **身份灰度**：用测试账号走完 `/bind`，验证两个渠道的 `/id` 一致。
 5. **正式启用**：增加其余实例，观察渠道状态与 inbox 重试。
 
-回滚时先停止进程，把新增渠道的 `enabled` 改为 `false`，再完整重启。数据库 v23 新增的会话字段和绑定表可以保留，不影响仅运行 iLink；不要手工删除迁移记录。
+回滚时先停止进程，把新增渠道的 `enabled` 改为 `false`，再完整重启。当前版本不执行历史数据库迁移；跨版本切换前应备份整个 `data/system`，不要直接用旧版本打开新格式数据库。
 
 ## 9. 新增其他渠道的标准步骤
 
@@ -170,7 +170,7 @@ iLink 默认只处理私聊。原有通知端点和 `context_token` 继续使用
 4. 在配置加载器中加入类型与非敏感 `settings` 白名单；
 5. 声明并锁定 SDK 依赖；
 6. 增加消息归一化、收发、附件、去重、故障隔离和密钥不回显测试；
-7. 在 `/channels` 完成真实平台灰度，不把平台逻辑写入业务层。
+7. 在 `/organization/channels` 完成真实平台灰度，不把平台逻辑写入业务层。
 
 ## 10. 验收清单
 

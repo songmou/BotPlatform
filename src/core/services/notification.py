@@ -227,6 +227,26 @@ class NotificationOutboxStore:
     ) -> None:
         self.registry = registry
         self.now_provider = now_provider
+        # Idempotent migration: older databases lack the waiting_since column.
+        try:
+            with registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "ALTER TABLE notification_outbox ADD COLUMN waiting_since TEXT"
+                )
+        except (sqlite3.Error, OSError):
+            # Column already exists (or schema owned elsewhere) — ignore.
+            pass
+        # Idempotent migration: preferred_channel_id lets the dispatcher fall
+        # back within the same channel instead of blindly picking the
+        # tenant's most-recently-active endpoint (which may be a different
+        # channel, e.g. a WeChat result landing on Feishu).
+        try:
+            with registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "ALTER TABLE notification_outbox ADD COLUMN preferred_channel_id TEXT"
+                )
+        except (sqlite3.Error, OSError):
+            pass
 
     @staticmethod
     def _iso(value: datetime) -> str:
@@ -245,8 +265,9 @@ class NotificationOutboxStore:
                     "INSERT OR IGNORE INTO notification_outbox("
                     "notification_id, tenant_id, batch_id, batch_position, "
                     "source_type, source_key, source_ref, kind, text_payload, "
-                    "image_path, delivery_status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                    "image_path, selected_endpoint_id, preferred_channel_id, "
+                    "delivery_status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                     (
                         row["notification_id"],
                         row["tenant_id"],
@@ -258,6 +279,8 @@ class NotificationOutboxStore:
                         row["kind"],
                         row.get("text_payload"),
                         row.get("image_path"),
+                        row.get("selected_endpoint_id"),
+                        row.get("preferred_channel_id"),
                         row["created_at"],
                     ),
                 )
@@ -360,7 +383,7 @@ class NotificationOutboxStore:
                 "WHERE earlier.tenant_id=candidate.tenant_id "
                 "AND earlier.outbox_id<candidate.outbox_id "
                 "AND earlier.delivery_status IN "
-                "('pending','sending','retry','waiting_recipient')) "
+                "('pending','sending','retry')) "
                 "ORDER BY candidate.outbox_id LIMIT ?",
                 (now, now, limit),
             ).fetchall()
@@ -431,8 +454,8 @@ class NotificationOutboxStore:
                 connection.execute(
                     "UPDATE notification_outbox SET delivery_status='waiting_recipient', "
                     "attempt_count=?, next_attempt_at=NULL, lease_expires_at=NULL, "
-                    "last_error=? WHERE outbox_id=?",
-                    (attempts, error[:1000] or None, outbox_id),
+                    "waiting_since=?, last_error=? WHERE outbox_id=?",
+                    (attempts, timestamp, error[:1000] or None, outbox_id),
                 )
             elif status == "failed":
                 image_path = str(row["image_path"]) if row["image_path"] else None
@@ -496,6 +519,40 @@ class NotificationOutboxStore:
                 (tenant_id,),
             )
             return int(cursor.rowcount)
+
+    def requeue_aged_waiting_recipient(
+        self, age_seconds: int, max_attempts: int = 20
+    ) -> int:
+        """Re-attempt ``waiting_recipient`` rows that have stalled.
+
+        A row only becomes eligible once it has been waiting longer than
+        ``age_seconds`` (tracked via ``waiting_since``), so freshly-stalled
+        rows are left to the inbound-refresh path and we avoid hammering a
+        row whose recipient context can never be satisfied. Rows that have
+        already been retried ``max_attempts`` times are skipped to bound the
+        effort; they still get delivered when the user next messages (which
+        calls ``requeue_waiting_recipient`` directly).
+        """
+        threshold = self._iso(self.now_provider() - timedelta(seconds=age_seconds))
+        with self.registry.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE notification_outbox SET delivery_status='pending', "
+                "next_attempt_at=NULL, lease_expires_at=NULL "
+                "WHERE delivery_status='waiting_recipient' "
+                "AND attempt_count < ? "
+                "AND (waiting_since IS NULL OR waiting_since <= ?)",
+                (max_attempts, threshold),
+            )
+            return int(cursor.rowcount)
+
+    def count_waiting_recipient(self, tenant_id: str) -> int:
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM notification_outbox "
+                "WHERE tenant_id=? AND delivery_status='waiting_recipient'",
+                (tenant_id,),
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
 
     def select_endpoint(self, outbox_id: int, endpoint_id: Optional[str]) -> None:
         with self.registry.database.transaction(immediate=True) as connection:
@@ -618,6 +675,8 @@ class NotificationService:
         source_key: Optional[str] = None,
         source_ref: Optional[str] = None,
         attempt_immediately: bool = False,
+        selected_endpoint_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
     ) -> NotificationEnqueueResult:
         """Persist literal text before any delivery attempt."""
         if not isinstance(message, str) or not message.strip():
@@ -638,6 +697,8 @@ class NotificationService:
                         "source_ref": source_ref,
                         "kind": "text",
                         "text_payload": message,
+                        "selected_endpoint_id": selected_endpoint_id,
+                        "preferred_channel_id": channel_id,
                         "created_at": now,
                     }
                 ]
@@ -661,6 +722,8 @@ class NotificationService:
         source_key: Optional[str] = None,
         source_ref: Optional[str] = None,
         attempt_immediately: bool = False,
+        selected_endpoint_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
     ) -> NotificationEnqueueResult:
         """Snapshot and persist an image batch before any delivery attempt."""
         self._validate_tenant(tenant_id)
@@ -705,6 +768,8 @@ class NotificationService:
                     "source_ref": source_ref,
                     "kind": "text",
                     "text_payload": normalized_caption,
+                    "selected_endpoint_id": selected_endpoint_id,
+                    "preferred_channel_id": channel_id,
                     "created_at": now,
                 }
             )
@@ -719,6 +784,8 @@ class NotificationService:
                 "source_ref": source_ref,
                 "kind": "image",
                 "image_path": str(image_path),
+                "selected_endpoint_id": selected_endpoint_id,
+                "preferred_channel_id": channel_id,
                 "created_at": now,
             }
         )
@@ -858,6 +925,11 @@ class NotificationService:
     def on_recipient_refreshed(self, tenant_id: str) -> int:
         return self.outbox.requeue_waiting_recipient(tenant_id)
 
+    def count_waiting_recipient(self, tenant_id: str) -> int:
+        """Return how many notifications for a tenant are stalled waiting for a
+        fresh recipient context (e.g. an expired WeChat context_token)."""
+        return self.outbox.count_waiting_recipient(tenant_id)
+
     def pin_channel(
         self,
         notification_ids: Sequence[str],
@@ -896,14 +968,26 @@ class NotificationService:
             if selected_id
             else None
         )
+        if endpoint is not None:
+            return endpoint
+        # No pinned endpoint: prefer a same-channel fallback so a result never
+        # silently cross-posts to another channel (e.g. a WeChat result landing
+        # on Feishu just because Feishu was the tenant's last-active endpoint).
+        # Only when there is no channel hint do we fall back to the tenant's
+        # most-recently-active endpoint across all channels.
+        channel_id = claimed.get("preferred_channel_id") or None
+        if channel_id:
+            endpoint = self.address_store.latest_endpoint(
+                str(claimed["tenant_id"]), channel_id=channel_id
+            )
         if endpoint is None:
             endpoint = self.address_store.latest_endpoint(str(claimed["tenant_id"]))
-            if endpoint is None:
-                raise NotificationRecipientError("该用户尚无有效的消息收件地址")
-            self.outbox.select_endpoint(
-                int(claimed["outbox_id"]),
-                endpoint.endpoint_id,
-            )
+        if endpoint is None:
+            raise NotificationRecipientError("该用户尚无有效的消息收件地址")
+        self.outbox.select_endpoint(
+            int(claimed["outbox_id"]),
+            endpoint.endpoint_id,
+        )
         return endpoint
 
     def send_text_to(self, recipient: Recipient, message: str) -> NotificationResult:
@@ -1142,9 +1226,11 @@ class NotificationDispatcher:
         self,
         service: NotificationService,
         poll_interval_seconds: float = 2.0,
+        watchdog_age_seconds: int = 300,
     ) -> None:
         self.service = service
         self.poll_interval_seconds = poll_interval_seconds
+        self.watchdog_age_seconds = watchdog_age_seconds
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread = threading.Thread(
@@ -1179,6 +1265,11 @@ class NotificationDispatcher:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                # Periodically give stalled (waiting_recipient) rows another
+                # chance so a result is not held hostage to user inactivity.
+                self.service.outbox.requeue_aged_waiting_recipient(
+                    self.watchdog_age_seconds
+                )
                 while self.service.dispatch_due():
                     if self._stop.is_set():
                         return

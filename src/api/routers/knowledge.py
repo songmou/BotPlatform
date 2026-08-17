@@ -32,6 +32,7 @@ from src.core.services.knowledge import SUPPORTED_SUFFIXES
 from src.core.storage.tenants import TenantStoreError
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
+KNOWLEDGE_DRIVE_IMPORT_MAX_FILES = 1000
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 UPLOAD_SUBDIR = "knowledge_uploads"
@@ -322,8 +323,8 @@ def import_from_drive(
     principal=Depends(require_permission("knowledge.manage")),
 ):
     _require_public_scope(principal, body.scope, body.tenant_id)
-    if not body.paths or len(body.paths) > 100:
-        raise HTTPException(status_code=400, detail="每次请选择 1 到 100 个文件")
+    if not body.paths or len(body.paths) > KNOWLEDGE_DRIVE_IMPORT_MAX_FILES:
+        raise HTTPException(status_code=400, detail="每次请选择 1 到 1000 个文件")
     service = _knowledge_service(request)
     results = []
     for path in dict.fromkeys(body.paths):

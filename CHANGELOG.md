@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- 压平 SQLite 历史迁移链为单一当前格式；旧格式数据库只读检测后拒绝启动，需由管理员先备份并移走，不会自动改写或删除。
+- 删除废弃的租户脚本计划系统、旧页面别名、一次性迁移脚本、归档测试与无引用静态资源；组织定时任务统一使用 `organization_schedules`。
+- 仓库默认配置恢复为中立状态：移除固定租户、MCP 与本机数据源绑定，仅默认启用私人待办插件，全部主动任务默认关闭。
 - 环境变量与组织变量机制：脚本/插件通过清单 `env_allowlist` 声明所需变量名；平台维护全局环境变量，组织通过组织管理页的「组织环境变量」卡片按租户填写覆盖值（`tenant_env` 表，组织 > 全局）；脚本子进程按白名单重建环境，插件经 `PluginContext.env()` 注入以避免跨租户泄漏；保留名（`PATH`/`HOME`/`ILINKBOT_` 等）禁止声明；敏感凭据仍走集成凭据（Keychain）。
 - 「执行脚本」与「新建/编辑脚本计划」弹窗新增集成凭据就绪状态展示；`autogen_monitor` 声明非敏感 `env_allowlist`（SITE_BASE_URL 等）；管理面板「帮助文档」与 README、`docs/organization-multitenancy.md` 补充该机制说明。
 - 移除历史兼容代码：删除 pre-SQLite JSON 数据一次性迁移器（LegacyDataMigrator）、iLink 兼容适配器与机器人 legacy 轮询模式（MessageBot 现在只走渠道抽象）、`codex-hook` 入口分支、inbox 身份回填与 setup_keychain 占位脚本。

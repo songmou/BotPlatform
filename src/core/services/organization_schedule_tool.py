@@ -1,12 +1,8 @@
 """Expose organization schedules to chat tools with role enforcement.
 
-The Web panel stores unattended schedules in ``organization_schedules``
-(system C). Chat tools previously queried the abandoned
-``tenant_script_schedules`` table (system B, always empty), so the agent
-"could name scripts but not find the configured schedule". This service
-bridges the two: it reads/writes through ``OrganizationControlStore`` so the
-live scheduler revision is bumped exactly like the Web panel does, and it
-gates every write behind an owner/admin membership.
+The Web panel and chat tools both read and write through
+``OrganizationControlStore`` so the live scheduler revision is bumped
+consistently. Every write is gated behind an owner/admin membership.
 
 Writes only touch ``type == "script"`` schedules. Other action types may be
 listed, enabled, disabled, or deleted, but their action body is never

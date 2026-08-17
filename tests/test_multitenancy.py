@@ -269,6 +269,7 @@ Path(os.environ['ILINKBOT_SCRIPT_RESULT_FILE']).write_text(
         handled, reply = service.consume(self.a, secret)
         self.assertTrue(handled)
         self.assertIn("安全保存", reply)
+        self.assertIn("查看打卡", reply)
         self.assertIn("已配置", service.status(self.a, "ctsehr"))
 
         migrated = KeychainReference("legacy.service", "credential")

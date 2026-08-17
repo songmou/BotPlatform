@@ -34,6 +34,7 @@ from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService
 from src.core.services.script import ScriptService
+from src.core.services.script_intent import classify_integration_script_query
 from src.core.services.notification import NotificationDispatcher, TenantRecipientStore
 from src.core.tooling import ApprovalRequired, ToolError
 from src.core.storage.tenants import (
@@ -224,6 +225,12 @@ class MessageBot:
         config = self._channel_config(channel_id)
         return (config.agent_id or None) if config is not None else None
 
+    def _is_organization_channel(self, channel_id: str) -> bool:
+        if self.address_store is None:
+            return False
+        resolver = getattr(self.address_store, "organization_for_channel", None)
+        return bool(resolver(channel_id)) if callable(resolver) else False
+
     def _accept_message(self, message: InboundMessage) -> bool:
         if message.conversation_type == DIRECT:
             return True
@@ -235,9 +242,13 @@ class MessageBot:
         )
         return policy == "mention_only" and message.addressed_to_bot
 
-    @staticmethod
-    def _session_key(message: InboundMessage) -> str:
+    def _session_key(self, message: InboundMessage) -> str:
         if message.conversation_type == DIRECT:
+            if self._is_organization_channel(message.channel_id):
+                return "{}:direct:{}".format(
+                    message.channel_id,
+                    message.sender_id,
+                )
             return "direct"
         return "{}:{}:{}:{}".format(
             message.channel_id,
@@ -413,17 +424,38 @@ class MessageBot:
         if normalized_text.startswith("/"):
             # 命令放行给大模型处理,保留 pending 不消费
             return False
+        explicit_scripts = classify_integration_script_query(normalized_text)
+        if explicit_scripts:
+            if pending.script_id in explicit_scripts:
+                reply = (
+                    "{} 正在等待你的输入。请直接回复验证码内容，或回复“取消”终止。"
+                ).format(pending.script_name)
+                self._reply(endpoint, reply, tenant, record=False)
+                self._log(self._direction("输出", endpoint), user_id, reply)
+                return True
+            # Preserve the pending challenge while allowing a clearly unrelated
+            # EHR/OA query to follow the normal deterministic script route.
+            return False
         if not normalized_text:
             reply = "不能为空,请回复图片中的字符。"
             self._reply(endpoint, reply, tenant, record=False)
             self._log(self._direction("输出", endpoint), user_id, reply)
             return True
-        self.script_service.consume_pending_input(tenant)
+        try:
+            self.script_service.resume_pending_input(
+                tenant, pending, normalized_text
+            )
+        except (ToolError, ValueError) as exc:
+            reply = "继续 {} 失败：{}。输入仍然有效，请重试或回复“取消”。".format(
+                pending.script_name, exc
+            )
+            self._reply(endpoint, reply, tenant, record=False)
+            self._log(self._direction("输出", endpoint), user_id, reply)
+            return True
         if self.conversation_store is not None:
             self.conversation_store.record_user_message(
                 tenant.personal_tenant_id or tenant.tenant_id, normalized_text
             )
-        self.script_service.resume_pending_input(tenant, pending, normalized_text)
         reply = "正在用你提供的内容继续 {}…".format(pending.script_name)
         self._reply(endpoint, reply, tenant, record=False)
         self._log(self._direction("输出", endpoint), user_id, reply)
@@ -478,6 +510,8 @@ class MessageBot:
             )
         if tenant is not None and self.address_store is not None:
             endpoint = self.address_store.record_endpoint(tenant, message)
+            if self.script_service is not None:
+                self.script_service.trigger_endpoint_id = endpoint.endpoint_id
         if binding_completed:
             reply = "跨渠道身份绑定成功，当前渠道将使用同一租户数据。"
             self._reply(endpoint, reply, tenant)
@@ -866,7 +900,13 @@ class MessageBot:
             return
 
         if not image_item and lowered_text == "/delete-data":
-            if tenant is None:
+            if self._is_organization_channel(message.channel_id):
+                self._deletion_pending.pop(tenant.tenant_id if tenant else "", None)
+                reply = (
+                    "组织专属渠道不支持 /delete-data；"
+                    "如需删除组织，请在管理面板中操作。"
+                )
+            elif tenant is None:
                 reply = "当前未启用多用户存储。"
             else:
                 code = new_confirmation_code()
@@ -891,7 +931,13 @@ class MessageBot:
                 else ""
             )
             pending = self._deletion_pending.get(private_key) if tenant else None
-            if tenant is None or self.tenant_registry is None:
+            if self._is_organization_channel(message.channel_id):
+                self._deletion_pending.pop(private_key, None)
+                reply = (
+                    "组织专属渠道不支持 /delete-data；"
+                    "如需删除组织，请在管理面板中操作。"
+                )
+            elif tenant is None or self.tenant_registry is None:
                 reply = "当前未启用多用户存储。"
             elif len(parts) != 2 or not pending or datetime.now(timezone.utc) >= pending[1]:
                 self._deletion_pending.pop(private_key, None)
@@ -1105,7 +1151,32 @@ class MessageBot:
             except Exception:  # noqa: BLE001 - best effort on the error reply
                 pass
             return
+        finally:
+            # Clear the transient trigger endpoint so it cannot leak into a
+            # later, unrelated message handled by the same service instance.
+            if self.script_service is not None:
+                self.script_service.trigger_endpoint_id = None
 
         self._track_approval_outcome(subject, endpoint, outcome)
         self._reply(endpoint, answer, tenant)
         self._log(self._direction("输出", endpoint), user_id, answer)
+        # If some proactive results (e.g. a script run) are stalled waiting for
+        # a fresh recipient context, tell the user so they know to nudge us.
+        if (
+            tenant is not None
+            and self.notification_dispatcher is not None
+            and message.conversation_type == DIRECT
+        ):
+            try:
+                waiting = self.notification_dispatcher.service.count_waiting_recipient(
+                    tenant.personal_tenant_id or tenant.tenant_id
+                )
+                if waiting:
+                    hint = (
+                        "（你有 {} 条待接收的打卡/任务结果，已为你重新尝试发送；"
+                        "若仍未收到，回复任意消息即可再次接收）".format(waiting)
+                    )
+                    self._reply(endpoint, hint, tenant)
+                    self._log(self._direction("输出", endpoint), user_id, hint)
+            except Exception as exc:  # noqa: BLE001 - best effort hint
+                print("提示待接收结果失败：{}".format(exc), file=sys.stderr)

@@ -34,7 +34,7 @@
 
 ## 成员私有数据
 
-Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所有权。
+Web 对话使用 `organization_conversations`，按组织和成员身份校验访问权限。
 消息渠道认领账号后，组织共享知识、文件和工具 workspace 仍落在组织 UUID；
 对话、记忆、SOUL、待办和个人集成使用
 `member-personal:<organization_id> + user_id` 对应的内部存储主体。内部主体不会在
@@ -53,7 +53,7 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 存储于权限 `0600` 的 SQLite，因此只适合非敏感配置；`PATH`、`HOME`、`LANG`、
 `AUTOGEN_ENV_FILE` 等系统变量与 `ILINKBOT_` 等运行时注入前缀被禁止声明。
 账户、密码等敏感凭据不在此存放，统一走受限密钥存储（见上文集成凭据）。
-历史组织级模型、插件与 MCP 凭据只保留只读迁移元数据，不参与运行。
+旧数据库中的历史组织级模型、插件与 MCP 数据不会由当前版本自动迁移。
 
 渠道命令：
 
@@ -62,12 +62,12 @@ Web 对话使用 `web_conversations`，按 `organization_id + user_id` 校验所
 - `/org list`：列出账号加入的组织；
 - `/org use <组织编号或唯一前缀>`：切换活动组织。
 
-## 迁移与删除
+## 数据库格式与删除
 
 - 启动时把旧 tenant 幂等登记为保留原 UUID 的未认领单人组织；进程运行期间
   新创建的渠道 tenant 也会立即登记，不需要等待下次重启。
-- `data/system/web_conversations.json` 会幂等复制到首位平台管理员的调试空间；
-  新会话只写 SQLite。
+- 当前版本只支持全新的统一数据库格式；检测到旧格式时会拒绝启动并提示管理员
+  先备份并移走旧库，不会自动改写或删除旧数据。
 - 成员退出会删除其当前组织内的私有存储，不删除组织共享资源。
 - 组织删除前会在
   `data/system/organization_backups/<organization_id>-<timestamp>` 生成 SQLite、

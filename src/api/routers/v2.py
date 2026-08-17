@@ -48,7 +48,7 @@ from src.core.messaging.providers import (
     list_channel_providers,
 )
 from src.core.messaging import OutboundMessage
-from src.core.messaging.errors import MessagingError
+from src.core.messaging.errors import MessagingError, UnsupportedCapability
 from src.core.config.loader import ChannelConfig
 from src.core.services.drive import MAX_PREVIEW_BYTES, MAX_UPLOAD_BYTES
 from src.core.plugins.registry import default_catalog
@@ -831,9 +831,46 @@ def list_organization_conversations(
         organization_id,
         allow_delegation=context.platform_delegation,
     )
-    # Channel-bound conversations are stored for audit, not shown in the
-    # chat page; only web conversations are managed there.
-    return [item for item in items if str(item.get("source") or "") != "channel"]
+    return items
+
+
+@router.get("/orgs/{organization_id}/channels/{channel_instance_id}/conversations")
+def list_channel_conversations(
+    organization_id: str,
+    channel_instance_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    """Recent conversations for a single message channel (org or personal)."""
+    context = _organization_context(request, principal, organization_id)
+    return get_organization_store(request).list_channel_conversations(
+        context.user_id,
+        organization_id,
+        channel_instance_id,
+        allow_delegation=context.platform_delegation,
+    )
+
+
+@router.get("/orgs/{organization_id}/channel-conversations")
+def list_all_channel_conversations(
+    organization_id: str,
+    request: Request,
+    limit: int = 200,
+    principal=Depends(get_principal),
+):
+    """Cross-channel aggregate of recent conversations for the organization."""
+    context = _organization_context(request, principal, organization_id)
+    items = get_organization_store(request).list_conversations(
+        context.user_id,
+        organization_id,
+        allow_delegation=context.platform_delegation,
+    )
+    channel_items = [
+        item for item in items if str(item.get("source") or "") == "channel"
+    ]
+    if limit and limit > 0:
+        channel_items = channel_items[:limit]
+    return channel_items
 
 
 @router.post("/orgs/{organization_id}/conversations", status_code=201)
@@ -931,7 +968,7 @@ def organization_conversation_history(
     if str(conversation["organization_id"]) != organization_id:
         raise HTTPException(status_code=404, detail="对话不存在")
     store = request.app.state.conversation_store
-    messages = store.load_context(
+    messages = store.load_transcript(
         organization_id,
         session_key="organization:{}".format(conversation_id),
     )
@@ -1140,6 +1177,10 @@ _CAPABILITY_SAFE_FIELDS = {
     },
     "channels": {"id", "name", "description", "type", "enabled"},
     "schedules": {"id", "name", "description", "enabled"},
+    "workflows": {
+        "schema_version", "name", "description", "inputs", "outputs",
+        "triggers", "nodes", "edges", "settings",
+    },
 }
 
 _SENSITIVE_CATALOG_PARTS = {
@@ -2030,36 +2071,54 @@ def test_typed_organization_channel(
         credentials = json.loads(secret)
         channel_provider(channel["type"]).validate_credentials(credentials)
 
-        # 用存储的凭据构建一个临时 adapter，并向最近一个收件人真实发送测试消息。
-        config = ChannelConfig(
-            id=channel["channel_instance_id"], type=channel["type"], enabled=True
+        # 向最近一个收件人真实发送测试消息。优先复用已经连接（运行中）的渠道适配器：
+        # 飞书/企业微信等长连接渠道必须依赖运行中的连接才能发送，临时构建的 adapter
+        # 没有活动连接会报「消息渠道尚未连接」。
+        notification = getattr(request.app.state, "notification_service", None)
+        address_store = (
+            getattr(notification, "address_store", None) if notification else None
         )
-        adapter = build_channel_adapter(config, credentials)
-        try:
-            address_store = getattr(
-                getattr(request.app.state, "notification_service", None),
-                "address_store",
-                None,
+        endpoint = (
+            address_store.latest_endpoint(
+                organization_id, channel_id=channel["channel_instance_id"]
             )
-            endpoint = (
-                address_store.latest_endpoint(
-                    organization_id, channel_id=channel["channel_instance_id"]
-                )
-                if address_store is not None
-                else None
-            )
-            if endpoint is None:
-                return {
-                    "ok": True,
-                    "state": "credentials_valid",
-                    "detail": "凭据格式有效，但尚未发现可发送的收件人（请先在该渠道与机器人私聊一次后再测试）",
-                }
+            if address_store is not None
+            else None
+        )
+        if endpoint is None:
+            return {
+                "ok": True,
+                "state": "credentials_valid",
+                "detail": "凭据格式有效，但尚未发现可发送的收件人（请先在该渠道与机器人私聊一次后再测试）",
+            }
+
+        router = getattr(notification, "message_router", None) if notification else None
+        adapter = None
+        if router is not None:
+            try:
+                adapter = router.adapter(channel["channel_instance_id"])
+            except UnsupportedCapability:
+                adapter = None
+
+        if adapter is not None:
+            # 运行中适配器由 ChannelManager 持有，切勿在此关闭，否则会断开线上连接。
             adapter.send(
                 endpoint,
                 OutboundMessage(text="这是来自 BotPlatform 的渠道连通性测试消息。"),
             )
-        finally:
-            adapter.close()
+        else:
+            # 回退：为不依赖常驻连接的渠道构建临时适配器；连接型渠道未连接时会给出明确错误。
+            config = ChannelConfig(
+                id=channel["channel_instance_id"], type=channel["type"], enabled=True
+            )
+            adapter = build_channel_adapter(config, credentials)
+            try:
+                adapter.send(
+                    endpoint,
+                    OutboundMessage(text="这是来自 BotPlatform 的渠道连通性测试消息。"),
+                )
+            finally:
+                adapter.close()
     except (OrganizationControlError, CredentialError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MessagingError as exc:

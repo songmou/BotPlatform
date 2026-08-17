@@ -326,7 +326,7 @@ class SchedulerServiceTests(unittest.TestCase):
             ["soul_daily_maintenance", "soul_weekly_compaction"],
         )
 
-    def test_script_schedule_runs_without_recipient_and_submits_parameters(self) -> None:
+    def test_configured_script_task_runs_without_recipient(self) -> None:
         scripts = FakeScriptService()
         task = script_task()
         service = self.service([task], script_service=scripts)

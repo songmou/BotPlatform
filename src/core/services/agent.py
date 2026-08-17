@@ -44,6 +44,7 @@ from src.core.services.knowledge import KnowledgeService
 from src.core.services.memory import MemoryService
 from src.core.services.ocr import OcrError
 from src.core.services.resources import ScopedResourceStore
+from src.core.services.script_intent import classify_integration_script_query
 from src.core.storage.model_analytics import ModelAnalyticsStore
 
 
@@ -444,6 +445,104 @@ class AgentService:
             answer = "查询待办失败：{}".format(result.error or "工具没有返回有效结果")
         return self._finish(user_id, history, question, answer, session_key=session_key)
 
+    def _try_direct_integration_script_query(
+        self,
+        user_id: Union[str, TenantContext],
+        history: List[CanonicalMessage],
+        question: str,
+        preset: AgentPreset,
+        model: ModelSession,
+        has_image: bool,
+        session_key: str = "direct",
+    ) -> Optional[FinalAnswer]:
+        """Submit explicit EHR/OA queries from current state, not chat history."""
+
+        script_ids = classify_integration_script_query(question)
+        if has_image or self.tool_runtime is None or not script_ids:
+            return None
+        configured_tools = resolve_tool_names(preset, self.tool_runtime)
+        if not {"list_scripts", "run_script"}.issubset(configured_tools):
+            return None
+        if not all(
+            self.tool_runtime.is_available(name)
+            for name in ("list_scripts", "run_script")
+        ):
+            return None
+
+        arguments = [
+            {"script_id": script_id, "parameters": {}}
+            for script_id in script_ids
+        ]
+        # A future policy may protect either built-in script. In that case the
+        # normal model/tool loop remains responsible for creating the approval.
+        if any(
+            self.tool_runtime.requires_approval("run_script", item)
+            for item in arguments
+        ):
+            return None
+
+        audit_context = ToolAuditContext(
+            user_id=self._subject_key(user_id),
+            provider=model.identity.provider,
+            profile_id=model.identity.profile_id,
+            model=model.identity.configured_model,
+        )
+        catalog = self.tool_runtime.execute("list_scripts", {}, audit_context)
+        if not catalog.ok or not isinstance(catalog.data, dict):
+            answer = "读取当前脚本目录失败：{}".format(
+                catalog.error or "工具没有返回有效结果"
+            )
+            return self._finish(
+                user_id, history, question, answer, session_key=session_key
+            )
+        available_ids = {
+            str(item.get("id"))
+            for item in catalog.data.get("scripts", [])
+            if isinstance(item, dict)
+        }
+
+        labels = {
+            "ctsehr_check": "CTS EHR 考勤查询",
+            "ctsoa_check": "CTS OA 待办查询",
+        }
+        answers: List[str] = []
+        for item in arguments:
+            script_id = str(item["script_id"])
+            label = labels.get(script_id, script_id)
+            if script_id not in available_ids:
+                answers.append(
+                    "{}失败：当前脚本目录中不存在 {}。".format(label, script_id)
+                )
+                continue
+            result = self.tool_runtime.execute("run_script", item, audit_context)
+            if not result.ok or not isinstance(result.data, dict):
+                answers.append(
+                    "{}失败：{}".format(
+                        label, result.error or "工具没有返回有效结果"
+                    )
+                )
+                continue
+            run_id = str(result.data.get("run_id", "")).strip()
+            status = str(result.data.get("status", "")).strip()
+            summary = str(result.data.get("summary", "")).strip()
+            if status == "skipped" and summary:
+                answers.append("{}：{}".format(label, summary))
+            elif run_id:
+                answers.append(
+                    "{}已提交，任务编号：{}。完成后会自动发送结果。".format(
+                        label, run_id
+                    )
+                )
+            else:
+                answers.append("{}：{}".format(label, summary or "任务已提交。"))
+        return self._finish(
+            user_id,
+            history,
+            question,
+            "\n".join(answers),
+            session_key=session_key,
+        )
+
     def _finish(
         self,
         user_id: Union[str, TenantContext],
@@ -700,6 +799,21 @@ class AgentService:
                 model = self.model_router.session(
                     self._mode_for(user_id), has_image=False
                 )
+            direct_integration = (
+                self._try_direct_integration_script_query(
+                    user_id,
+                    history,
+                    question,
+                    preset,
+                    model,
+                    has_image=bool(image_bytes),
+                    session_key=session_key,
+                )
+                if allow_tools
+                else None
+            )
+            if direct_integration is not None:
+                return direct_integration
             direct_todo = (
                 self._try_direct_todo_query(
                     user_id,

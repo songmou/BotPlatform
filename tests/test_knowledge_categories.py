@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-import sqlite3
 from pathlib import Path
 
 from src.core.services.drive import DriveService
 from src.core.services.knowledge import KnowledgeService
 from src.core.storage.tenants import TenantRegistry
-from src.core.storage.database import Database
 from src.core.modeling.contracts import EmbeddingError
 
 
@@ -181,116 +179,6 @@ class KnowledgeCategoryServiceTests(unittest.TestCase):
         self.assertIn("参考来源：", answer)
         self.assertIn("[1] 引用库 / 制度文本", answer)
 
-    def test_v19_migration_preserves_sources_chunks_and_embeddings(self) -> None:
-        path = self.root / "legacy.sqlite3"
-        tenant_id = "00000000-0000-0000-0000-000000000123"
-        connection = sqlite3.connect(str(path))
-        connection.executescript(
-            """
-            PRAGMA foreign_keys=ON;
-            CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-            INSERT INTO schema_migrations VALUES (19, '2026-01-01');
-            CREATE TABLE tenants(
-                tenant_id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL, deleting INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(bot_id, user_id)
-            );
-            CREATE TABLE conversation_context_messages(
-                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE conversation_events(
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                image INTEGER NOT NULL DEFAULT 0,
-                event_type TEXT NOT NULL DEFAULT 'message',
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE admin_roles(
-                role_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                permissions TEXT NOT NULL DEFAULT '[]',
-                builtin INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE knowledge_sources(
-                source_id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-                source_type TEXT NOT NULL, name TEXT NOT NULL, relative_path TEXT,
-                content_hash TEXT NOT NULL, status TEXT NOT NULL,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-            );
-            CREATE TABLE knowledge_chunks(
-                chunk_id TEXT PRIMARY KEY,
-                source_id TEXT NOT NULL REFERENCES knowledge_sources(source_id) ON DELETE CASCADE,
-                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-                position INTEGER NOT NULL, heading TEXT, content TEXT NOT NULL,
-                content_hash TEXT NOT NULL, locator TEXT
-            );
-            CREATE VIRTUAL TABLE knowledge_fts USING fts5(
-                chunk_id UNINDEXED, tenant_id UNINDEXED, heading, content, tokenize='trigram'
-            );
-            CREATE TABLE knowledge_embeddings(
-                chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(chunk_id) ON DELETE CASCADE,
-                model_id TEXT NOT NULL, dimensions INTEGER NOT NULL, vector BLOB NOT NULL,
-                content_hash TEXT NOT NULL, created_at TEXT NOT NULL
-            );
-            """
-        )
-        connection.execute(
-            "INSERT INTO tenants VALUES (?, 'ilink', 'legacy', '2026-01-01', 0)",
-            (tenant_id,),
-        )
-        connection.execute(
-            "INSERT INTO knowledge_sources VALUES "
-            "('source-1', ?, 'file', 'manual.md', 'manual.md', 'hash', "
-            "'ready', '2026-01-01', '2026-01-01')",
-            (tenant_id,),
-        )
-        connection.execute(
-            "INSERT INTO knowledge_chunks VALUES "
-            "('chunk-1', 'source-1', ?, 0, '', 'legacy text', 'chunk-hash', 'chunk:1')",
-            (tenant_id,),
-        )
-        connection.execute(
-            "INSERT INTO knowledge_fts VALUES ('chunk-1', ?, '', 'legacy text')",
-            (tenant_id,),
-        )
-        connection.execute(
-            "INSERT INTO knowledge_embeddings VALUES "
-            "('chunk-1', 'model', 1, ?, 'chunk-hash', '2026-01-01')",
-            (b"\x00\x00\x80?",),
-        )
-        connection.commit()
-        connection.close()
-
-        database = Database(path)
-        with database.read() as migrated:
-            source = migrated.execute(
-                "SELECT category_id, drive_path FROM knowledge_sources "
-                "WHERE source_id='source-1'"
-            ).fetchone()
-            self.assertEqual(source["category_id"], "tenant-default-" + tenant_id)
-            self.assertEqual(source["drive_path"], "workspace/manual.md")
-            self.assertEqual(
-                migrated.execute(
-                    "SELECT COUNT(*) FROM knowledge_chunks WHERE chunk_id='chunk-1'"
-                ).fetchone()[0],
-                1,
-            )
-            self.assertEqual(
-                migrated.execute(
-                    "SELECT COUNT(*) FROM knowledge_embeddings WHERE chunk_id='chunk-1'"
-                ).fetchone()[0],
-                1,
-            )
-
-
 if __name__ == "__main__":
     unittest.main()
 
@@ -306,6 +194,7 @@ class FakeEmbedding:
         self.model = model
         self._dimensions = dimensions
         self.fail = fail
+        self.calls = []
 
     @property
     def model_id(self) -> str:
@@ -320,6 +209,7 @@ class FakeEmbedding:
         return self._dimensions
 
     def embed(self, texts):
+        self.calls.append(list(texts))
         if self.fail:
             raise EmbeddingError("boom")
         return [
@@ -366,7 +256,17 @@ class KnowledgeVectorizationTests(unittest.TestCase):
         self.assertTrue(rows)
         for dim, fp in rows:
             self.assertEqual(dim, 8)
-            self.assertEqual(fp, self.embedding.fingerprint)
+            self.assertEqual(fp, self.service.embedding_fingerprint)
+
+    def test_embedding_text_includes_heading_and_versioned_fingerprint(self) -> None:
+        public = self.service.create_category("public", "标题测试")
+        self.service.add_text_to_category(
+            public["category_id"], "doc", "# 稀有标题\n\n正文没有标题关键词。"
+        )
+        embedded = "\n".join(text for call in self.embedding.calls for text in call)
+        self.assertIn("标题：稀有标题", embedded)
+        self.assertIn("正文：正文没有标题关键词。", embedded)
+        self.assertTrue(self.service.embedding_fingerprint.endswith("heading-body-v2"))
 
     def test_reembed_sources_forces_revectorize(self) -> None:
         public = self.service.create_category("public", "公共")
@@ -381,7 +281,7 @@ class KnowledgeVectorizationTests(unittest.TestCase):
         self.assertEqual(out["chunks"], result["chunks"])
         for dim, fp in self._embedding_rows(source_id):
             self.assertEqual(dim, 4)
-            self.assertEqual(fp, service2.embedding.fingerprint)
+            self.assertEqual(fp, service2.embedding_fingerprint)
         health = service2.embedding_health(None)
         self.assertEqual(health["stale"], 0)
         self.assertEqual(health["total"], result["chunks"])
@@ -396,7 +296,29 @@ class KnowledgeVectorizationTests(unittest.TestCase):
         self.assertEqual(out["completed"], result["chunks"])
         for dim, fp in self._embedding_rows(result["source_id"]):
             self.assertEqual(dim, 4)
-            self.assertEqual(fp, service2.embedding.fingerprint)
+            self.assertEqual(fp, service2.embedding_fingerprint)
+
+    def test_reindex_marks_fully_embedded_source_ready(self) -> None:
+        public = self.service.create_category("public", "重建状态")
+        result = self.service.add_text_to_category(
+            public["category_id"], "doc", "需要完成向量重建的正文。"
+        )
+        source_id = result["source_id"]
+        with self.registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM knowledge_embeddings WHERE chunk_id IN "
+                "(SELECT chunk_id FROM knowledge_chunks WHERE source_id=?)",
+                (source_id,),
+            )
+            connection.execute(
+                "UPDATE knowledge_sources SET status='pending_embedding' WHERE source_id=?",
+                (source_id,),
+            )
+
+        rebuilt = self.service.reindex(None, [public["category_id"]], force=True)
+
+        self.assertGreater(rebuilt["completed"], 0)
+        self.assertEqual(self._source_status(source_id)["status"], "ready")
 
     def test_embedding_health_reports_stale_after_model_change(self) -> None:
         public = self.service.create_category("public", "公共")
@@ -407,7 +329,7 @@ class KnowledgeVectorizationTests(unittest.TestCase):
         health = service2.embedding_health(None)
         self.assertEqual(health["total"], result["chunks"])
         self.assertEqual(health["stale"], result["chunks"])
-        self.assertNotEqual(health["current_fingerprint"], self.embedding.fingerprint)
+        self.assertNotEqual(health["current_fingerprint"], self.service.embedding_fingerprint)
 
     def test_reembed_without_embedding_raises(self) -> None:
         service_noemb = KnowledgeService(self.registry, None)

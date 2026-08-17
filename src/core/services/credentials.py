@@ -20,6 +20,7 @@ CREDENTIAL_RESOURCE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$")
 CREDENTIAL_RESOURCE_TYPES = {
     "channels",
     "integrations",
+    "workflow_http",
 }
 
 

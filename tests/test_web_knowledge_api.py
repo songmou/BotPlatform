@@ -218,3 +218,19 @@ class KnowledgeApiTest(WebApiTestBase):
             ).status_code,
             403,
         )
+
+    def test_drive_import_rejects_more_than_one_thousand_files(self):
+        category = self.client.post(
+            "/api/knowledge/categories",
+            json={"scope": "public", "name": "批量限制", "description": ""},
+        ).json()
+        response = self.client.post(
+            "/api/knowledge/from-drive",
+            json={
+                "category_id": category["category_id"],
+                "scope": "public",
+                "paths": ["doc-{}.md".format(index) for index in range(1001)],
+            },
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("1 到 1000", response.json()["detail"])

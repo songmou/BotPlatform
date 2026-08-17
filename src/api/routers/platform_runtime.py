@@ -278,6 +278,14 @@ def _knowledge_service(request: Request):
     return service
 
 
+def _require_platform_agent(request: Request, agent_id: str) -> None:
+    """Validate agents against the database-backed platform catalog."""
+    try:
+        get_resource_store(request).get_public("agents", agent_id)
+    except ResourceError as exc:
+        raise HTTPException(status_code=404, detail="智能体不存在") from exc
+
+
 @router.get("/agents/active", response_model=AgentOut)
 def get_active_agent(
     request: Request,
@@ -293,9 +301,7 @@ def get_agent_knowledge_categories(
     request: Request,
     principal=Depends(require_permission("knowledge.read")),
 ):
-    config = get_config(request)
-    if agent_id not in config.agents:
-        raise HTTPException(status_code=404, detail="智能体不存在")
+    _require_platform_agent(request, agent_id)
     service = _knowledge_service(request)
     return {"category_ids": service.get_agent_bindings(agent_id)}
 
@@ -307,9 +313,7 @@ def update_agent_knowledge_categories(
     request: Request,
     principal=Depends(require_permission("knowledge.manage")),
 ):
-    config = get_config(request)
-    if agent_id not in config.agents:
-        raise HTTPException(status_code=404, detail="智能体不存在")
+    _require_platform_agent(request, agent_id)
     service = _knowledge_service(request)
     try:
         category_ids = service.set_agent_bindings(agent_id, body.category_ids)
