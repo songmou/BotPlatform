@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,13 +19,19 @@ from unittest.mock import patch
 from src.core.config.loader import validate_mcp_server_entries
 from src.core.config.mcp_headers import (
     delete_secret,
+    delete_user_token,
     load_secret,
+    load_user_token,
     save_secret,
+    save_user_token,
 )
 from src.core.tooling import mcp_client as mcp_client_module
 from src.core.tooling.mcp_token_providers import (
     FeishuTatProvider,
+    FeishuUatProvider,
+    build_feishu_authorize_url,
     build_provider,
+    exchange_feishu_code,
 )
 
 
@@ -195,6 +202,245 @@ class KeychainSecretStorageTest(unittest.TestCase):
 
     def test_delete_missing_is_safe(self):
         delete_secret("never_existed")
+
+
+class _UrlRouter:
+    """Return canned responses keyed by a substring of the request URL."""
+
+    def __init__(self, mapping: dict) -> None:
+        self.mapping = mapping
+        self.requests = []
+
+    def __call__(self, request, timeout=None):
+        self.requests.append(request)
+        url = getattr(request, "full_url", str(request))
+        for key, payload in self.mapping.items():
+            if key in url:
+                return _FakeResponse(payload)
+        raise AssertionError("unexpected url: {}".format(url))
+
+
+class FeishuUatProviderTest(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self._file = Path(self._dir.name) / "mcp_headers.json"
+        patcher = patch(
+            "src.core.config.mcp_headers.MCP_HEADERS_FILE", self._file
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._dir.cleanup)
+
+    def test_missing_token_raises_actionable_error(self):
+        provider = FeishuUatProvider("feishu", "user1", "cli_x")
+        with patch(
+            "src.core.config.mcp_headers.load_secret", return_value="s3cr3t"
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(provider.get_headers())
+        self.assertIn("请先在面板完成飞书授权", str(ctx.exception))
+
+    def test_refreshes_expired_token(self):
+        # Seed an expired token + a usable refresh_token.
+        save_user_token(
+            "feishu",
+            "user1",
+            {
+                "access_token": "OLD",
+                "refresh_token": "REF",
+                "expires_at": 0.0,  # already expired
+            },
+        )
+        router = _UrlRouter(
+            {
+                "app_access_token": {"code": 0, "app_access_token": "APP", "expire": 7200},
+                "oidc/refresh_access_token": {
+                    "code": 0,
+                    "access_token": "UAT2",
+                    "refresh_token": "REF2",
+                    "expires_in": 7200,
+                },
+            }
+        )
+        with patch("urllib.request.urlopen", router), patch(
+            "src.core.config.mcp_headers.load_secret", return_value="s3cr3t"
+        ):
+            headers = asyncio.run(
+                FeishuUatProvider("feishu", "user1", "cli_x").get_headers()
+            )
+        self.assertEqual(headers, {"X-Lark-MCP-UAT": "UAT2"})
+        # Persisted token must be updated.
+        stored = load_user_token("feishu", "user1")
+        self.assertEqual(stored["access_token"], "UAT2")
+
+    def test_uses_cached_valid_token(self):
+        save_user_token(
+            "feishu",
+            "user1",
+            {
+                "access_token": "UAT1",
+                "refresh_token": "REF",
+                "expires_at": time.time() + 3600,
+            },
+        )
+        provider = FeishuUatProvider("feishu", "user1", "cli_x")
+        with patch("urllib.request.urlopen") as urlopen:
+            headers = asyncio.run(provider.get_headers())
+        self.assertEqual(headers, {"X-Lark-MCP-UAT": "UAT1"})
+        urlopen.assert_not_called()
+
+
+class FeishuOauthExchangeTest(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self._file = Path(self._dir.name) / "mcp_headers.json"
+        patcher = patch(
+            "src.core.config.mcp_headers.MCP_HEADERS_FILE", self._file
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._dir.cleanup)
+
+    def test_exchange_code_persists_uat(self):
+        router = _UrlRouter(
+            {
+                "app_access_token": {"code": 0, "app_access_token": "APP", "expire": 7200},
+                "oidc/access_token": {
+                    "code": 0,
+                    "access_token": "UAT",
+                    "refresh_token": "REF",
+                    "expires_in": 7200,
+                    "open_id": "ou_abc",
+                },
+            }
+        )
+        with patch("urllib.request.urlopen", router), patch(
+            "src.core.config.mcp_headers.load_secret", return_value="s3cr3t"
+        ):
+            payload = exchange_feishu_code("feishu", "user1", "cli_x", "AUTHCODE")
+        self.assertEqual(payload["access_token"], "UAT")
+        stored = load_user_token("feishu", "user1")
+        self.assertEqual(stored["access_token"], "UAT")
+        self.assertEqual(stored["open_id"], "ou_abc")
+
+    def test_exchange_code_error_raises(self):
+        router = _UrlRouter(
+            {
+                "app_access_token": {"code": 0, "app_access_token": "APP", "expire": 7200},
+                "oidc/access_token": {"code": 20005, "msg": "invalid code"},
+            }
+        )
+        with patch("urllib.request.urlopen", router), patch(
+            "src.core.config.mcp_headers.load_secret", return_value="s3cr3t"
+        ):
+            with self.assertRaises(RuntimeError):
+                exchange_feishu_code("feishu", "user1", "cli_x", "BADCODE")
+
+
+class BuildProviderUatTest(unittest.TestCase):
+    def test_feishu_uat_resolves_with_user_id(self):
+        provider = build_provider(
+            "feishu", {"kind": "feishu_uat", "app_id": "cli_x"}, user_id="user1"
+        )
+        self.assertIsInstance(provider, FeishuUatProvider)
+        self.assertEqual(provider._user_id, "user1")
+        self.assertEqual(provider._app_id, "cli_x")
+
+    def test_feishu_uat_without_user_id_raises(self):
+        with self.assertRaises(RuntimeError):
+            build_provider("feishu", {"kind": "feishu_uat", "app_id": "cli_x"})
+
+
+class FeishuAuthorizeUrlTest(unittest.TestCase):
+    def test_builds_url_with_params(self):
+        url = build_feishu_authorize_url("cli_x", "https://x/cb", "st4te")
+        self.assertIn("open.feishu.cn", url)
+        self.assertIn("app_id=cli_x", url)
+        self.assertIn("redirect_uri=", url)
+        self.assertIn("state=st4te", url)
+
+
+class KeychainUserTokenStorageTest(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self._file = Path(self._dir.name) / "mcp_headers.json"
+        patcher = patch(
+            "src.core.config.mcp_headers.MCP_HEADERS_FILE", self._file
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._dir.cleanup)
+
+    def test_user_token_roundtrip(self):
+        self.assertIsNone(load_user_token("feishu", "user1"))
+        save_user_token(
+            "feishu", "user1", {"access_token": "UAT", "refresh_token": "REF"}
+        )
+        loaded = load_user_token("feishu", "user1")
+        self.assertEqual(loaded["access_token"], "UAT")
+        # Different user must not collide.
+        self.assertIsNone(load_user_token("feishu", "user2"))
+        delete_user_token("feishu", "user1")
+        self.assertIsNone(load_user_token("feishu", "user1"))
+
+
+class McpClientUserScopingTest(unittest.TestCase):
+    def test_server_ids_collapses_user_keys(self):
+        from types import SimpleNamespace
+
+        mgr = mcp_client_module.McpClientManager()
+        fake = SimpleNamespace(
+            server_id="feishu",
+            session=object(),
+            tools={"feishu__get-user": {"real_name": "get-user"}},
+            cfg={},
+        )
+        mgr._connections = {("feishu", ""): fake, ("feishu", "user1"): fake}
+        self.assertEqual(mgr.server_ids(), ["feishu"])
+
+    def test_resolve_target_prefers_user_connection(self):
+        from types import SimpleNamespace
+
+        mgr = mcp_client_module.McpClientManager()
+        shared = SimpleNamespace(
+            server_id="feishu",
+            session="shared-session",
+            tools={"feishu__get-user": {"real_name": "get-user"}},
+            cfg={},
+        )
+        user = SimpleNamespace(
+            server_id="feishu",
+            session="user-session",
+            tools={"feishu__get-user": {"real_name": "get-user"}},
+            cfg={},
+        )
+        mgr._connections = {("feishu", ""): shared, ("feishu", "user1"): user}
+        target = mgr._resolve_target("feishu__get-user", user_id="user1")
+        self.assertEqual(target[1], "user-session")
+        fallback = mgr._resolve_target("feishu__get-user")
+        self.assertEqual(fallback[1], "shared-session")
+
+    def test_resolve_target_never_borrows_another_users_connection(self):
+        from types import SimpleNamespace
+
+        user = SimpleNamespace(
+            server_id="feishu",
+            session="user-one-session",
+            tools={"feishu__get-user": {"real_name": "get-user"}},
+            cfg={},
+        )
+        mgr = mcp_client_module.McpClientManager()
+        mgr._connections = {("feishu", "user1"): user}
+        self.assertIsNone(
+            mgr._resolve_target("feishu__get-user", user_id="user2")
+        )
+
+    def test_is_disconnected_recognizes_timeout(self):
+        self.assertTrue(mcp_client_module._is_disconnected(TimeoutError("30s")))
+        # TimeoutError wrapped in an anyio ExceptionGroup must also be detected.
+        group = RuntimeError("unhandled errors in a TaskGroup (1 sub-exception)")
+        group.exceptions = [TimeoutError("30s")]
+        self.assertTrue(mcp_client_module._is_disconnected(group))
 
 
 if __name__ == "__main__":

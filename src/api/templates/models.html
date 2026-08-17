@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}模型管理 - BotPlatform{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/models.css?v=20260806a">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/models.css?v=20260814a">{% endblock %}
 {% block content %}
 <div class="page-container">
     <div class="page-header">
@@ -99,6 +99,8 @@
                     <option value="">全部来源</option>
                     <option value="web">Web</option>
                     <option value="wechat">微信</option>
+                    <option value="wecom">企业微信</option>
+                    <option value="feishu">飞书</option>
                     <option value="schedule">定时任务</option>
                     <option value="internal">内部任务</option>
                 </select>
@@ -120,7 +122,7 @@
         <div class="analytics-card">
             <div class="card-title-row">
                 <h3>运行明细</h3>
-                <small>只展示元数据，不保存提示词、回答或推理内容</small>
+                <small>点击运行记录查看每次模型调用的完整输入与输出</small>
             </div>
             <div class="table-scroll"><table class="data-table">
                 <thead><tr><th>时间</th><th>来源</th><th>智能体</th><th>状态</th><th>调用</th><th>Token</th><th>成本</th></tr></thead>
@@ -326,6 +328,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/models.js?v=20260806d"></script>
+<script src="/static/js/models.js?v=20260814a"></script>
 <script>initModels();</script>
 {% endblock %}

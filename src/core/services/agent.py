@@ -688,7 +688,7 @@ class AgentService:
         self, user_id: Union[str, TenantContext], question: str,
         image_bytes: Optional[bytes] = None,
         agent_id: Optional[str] = None,
-        source: str = "wechat",
+        source: str = "internal",
         conversation_id: Optional[str] = None,
         allow_tools: bool = True,
         allow_private_context: bool = True,

@@ -565,6 +565,27 @@ function initModels() {
         return analyticsCurrency + " " + ((micros || 0) / 1000000).toFixed(6);
     }
 
+    function sourceLabel(source) {
+        return {
+            web: "Web",
+            wechat: "微信",
+            wecom: "企业微信",
+            feishu: "飞书",
+            schedule: "定时任务",
+            internal: "内部任务",
+        }[source] || source || "未知";
+    }
+
+    function statusLabel(status) {
+        return {
+            running: "运行中",
+            success: "成功",
+            partial: "部分成功",
+            failed: "失败",
+            cancelled: "已取消",
+        }[status] || status || "未知";
+    }
+
     function statCard(label, value, hint) {
         return '<div class="analytics-stat"><span>' + escapeHtml(label) + '</span><strong>' +
             escapeHtml(String(value)) + '</strong><small>' + escapeHtml(hint || "") + '</small></div>';
@@ -616,8 +637,8 @@ function initModels() {
         document.getElementById("model-runs-body").innerHTML = runs.length ? runs.map(function (r) {
             return '<tr data-run-id="' + escapeHtml(r.run_id) + '"><td>' +
                 escapeHtml(new Date(r.started_at).toLocaleString()) + '</td><td>' +
-                escapeHtml(r.source) + '</td><td>' + escapeHtml(r.agent_id || "—") + '</td><td>' +
-                escapeHtml(r.status) + '</td><td>' + r.call_count + '</td><td>' +
+                escapeHtml(sourceLabel(r.source)) + '</td><td>' + escapeHtml(r.agent_id || "—") + '</td><td>' +
+                escapeHtml(statusLabel(r.status)) + '</td><td>' + r.call_count + '</td><td>' +
                 (r.input_tokens + r.output_tokens) + '</td><td>' +
                 escapeHtml(formatCost(r.cost_micros)) + (r.unpriced_calls ? " ⚠" : "") + '</td></tr>';
         }).join("") : '<tr><td colspan="7" class="empty-state">暂无运行记录</td></tr>';
@@ -639,18 +660,120 @@ function initModels() {
             '<span>反馈样本：<strong>' + o.feedback_count + '</strong></span>';
     }
 
+    function traceJson(value) {
+        var serialized;
+        try {
+            serialized = JSON.stringify(value, null, 2);
+        } catch (_err) {
+            serialized = String(value);
+        }
+        return '<pre class="trace-pre">' + escapeHtml(serialized || "") + '</pre>';
+    }
+
+    function traceMessage(message) {
+        var role = {
+            system: "系统",
+            user: "用户",
+            assistant: "模型",
+            tool: "工具",
+        }[message.role] || message.role || "未知";
+        var html = '<div class="trace-message"><div class="trace-message-head"><strong>' +
+            escapeHtml(role) + '</strong>';
+        if (message.tool_call_id) {
+            html += '<span>调用 ID：' + escapeHtml(message.tool_call_id) + '</span>';
+        }
+        html += '</div>';
+        if (message.content) {
+            html += '<pre class="trace-pre trace-content">' + escapeHtml(message.content) + '</pre>';
+        } else {
+            html += '<div class="trace-empty">无文字内容</div>';
+        }
+        if (message.tool_calls && message.tool_calls.length) {
+            html += '<div class="trace-subsection"><strong>工具调用</strong>' +
+                traceJson(message.tool_calls) + '</div>';
+        }
+        if (message.extensions && Object.keys(message.extensions).length) {
+            html += '<div class="trace-subsection"><strong>扩展字段</strong>' +
+                traceJson(message.extensions) + '</div>';
+        }
+        return html + '</div>';
+    }
+
+    function traceInput(request) {
+        if (!request) {
+            return '<div class="trace-legacy">该记录创建于内容采集启用前，无法还原模型输入。</div>';
+        }
+        var messages = request.messages || [];
+        var html = messages.length ? messages.map(traceMessage).join("") :
+            '<div class="trace-empty">没有消息内容</div>';
+        if (request.tools && request.tools.length) {
+            html += '<div class="trace-subsection"><strong>可用工具定义</strong>' +
+                traceJson(request.tools) + '</div>';
+        }
+        html += '<div class="trace-subsection trace-inline-meta"><strong>生成参数</strong>' +
+            traceJson(request.generation || {}) + '</div>';
+        if (request.image && request.image.present) {
+            html += '<div class="trace-image-meta">附带图片 · ' +
+                escapeHtml(String(request.image.size_bytes || 0)) + ' 字节（未保存图片内容）</div>';
+        }
+        return html;
+    }
+
+    function traceOutput(response, errorMessage, hasRequest) {
+        var html = "";
+        if (response) {
+            html += traceMessage(response.message || {});
+            html += '<div class="trace-response-meta"><span>实际模型：' +
+                escapeHtml(response.actual_model || "—") + '</span><span>结束原因：' +
+                escapeHtml(response.finish_reason || "—") + '</span><span>请求 ID：' +
+                escapeHtml(response.request_id || "—") + '</span></div>';
+        } else if (!hasRequest) {
+            html += '<div class="trace-legacy">该记录创建于内容采集启用前，无法还原模型输出。</div>';
+        } else {
+            html += '<div class="trace-empty">模型未返回可记录的响应内容</div>';
+        }
+        if (errorMessage) {
+            html += '<div class="trace-error"><strong>调用错误</strong><pre class="trace-pre">' +
+                escapeHtml(errorMessage) + '</pre></div>';
+        }
+        return html;
+    }
+
+    function traceCall(call, index, total) {
+        var flags = [];
+        if (call.is_retry) flags.push("重试");
+        if (call.is_fallback) flags.push("模型切换");
+        var open = index === 0 || index === total - 1 ? " open" : "";
+        var cost = call.cost_micros === null || call.cost_micros === undefined ?
+            (call.cost_status || "未计价") :
+            (formatCost(call.cost_micros) + " · " + (call.cost_status || "已计价"));
+        return '<details class="model-call-card"' + open + '><summary>' +
+            '<span class="call-sequence">#' + call.sequence + '</span>' +
+            '<span class="call-model">' + escapeHtml(call.profile_id + " / " +
+                (call.actual_model || call.configured_model)) + '</span>' +
+            '<span>' + escapeHtml(call.operation) + '</span>' +
+            (flags.length ? '<span class="call-flags">' + escapeHtml(flags.join(" · ")) + '</span>' : "") +
+            '<span class="call-status call-status-' + escapeHtml(call.status) + '">' +
+                escapeHtml(statusLabel(call.status)) + '</span>' +
+            '<span>' + call.duration_ms + ' ms</span><span>' +
+                ((call.input_tokens || 0) + (call.output_tokens || 0)) + ' Token</span><span>' +
+                escapeHtml(cost) + '</span></summary>' +
+            '<div class="model-call-content"><section><h4>模型输入</h4>' +
+                traceInput(call.request) + '</section><section><h4>模型输出</h4>' +
+                traceOutput(call.response, call.error_message, !!call.request) +
+            '</section></div></details>';
+    }
+
     function openRunDetail(runId) {
         fetchJson("/api/model-analytics/runs/" + encodeURIComponent(runId)).then(function (run) {
             var calls = run.calls || [];
             var html = '<div class="run-meta"><span>运行：' + escapeHtml(run.run_id) + '</span>' +
-                '<span>来源：' + escapeHtml(run.source) + '</span><span>状态：' + escapeHtml(run.status) + '</span></div>' +
-                '<table class="data-table"><thead><tr><th>#</th><th>操作</th><th>模型</th><th>状态</th><th>耗时</th><th>Token</th><th>成本状态</th></tr></thead><tbody>' +
-                calls.map(function (c) {
-                    return '<tr><td>' + c.sequence + (c.is_retry ? " 重试" : "") + (c.is_fallback ? " 切换" : "") +
-                        '</td><td>' + escapeHtml(c.operation) + '</td><td>' + escapeHtml(c.profile_id + " / " + (c.actual_model || c.configured_model)) +
-                        '</td><td>' + escapeHtml(c.status) + '</td><td>' + c.duration_ms + ' ms</td><td>' +
-                        ((c.input_tokens || 0) + (c.output_tokens || 0)) + '</td><td>' + escapeHtml(c.cost_status) + '</td></tr>';
-                }).join("") + '</tbody></table>';
+                '<span>来源：' + escapeHtml(sourceLabel(run.source)) + '</span><span>状态：' +
+                escapeHtml(statusLabel(run.status)) + '</span><span>智能体：' +
+                escapeHtml(run.agent_id || "—") + '</span></div>' +
+                (calls.length ? '<div class="model-call-chain">' + calls.map(function (call, index) {
+                    return traceCall(call, index, calls.length);
+                }).join("") + '</div>' : '<div class="empty-state">该运行没有模型调用记录</div>');
             document.getElementById("run-detail-content").innerHTML = html;
             document.getElementById("run-detail-modal").style.display = "";
         }).catch(function (err) { showToast(err.message, "error"); });

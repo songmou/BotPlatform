@@ -61,8 +61,19 @@ def _sync(request: Request, entries: list) -> None:
         raise HTTPException(status_code=400, detail=str(exc))
     _save(entries)
     ds_service = getattr(request.app.state, "datasource_service", None)
-    if ds_service is not None:
-        ds_service.reload(merge_passwords(entries))
+    if ds_service is None:
+        # The panel started with no datasource configured, so the service
+        # singleton was never created at startup. Bootstrap it lazily here,
+        # otherwise a runtime-added datasource could never be used by the
+        # tables/schema/query endpoints (they raise "数据源服务未配置").
+        from src.core.datasource import DataSourceService
+
+        ds_service = DataSourceService()
+        request.app.state.datasource_service = ds_service
+        tool_runtime = getattr(request.app.state, "tool_runtime", None)
+        if tool_runtime is not None:
+            tool_runtime.datasource_service = ds_service
+    ds_service.reload(merge_passwords(entries))
 
 
 def _to_out(entry: dict) -> DatasourceOut:

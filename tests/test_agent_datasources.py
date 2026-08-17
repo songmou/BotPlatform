@@ -298,5 +298,104 @@ class OrganizationAgentDatasourceTest(WebApiTestBase):
         self.assertIn("ghost_db", created.json()["detail"])
 
 
+# ---------------------------------------------------------------------------
+# F. Runtime bootstrap regression test.
+#
+# When the panel starts with no datasource configured, ``app.state.datasource_service``
+# is ``None`` (the startup guards in web.py / bootstrap.py only create the service if
+# ``config.datasources`` is truthy). The bug: adding a datasource at runtime via the
+# UI went through ``_sync()``, whose ``if ds_service is not None`` guard skipped the
+# reload, so the service stayed ``None`` and ``GET /api/datasources/{id}/tables``
+# returned ``{"detail":"数据源服务未配置"}``. Test connection worked because it
+# instantiates ``DataSourceService()`` locally. This test pins the lazy bootstrap.
+# ---------------------------------------------------------------------------
+
+
+class DatasourceServiceBootstrapTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from src.api.routers import datasources as ds_router
+        from src.core.config import datasource_secrets
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp_dir = Path(self._tmp.name)
+        self._orig_ds_file = ds_router.DATASOURCES_FILE
+        self._orig_secret_file = datasource_secrets.DATASOURCE_SECRETS_FILE
+        ds_router.DATASOURCES_FILE = tmp_dir / "datasources.json"
+        datasource_secrets.DATASOURCE_SECRETS_FILE = (
+            tmp_dir / "datasource_secrets.json"
+        )
+        self.addCleanup(
+            lambda: setattr(ds_router, "DATASOURCES_FILE", self._orig_ds_file)
+        )
+        self.addCleanup(
+            lambda: setattr(
+                datasource_secrets,
+                "DATASOURCE_SECRETS_FILE",
+                self._orig_secret_file,
+            )
+        )
+
+    def _fake_request(self, with_tool_runtime=False):
+        from types import SimpleNamespace
+
+        class _Config:
+            def update_datasources(self, entries):
+                pass
+
+        state = SimpleNamespace(
+            datasource_service=None,
+            tool_runtime=SimpleNamespace() if with_tool_runtime else None,
+            config=_Config(),
+        )
+        app = SimpleNamespace(state=state)
+        request = SimpleNamespace(app=app)
+        return request
+
+    def _pg_entry(self, ds_id):
+        return {
+            "id": ds_id,
+            "name": "PG",
+            "engine": "postgresql",
+            "host": "localhost",
+            "port": 5432,
+            "database": "app",
+            "username": "u",
+            "password": "p",
+        }
+
+    def test_sync_bootstraps_service_when_none(self):
+        from src.api.routers import datasources as ds_router
+        from src.core.datasource.service import DataSourceService
+
+        request = self._fake_request()
+        # Reproduces the startup state: no service singleton yet.
+        self.assertIsNone(request.app.state.datasource_service)
+
+        ds_router._sync(request, [self._pg_entry("pg1")])
+
+        self.assertIsInstance(
+            request.app.state.datasource_service, DataSourceService
+        )
+        # The just-added datasource must be reachable through the service.
+        self.assertEqual(
+            request.app.state.datasource_service.get_config("pg1")["id"], "pg1"
+        )
+
+    def test_sync_propagates_to_tool_runtime(self):
+        from src.api.routers import datasources as ds_router
+
+        request = self._fake_request(with_tool_runtime=True)
+        ds_router._sync(request, [self._pg_entry("pg2")])
+
+        self.assertIs(
+            request.app.state.tool_runtime.datasource_service,
+            request.app.state.datasource_service,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

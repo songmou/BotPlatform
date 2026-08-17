@@ -12,9 +12,12 @@ from zoneinfo import ZoneInfo
 
 from src.core.config.loader import ModelProfile, ProjectConfig
 from src.core.modeling import (
+    CanonicalMessage,
     ModelCallContext,
     ModelError,
     ModelIdentity,
+    ModelRequest,
+    ModelResponse,
     ModelUsage,
 )
 from src.core.storage.tenants import TenantRegistry
@@ -27,6 +30,15 @@ FEEDBACK_REASONS = {
     "工具执行失败",
     "响应过慢",
     "其他",
+}
+
+MODEL_RUN_SOURCES = {
+    "wechat",
+    "wecom",
+    "feishu",
+    "web",
+    "schedule",
+    "internal",
 }
 
 
@@ -53,7 +65,7 @@ def _percentile(values: Iterable[int], percentile: float) -> Optional[int]:
 
 
 class ModelAnalyticsStore:
-    """Record metadata-only model telemetry and expose aggregate queries."""
+    """Record model telemetry and expose aggregate and call-detail queries."""
 
     def __init__(self, registry: TenantRegistry, config: ProjectConfig) -> None:
         self.registry = registry
@@ -75,7 +87,7 @@ class ModelAnalyticsStore:
         agent_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
     ) -> str:
-        if source not in {"wechat", "web", "schedule", "internal"}:
+        if source not in MODEL_RUN_SOURCES:
             source = "internal"
         identifier = run_id or str(uuid.uuid4())
         with self.registry.database.transaction(immediate=True) as connection:
@@ -126,6 +138,8 @@ class ModelAnalyticsStore:
         finish_reason: Optional[str] = None,
         first_token_seconds: Optional[float] = None,
         error: Optional[BaseException] = None,
+        request: Optional[ModelRequest] = None,
+        response: Optional[ModelResponse] = None,
     ) -> None:
         run_id = context.run_id or str(uuid.uuid4())
         call_status = {"成功": "success", "失败": "failed", "取消": "cancelled"}.get(
@@ -149,7 +163,7 @@ class ModelAnalyticsStore:
                     context.tenant_id,
                     context.user_id,
                     context.source
-                    if context.source in {"wechat", "web", "schedule", "internal"}
+                    if context.source in MODEL_RUN_SOURCES
                     else "internal",
                     context.agent_id,
                     context.conversation_id,
@@ -213,6 +227,9 @@ class ModelAnalyticsStore:
                 *prices,
                 cost_micros,
                 cost_status,
+                self._request_json(request),
+                self._response_json(response),
+                self._safe_error_message(error),
             )
             connection.execute(
                 "INSERT INTO model_calls("
@@ -225,6 +242,7 @@ class ModelAnalyticsStore:
                 " input_price_micros_per_million, cached_input_price_micros_per_million,"
                 " output_price_micros_per_million,"
                 " reasoning_output_price_micros_per_million, cost_micros, cost_status"
+                ", request_json, response_json, error_message"
                 ") VALUES ({})".format(",".join("?" for _ in values)),
                 values,
             )
@@ -242,6 +260,90 @@ class ModelAnalyticsStore:
             )
         if cost_micros is not None and cost_micros >= 0:
             self.refresh_budget_alerts(now)
+
+    @staticmethod
+    def _message_payload(message: CanonicalMessage) -> Dict[str, Any]:
+        return {
+            "role": message.role,
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                }
+                for call in message.tool_calls
+            ],
+            "tool_call_id": message.tool_call_id,
+            "extensions": message.extensions,
+        }
+
+    @staticmethod
+    def _usage_payload(usage: Optional[ModelUsage]) -> Optional[Dict[str, Any]]:
+        if usage is None:
+            return None
+        return {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "uncached_input_tokens": usage.uncached_input_tokens,
+            "reasoning_output_tokens": usage.reasoning_output_tokens,
+        }
+
+    @staticmethod
+    def _json_text(payload: Dict[str, Any]) -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    @classmethod
+    def _request_json(cls, request: Optional[ModelRequest]) -> Optional[str]:
+        if request is None:
+            return None
+        return cls._json_text(
+            {
+                "messages": [cls._message_payload(item) for item in request.messages],
+                "tools": request.tools,
+                "image": (
+                    {"present": True, "size_bytes": len(request.image)}
+                    if request.image is not None
+                    else None
+                ),
+                "generation": {
+                    "temperature": request.generation.temperature,
+                    "max_tokens": request.generation.max_tokens,
+                    "reasoning": request.generation.reasoning,
+                },
+            }
+        )
+
+    @classmethod
+    def _response_json(cls, response: Optional[ModelResponse]) -> Optional[str]:
+        if response is None:
+            return None
+        return cls._json_text(
+            {
+                "message": cls._message_payload(response.message),
+                "actual_model": response.actual_model,
+                "usage": cls._usage_payload(response.usage),
+                "request_id": response.request_id,
+                "finish_reason": response.finish_reason,
+            }
+        )
+
+    @staticmethod
+    def _safe_error_message(error: Optional[BaseException]) -> Optional[str]:
+        if error is None:
+            return None
+        if isinstance(error, ModelError):
+            return error.safe_message
+        if isinstance(error, GeneratorExit):
+            return "客户端已取消模型调用"
+        return "模型调用失败（{}）".format(error.__class__.__name__[:80])
 
     @staticmethod
     def _error_category(error: Optional[BaseException]) -> Optional[str]:
@@ -507,7 +609,19 @@ class ModelAnalyticsStore:
                 (run_id,),
             ).fetchall()
         result = dict(run)
-        result["calls"] = [dict(row) for row in calls]
+        result["calls"] = []
+        for row in calls:
+            call = dict(row)
+            for field, public_field in (
+                ("request_json", "request"),
+                ("response_json", "response"),
+            ):
+                raw = call.pop(field, None)
+                try:
+                    call[public_field] = json.loads(raw) if raw else None
+                except (TypeError, ValueError):
+                    call[public_field] = None
+            result["calls"].append(call)
         result["feedback"] = [
             {
                 **dict(row),

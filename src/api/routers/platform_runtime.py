@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import sys
 import traceback
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from src.api.deps import (
@@ -504,3 +506,124 @@ def invoke_mcp_server_tool(
     except Exception as exc:  # noqa: BLE001 - surface to the UI
         return {"ok": False, "error": _describe_error(exc, "调用工具")}
     return {"ok": True, "result": result}
+
+
+# --------------------------------------------------------------------------- #
+# Feishu user-delegated token (UAT) OAuth flow
+# --------------------------------------------------------------------------- #
+# The platform supports two Feishu auth modes: the app-level TAT (auto-refreshed
+# from app_id + app_secret, sufficient for app-context tools) and the
+# user-delegated UAT (required by user-context tools such as get-user /
+# list-docs).  The UAT is obtained via the operator completing this OAuth flow;
+# the resulting token is stored per (server, user) in the keychain.
+FEISHU_SERVER_ID = "feishu"
+
+
+def _feishu_server_cfg(store) -> Dict[str, Any]:
+    """Return the Feishu MCP server config from the catalog, or 404."""
+    try:
+        return _find_mcp_server(store, FEISHU_SERVER_ID)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="未找到飞书 MCP 服务，请先在平台创建飞书集成")
+
+
+def _feishu_app_id(cfg: Dict[str, Any]) -> str:
+    app_id = (cfg.get("token_provider") or {}).get("app_id")
+    if not app_id:
+        raise HTTPException(
+            status_code=400,
+            detail="飞书集成未配置 app_id（token_provider.app_id），无法发起授权",
+        )
+    return str(app_id)
+
+
+@router.get("/feishu-oauth/authorize-url")
+def feishu_oauth_authorize_url(
+    request: Request,
+    redirect_uri: str,
+    server_id: str = FEISHU_SERVER_ID,
+    _principal=Depends(require_permission("panel.write")),
+):
+    """Return the Feishu OAuth URL the operator opens to grant a UAT.
+
+    ``redirect_uri`` must equal the redirect URI registered for the Feishu app
+    and point back at this endpoint's ``/callback`` path.
+    """
+    from src.core.tooling.mcp_token_providers import build_feishu_authorize_url
+
+    cfg = _feishu_server_cfg(get_resource_store(request))
+    token_provider = cfg.get("token_provider") or {}
+    if token_provider.get("kind") not in ("feishu_uat", None):
+        raise HTTPException(
+            status_code=400,
+            detail="当前飞书集成未使用 UAT 模式（token_provider.kind=feishu_uat），"
+            "请先在集成配置中切换为 UAT 模式再授权",
+        )
+    app_id = _feishu_app_id(cfg)
+    state = secrets.token_urlsafe(16)
+    url = build_feishu_authorize_url(app_id, redirect_uri, state)
+    return {"authorize_url": url, "state": state}
+
+
+@router.get("/feishu-oauth/callback", response_class=HTMLResponse)
+def feishu_oauth_callback(
+    request: Request,
+    code: str,
+    state: str = "",
+    server_id: str = FEISHU_SERVER_ID,
+    principal=Depends(require_permission("panel.write")),
+):
+    """Handle the Feishu OAuth redirect: exchange the code for a UAT and store it.
+
+    The UAT is bound to the authenticated operator (``principal.user.user_id``).
+    After storage the server is connected for that user so its tools are
+    discovered and subsequent calls use the UAT.
+    """
+    from src.core.tooling.mcp_token_providers import exchange_feishu_code
+
+    user_id = principal.user.user_id
+    cfg = _feishu_server_cfg(get_resource_store(request))
+    app_id = _feishu_app_id(cfg)
+    try:
+        payload = exchange_feishu_code(server_id, user_id, app_id, code)
+    except Exception as exc:  # noqa: BLE001 - show the operator what went wrong
+        logger.warning("飞书 OAuth 回调失败（用户 %s）：%s", user_id, exc)
+        return HTMLResponse(
+            _feishu_oauth_result_page(
+                False, "飞书授权失败：{}".format(str(exc).splitlines()[0] if str(exc) else "未知错误")
+            )
+        )
+    manager = _ensure_manager(request)
+    if manager is not None:
+        try:
+            manager.connect_server(cfg, user_id=user_id)
+        except Exception as exc:  # noqa: BLE001 - non-fatal; tools appear next call
+            logger.warning("飞书 UAT 授权后连接失败（用户 %s）：%s", user_id, exc)
+    return HTMLResponse(
+        _feishu_oauth_result_page(
+            True,
+            "飞书授权成功，已以你的身份绑定访问令牌（UAT）。现在可以正常使用飞书用户态工具（如查看文档、查询用户）。",
+        )
+    )
+
+
+def _feishu_oauth_result_page(success: bool, message: str) -> str:
+    """Minimal HTML page shown to the operator after the OAuth redirect."""
+    title = "飞书授权成功" if success else "飞书授权失败"
+    color = "#1677ff" if success else "#d4380d"
+    return (
+        "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>{title}</title></head><body style='font-family:system-ui,"
+        "sans-serif;display:flex;align-items:center;justify-content:center;"
+        "height:100vh;margin:0;background:#f5f5f5'>"
+        "<div style='background:#fff;padding:32px 40px;border-radius:12px;"
+        "box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:480px;text-align:center'>"
+        "<div style='font-size:40px;margin-bottom:12px'>{emoji}</div>"
+        "<h2 style='color:{color};margin:0 0 12px'>{title}</h2>"
+        "<p style='color:#333;line-height:1.6;margin:0 0 20px'>{message}</p>"
+        "<button onclick='window.close()' style='background:{color};color:#fff;"
+        "border:none;padding:10px 24px;border-radius:8px;cursor:pointer;"
+        "font-size:14px'>关闭</button>"
+        "</div></body></html>"
+    ).format(title=title, color=color, message=message, emoji="✅" if success else "⚠️")

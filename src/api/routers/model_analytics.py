@@ -13,6 +13,7 @@ from fastapi.responses import Response
 
 from src.api.deps import get_model_analytics_store, require_permission
 from src.api.schemas import ModelBudgetIn, ModelFeedbackIn
+from src.core.storage.model_analytics import MODEL_RUN_SOURCES
 
 
 router = APIRouter(tags=["model-analytics"])
@@ -55,7 +56,7 @@ def _filters(
     status: Optional[str],
 ) -> Dict[str, Any]:
     start, end = _range(date_from, date_to)
-    if source and source not in {"wechat", "web", "schedule", "internal"}:
+    if source and source not in MODEL_RUN_SOURCES:
         raise HTTPException(status_code=400, detail="调用来源无效")
     if status and status not in {
         "running",

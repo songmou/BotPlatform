@@ -352,7 +352,7 @@ class FakeMcpManager:
             return None
         return {"description": "离线 ping 测试", "parameters": {"type": "object", "properties": {}}}
 
-    def call_tool(self, name, arguments):
+    def call_tool(self, name, arguments, user_id=None):
         self.calls.append((name, arguments))
         return "pong:{}".format(name)
 
