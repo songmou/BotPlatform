@@ -49,7 +49,7 @@ from src.core.services.organization_controls import OrganizationControlStore
 from src.core.services.organization_schedule_tool import OrganizationScheduleToolService
 from src.core.services.resources import ScopedResourceStore
 from src.core.storage.organizations import OrganizationStore
-from src.core.storage.tenants import TenantContext, TenantRegistry
+from src.core.storage.tenants import TenantContext
 
 
 SOURCE_CONFIG = Path(__file__).resolve().parents[1] / "config"

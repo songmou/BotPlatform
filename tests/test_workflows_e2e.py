@@ -34,10 +34,21 @@ class WorkflowE2EClient(FakeClient):
                 "inputs": [], "outputs": [],
                 "triggers": [{"id": "manual", "type": "manual", "config": {}}],
                 "nodes": [
-                    {"id": "start", "type": "start", "name": "开始", "position": {"x": 100, "y": 220}, "config": {}, "error_policy": {"mode": "stop"}},
-                    {"id": "end", "type": "end", "name": "结束", "position": {"x": 520, "y": 220}, "config": {"output": {}}, "error_policy": {"mode": "stop"}},
+                    {
+                        "id": "start", "type": "start", "name": "开始",
+                        "position": {"x": 100, "y": 220}, "config": {}, "error_policy": {"mode": "stop"},
+                    },
+                    {
+                        "id": "end", "type": "end", "name": "结束",
+                        "position": {"x": 520, "y": 220}, "config": {"output": {}}, "error_policy": {"mode": "stop"},
+                    },
                 ],
-                "edges": [{"id": "start_end", "source": "start", "source_port": "default", "target": "end", "target_port": "default"}],
+                "edges": [
+                    {
+                        "id": "start_end", "source": "start", "source_port": "default",
+                        "target": "end", "target_port": "default",
+                    },
+                ],
                 "settings": {"timeout_seconds": 86400, "max_steps": 500},
             }
             return ModelResponse(
@@ -208,7 +219,9 @@ class WorkflowEditorE2ETests(unittest.TestCase):
 
         # Existing edge is selectable and keyboard-deletable.
         edge = self.page.locator(".workflow-edge-hit")
-        edge.evaluate("element => element.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerId: 1}))")
+        edge.evaluate(
+            "element => element.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerId: 1}))"
+        )
         self.assertEqual(self.page.locator(".workflow-edge.selected").count(), 1)
         self.page.keyboard.press("Delete")
         self.assertEqual(self.page.locator(".workflow-edge-hit").count(), 0)
@@ -228,8 +241,14 @@ class WorkflowEditorE2ETests(unittest.TestCase):
         self.page.locator('[data-config-key="text"]').press("Tab")
 
         # Output-port drag creates start -> template -> end edges.
-        self._drag_port('[data-node-id="start"] .workflow-port.out[data-port="default"]', '[data-node-id="template"] .workflow-port.in')
-        self._drag_port('[data-node-id="template"] .workflow-port.out[data-port="default"]', '[data-node-id="end"] .workflow-port.in')
+        self._drag_port(
+            '[data-node-id="start"] .workflow-port.out[data-port="default"]',
+            '[data-node-id="template"] .workflow-port.in',
+        )
+        self._drag_port(
+            '[data-node-id="template"] .workflow-port.out[data-port="default"]',
+            '[data-node-id="end"] .workflow-port.in',
+        )
         self.assertEqual(self.page.locator(".workflow-edge-hit").count(), 2)
         self.page.locator('[data-node-id="end"]').click()
         self.assertEqual(
@@ -261,7 +280,10 @@ class WorkflowEditorE2ETests(unittest.TestCase):
         self.page.keyboard.press("ControlOrMeta+z")
 
         # Empty-canvas drag box selects nodes.
-        boxes = [self.page.locator(".workflow-node").nth(index).bounding_box() for index in range(self.page.locator(".workflow-node").count())]
+        boxes = [
+            self.page.locator(".workflow-node").nth(index).bounding_box()
+            for index in range(self.page.locator(".workflow-node").count())
+        ]
         canvas_box = self.page.locator("#workflow-canvas").bounding_box()
         left = max(canvas_box["x"] + 3, min(box["x"] for box in boxes) - 18)
         top = max(canvas_box["y"] + 3, min(box["y"] for box in boxes) - 18)
@@ -278,7 +300,11 @@ class WorkflowEditorE2ETests(unittest.TestCase):
         self.page.keyboard.down("Space")
         self.page.mouse.move(canvas_box["x"] + canvas_box["width"] - 20, canvas_box["y"] + canvas_box["height"] - 20)
         self.page.mouse.down()
-        self.page.mouse.move(canvas_box["x"] + canvas_box["width"] - 70, canvas_box["y"] + canvas_box["height"] - 60, steps=5)
+        self.page.mouse.move(
+            canvas_box["x"] + canvas_box["width"] - 70,
+            canvas_box["y"] + canvas_box["height"] - 60,
+            steps=5,
+        )
         self.page.mouse.up()
         self.page.keyboard.up("Space")
         visible_start_after_pan = self.page.locator('[data-node-id="start"]').bounding_box()

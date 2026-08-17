@@ -17,11 +17,14 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg);
-    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+    transition: transform 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out),
+        border-color 0.2s var(--ease-out);
 }
 
 .script-card:hover {
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-lg);
+    border-color: var(--accent);
+    transform: translateY(-3px);
 }
 
 .script-card-head {

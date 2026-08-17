@@ -551,7 +551,7 @@ class SchedulerService:
             return self.agent_service.generate(
                 task.action.agent_id or "", task.action.prompt or ""
             ) if self.agent_service else ""
-        chat_options = {"agent_id": task.action.agent_id or None}
+        chat_options: Dict[str, Any] = {"agent_id": task.action.agent_id or None}
         if hasattr(self.agent_service, "model_analytics_store"):
             chat_options["source"] = "schedule"
         outcome = self.agent_service.chat(

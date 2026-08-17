@@ -75,29 +75,251 @@ _DEFAULT_PORT = [{"key": "default", "label": "继续"}, {"key": "error", "label"
 _ANY_INPUT = [{"key": "context", "type": "any", "description": "工作流变量上下文"}]
 
 NODE_CATALOG: Dict[str, Dict[str, Any]] = {
-    "start": _node("开始", "基础", "none", [], [], [{"key": "output", "type": "object", "description": "工作流输入"}], [{"key": "default", "label": "开始"}]),
-    "end": _node("结束", "基础", "none", [_field("output", "最终输出", "json", default={})], _ANY_INPUT, [{"key": "output", "type": "any", "description": "最终工作流输出"}], []),
-    "set_variable": _node("设置变量", "基础", "none", [_field("values", "变量映射", "json", required=True, default={})], _ANY_INPUT, [{"key": "output", "type": "object", "description": "变量对象"}], _DEFAULT_PORT),
-    "template": _node("文本模板", "基础", "none", [_field("text", "模板文本", "textarea", required=True, help_text="支持 {{input.field}} 等安全变量")], _ANY_INPUT, [{"key": "text", "type": "string", "description": "渲染文本"}], _DEFAULT_PORT),
-    "field_map": _node("字段映射", "基础", "none", [_field("mapping", "字段映射", "json", required=True, default={})], _ANY_INPUT, [{"key": "output", "type": "object", "description": "映射结果"}], _DEFAULT_PORT),
-    "merge": _node("合并结果", "基础", "none", [_field("values", "合并对象", "json", required=True, default={})], _ANY_INPUT, [{"key": "output", "type": "object", "description": "合并结果"}], _DEFAULT_PORT),
-    "delay": _node("延迟等待", "基础", "none", [_field("seconds", "等待秒数", "number", required=True, default=60, minimum=1, maximum=2592000)], [], [{"key": "resumed_at", "type": "string", "description": "恢复时间"}], _DEFAULT_PORT),
-    "llm": _node("LLM 生成", "AI", "read", [_field("prompt", "提示词", "textarea", required=True), _field("model", "模型配置", "resource", resource="models")], _ANY_INPUT, [{"key": "text", "type": "string", "description": "模型文本"}], _DEFAULT_PORT),
-    "extract": _node("字段提取", "AI", "read", [_field("text", "待提取文本", "textarea", required=True), _field("fields", "字段定义", "json", required=True, default=[])], _ANY_INPUT, [{"key": "data", "type": "object", "description": "结构化字段"}, {"key": "text", "type": "string", "description": "模型原文"}], _DEFAULT_PORT),
-    "classifier": _node("文本分类", "AI", "read", [_field("text", "待分类文本", "textarea", required=True), _field("categories", "分类列表", "json", required=True, default=[])], _ANY_INPUT, [{"key": "text", "type": "string", "description": "分类结果"}], _DEFAULT_PORT),
-    "agent": _node("组织智能体", "AI", "read", [_field("agent_id", "智能体", "resource", required=True, resource="agents"), _field("prompt", "提示词", "textarea", required=True)], _ANY_INPUT, [{"key": "text", "type": "string", "description": "智能体回复"}], _DEFAULT_PORT),
-    "knowledge": _node("知识库检索", "AI", "read", [_field("query", "检索问题", "textarea", required=True), _field("limit", "返回数量", "number", default=6, minimum=1, maximum=100), _field("category_ids", "知识库分类", "json", default=[])], _ANY_INPUT, [{"key": "items", "type": "array", "description": "知识条目"}], _DEFAULT_PORT),
-    "condition": _node("条件分支", "控制", "none", [_field("left", "左值", "text", required=True), _field("operator", "操作符", "select", required=True, default="equals", options=["equals", "not_equals", "contains", "exists", "gt", "gte", "lt", "lte"]), _field("right", "右值", "text")], _ANY_INPUT, [{"key": "matched", "type": "boolean", "description": "判断结果"}], [{"key": "true", "label": "成立"}, {"key": "false", "label": "不成立"}, {"key": "error", "label": "错误"}]),
-    "switch": _node("多路分支", "控制", "none", [_field("value", "匹配值", "text", required=True), _field("cases", "分支列表", "json", required=True, default=[])], _ANY_INPUT, [{"key": "value", "type": "any", "description": "匹配值"}], [{"key": "case:*", "label": "匹配分支", "dynamic": "cases"}, {"key": "default", "label": "默认"}, {"key": "error", "label": "错误"}]),
-    "for_each": _node("顺序迭代", "控制", "read", [_field("workflow_id", "子工作流", "resource", required=True, resource="workflows"), _field("items", "迭代数组", "json", required=True, default=[])], _ANY_INPUT, [{"key": "items", "type": "array", "description": "各项输出"}], _DEFAULT_PORT),
-    "subworkflow": _node("子工作流", "控制", "read", [_field("workflow_id", "子工作流", "resource", required=True, resource="workflows"), _field("inputs", "输入映射", "json", default={})], _ANY_INPUT, [{"key": "output", "type": "any", "description": "子工作流输出"}], _DEFAULT_PORT),
-    "tool": _node("平台工具", "能力", "dynamic", [_field("tool_name", "工具名称", "resource", required=True, resource="tools"), _field("arguments", "参数", "json", default={})], _ANY_INPUT, [{"key": "data", "type": "any", "description": "工具结果"}], _DEFAULT_PORT),
-    "script": _node("平台脚本", "能力", "dynamic", [_field("script_id", "脚本", "resource", required=True, resource="scripts"), _field("parameters", "脚本参数", "json", default={})], _ANY_INPUT, [{"key": "output", "type": "object", "description": "脚本提交结果"}], _DEFAULT_PORT),
-    "datasource": _node("只读数据源", "能力", "read", [_field("datasource_id", "数据源", "resource", required=True, resource="datasources"), _field("sql", "只读 SQL", "textarea", required=True, default="SELECT 1"), _field("limit", "最大行数", "number", default=100, minimum=1, maximum=1000)], [], [{"key": "rows", "type": "array", "description": "数据行"}, {"key": "row_count", "type": "integer", "description": "行数"}], _DEFAULT_PORT),
-    "http": _node("HTTPS 请求", "外部交互", "dynamic", [_field("method", "请求方法", "select", required=True, default="GET", options=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]), _field("url", "HTTPS 地址", "text", required=True, default="https://example.com"), _field("body", "JSON 请求体", "json"), _field("credential_id", "凭据编号", "resource", resource="credentials"), _field("timeout_seconds", "超时秒数", "number", default=30, minimum=1, maximum=120)], _ANY_INPUT, [{"key": "status_code", "type": "integer", "description": "HTTP 状态"}, {"key": "body", "type": "any", "description": "响应体"}], _DEFAULT_PORT),
-    "notification": _node("消息通知", "外部交互", "write", [_field("message", "通知内容", "textarea", required=True)], _ANY_INPUT, [{"key": "notification_ids", "type": "array", "description": "通知编号"}, {"key": "status", "type": "string", "description": "投递状态"}], _DEFAULT_PORT),
-    "approval": _node("人工审批", "人工介入", "none", [_field("title", "审批标题", "text", required=True, default="请审批"), _field("ttl_seconds", "有效秒数", "number", default=86400, minimum=60, maximum=2592000), _field("assignees", "处理人", "json", default={"roles": ["owner", "admin"]}), _field("payload", "审批内容", "json")], _ANY_INPUT, [{"key": "output", "type": "object", "description": "审批响应对象"}], [{"key": "approved", "label": "通过"}, {"key": "rejected", "label": "拒绝"}, {"key": "error", "label": "错误"}]),
-    "human_input": _node("补充输入", "人工介入", "none", [_field("title", "输入标题", "text", required=True, default="请补充信息"), _field("ttl_seconds", "有效秒数", "number", default=86400, minimum=60, maximum=2592000), _field("fields", "字段定义", "json", required=True, default=[])], [], [{"key": "output", "type": "object", "description": "用户提交字段对象"}], _DEFAULT_PORT),
+    "start": _node(
+        "开始", "基础", "none",
+        [],
+        [],
+        [{"key": "output", "type": "object", "description": "工作流输入"}],
+        [{"key": "default", "label": "开始"}],
+    ),
+    "end": _node(
+        "结束", "基础", "none",
+        [_field("output", "最终输出", "json", default={})],
+        _ANY_INPUT,
+        [{"key": "output", "type": "any", "description": "最终工作流输出"}],
+        [],
+    ),
+    "set_variable": _node(
+        "设置变量", "基础", "none",
+        [_field("values", "变量映射", "json", required=True, default={})],
+        _ANY_INPUT,
+        [{"key": "output", "type": "object", "description": "变量对象"}],
+        _DEFAULT_PORT,
+    ),
+    "template": _node(
+        "文本模板", "基础", "none",
+        [_field("text", "模板文本", "textarea", required=True, help_text="支持 {{input.field}} 等安全变量")],
+        _ANY_INPUT,
+        [{"key": "text", "type": "string", "description": "渲染文本"}],
+        _DEFAULT_PORT,
+    ),
+    "field_map": _node(
+        "字段映射", "基础", "none",
+        [_field("mapping", "字段映射", "json", required=True, default={})],
+        _ANY_INPUT,
+        [{"key": "output", "type": "object", "description": "映射结果"}],
+        _DEFAULT_PORT,
+    ),
+    "merge": _node(
+        "合并结果", "基础", "none",
+        [_field("values", "合并对象", "json", required=True, default={})],
+        _ANY_INPUT,
+        [{"key": "output", "type": "object", "description": "合并结果"}],
+        _DEFAULT_PORT,
+    ),
+    "delay": _node(
+        "延迟等待", "基础", "none",
+        [_field("seconds", "等待秒数", "number", required=True, default=60, minimum=1, maximum=2592000)],
+        [],
+        [{"key": "resumed_at", "type": "string", "description": "恢复时间"}],
+        _DEFAULT_PORT,
+    ),
+    "llm": _node(
+        "LLM 生成", "AI", "read",
+        [
+            _field("prompt", "提示词", "textarea", required=True),
+            _field("model", "模型配置", "resource", resource="models"),
+        ],
+        _ANY_INPUT,
+        [{"key": "text", "type": "string", "description": "模型文本"}],
+        _DEFAULT_PORT,
+    ),
+    "extract": _node(
+        "字段提取", "AI", "read",
+        [
+            _field("text", "待提取文本", "textarea", required=True),
+            _field("fields", "字段定义", "json", required=True, default=[]),
+        ],
+        _ANY_INPUT,
+        [
+            {"key": "data", "type": "object", "description": "结构化字段"},
+            {"key": "text", "type": "string", "description": "模型原文"},
+        ],
+        _DEFAULT_PORT,
+    ),
+    "classifier": _node(
+        "文本分类", "AI", "read",
+        [
+            _field("text", "待分类文本", "textarea", required=True),
+            _field("categories", "分类列表", "json", required=True, default=[]),
+        ],
+        _ANY_INPUT,
+        [{"key": "text", "type": "string", "description": "分类结果"}],
+        _DEFAULT_PORT,
+    ),
+    "agent": _node(
+        "组织智能体", "AI", "read",
+        [
+            _field("agent_id", "智能体", "resource", required=True, resource="agents"),
+            _field("prompt", "提示词", "textarea", required=True),
+        ],
+        _ANY_INPUT,
+        [{"key": "text", "type": "string", "description": "智能体回复"}],
+        _DEFAULT_PORT,
+    ),
+    "knowledge": _node(
+        "知识库检索", "AI", "read",
+        [
+            _field("query", "检索问题", "textarea", required=True),
+            _field("limit", "返回数量", "number", default=6, minimum=1, maximum=100),
+            _field("category_ids", "知识库分类", "json", default=[]),
+        ],
+        _ANY_INPUT,
+        [{"key": "items", "type": "array", "description": "知识条目"}],
+        _DEFAULT_PORT,
+    ),
+    "condition": _node(
+        "条件分支", "控制", "none",
+        [
+            _field("left", "左值", "text", required=True),
+            _field(
+                "operator", "操作符", "select", required=True, default="equals",
+                options=["equals", "not_equals", "contains", "exists", "gt", "gte", "lt", "lte"],
+            ),
+            _field("right", "右值", "text"),
+        ],
+        _ANY_INPUT,
+        [{"key": "matched", "type": "boolean", "description": "判断结果"}],
+        [
+            {"key": "true", "label": "成立"},
+            {"key": "false", "label": "不成立"},
+            {"key": "error", "label": "错误"},
+        ],
+    ),
+    "switch": _node(
+        "多路分支", "控制", "none",
+        [
+            _field("value", "匹配值", "text", required=True),
+            _field("cases", "分支列表", "json", required=True, default=[]),
+        ],
+        _ANY_INPUT,
+        [{"key": "value", "type": "any", "description": "匹配值"}],
+        [
+            {"key": "case:*", "label": "匹配分支", "dynamic": "cases"},
+            {"key": "default", "label": "默认"},
+            {"key": "error", "label": "错误"},
+        ],
+    ),
+    "for_each": _node(
+        "顺序迭代", "控制", "read",
+        [
+            _field("workflow_id", "子工作流", "resource", required=True, resource="workflows"),
+            _field("items", "迭代数组", "json", required=True, default=[]),
+        ],
+        _ANY_INPUT,
+        [{"key": "items", "type": "array", "description": "各项输出"}],
+        _DEFAULT_PORT,
+    ),
+    "subworkflow": _node(
+        "子工作流", "控制", "read",
+        [
+            _field("workflow_id", "子工作流", "resource", required=True, resource="workflows"),
+            _field("inputs", "输入映射", "json", default={}),
+        ],
+        _ANY_INPUT,
+        [{"key": "output", "type": "any", "description": "子工作流输出"}],
+        _DEFAULT_PORT,
+    ),
+    "tool": _node(
+        "平台工具", "能力", "dynamic",
+        [
+            _field("tool_name", "工具名称", "resource", required=True, resource="tools"),
+            _field("arguments", "参数", "json", default={}),
+        ],
+        _ANY_INPUT,
+        [{"key": "data", "type": "any", "description": "工具结果"}],
+        _DEFAULT_PORT,
+    ),
+    "script": _node(
+        "平台脚本", "能力", "dynamic",
+        [
+            _field("script_id", "脚本", "resource", required=True, resource="scripts"),
+            _field("parameters", "脚本参数", "json", default={}),
+        ],
+        _ANY_INPUT,
+        [{"key": "output", "type": "object", "description": "脚本提交结果"}],
+        _DEFAULT_PORT,
+    ),
+    "datasource": _node(
+        "只读数据源", "能力", "read",
+        [
+            _field("datasource_id", "数据源", "resource", required=True, resource="datasources"),
+            _field("sql", "只读 SQL", "textarea", required=True, default="SELECT 1"),
+            _field("limit", "最大行数", "number", default=100, minimum=1, maximum=1000),
+        ],
+        [],
+        [
+            {"key": "rows", "type": "array", "description": "数据行"},
+            {"key": "row_count", "type": "integer", "description": "行数"},
+        ],
+        _DEFAULT_PORT,
+    ),
+    "http": _node(
+        "HTTPS 请求", "外部交互", "dynamic",
+        [
+            _field(
+                "method", "请求方法", "select", required=True, default="GET",
+                options=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+            ),
+            _field("url", "HTTPS 地址", "text", required=True, default="https://example.com"),
+            _field("body", "JSON 请求体", "json"),
+            _field("credential_id", "凭据编号", "resource", resource="credentials"),
+            _field("timeout_seconds", "超时秒数", "number", default=30, minimum=1, maximum=120),
+        ],
+        _ANY_INPUT,
+        [
+            {"key": "status_code", "type": "integer", "description": "HTTP 状态"},
+            {"key": "body", "type": "any", "description": "响应体"},
+        ],
+        _DEFAULT_PORT,
+    ),
+    "notification": _node(
+        "消息通知", "外部交互", "write",
+        [_field("message", "通知内容", "textarea", required=True)],
+        _ANY_INPUT,
+        [
+            {"key": "notification_ids", "type": "array", "description": "通知编号"},
+            {"key": "status", "type": "string", "description": "投递状态"},
+        ],
+        _DEFAULT_PORT,
+    ),
+    "approval": _node(
+        "人工审批", "人工介入", "none",
+        [
+            _field("title", "审批标题", "text", required=True, default="请审批"),
+            _field("ttl_seconds", "有效秒数", "number", default=86400, minimum=60, maximum=2592000),
+            _field("assignees", "处理人", "json", default={"roles": ["owner", "admin"]}),
+            _field("payload", "审批内容", "json"),
+        ],
+        _ANY_INPUT,
+        [{"key": "output", "type": "object", "description": "审批响应对象"}],
+        [
+            {"key": "approved", "label": "通过"},
+            {"key": "rejected", "label": "拒绝"},
+            {"key": "error", "label": "错误"},
+        ],
+    ),
+    "human_input": _node(
+        "补充输入", "人工介入", "none",
+        [
+            _field("title", "输入标题", "text", required=True, default="请补充信息"),
+            _field("ttl_seconds", "有效秒数", "number", default=86400, minimum=60, maximum=2592000),
+            _field("fields", "字段定义", "json", required=True, default=[]),
+        ],
+        [],
+        [{"key": "output", "type": "object", "description": "用户提交字段对象"}],
+        _DEFAULT_PORT,
+    ),
 }
 
 TRIGGER_TYPES = {"manual", "api", "webhook", "schedule"}
@@ -163,10 +385,21 @@ def empty_definition(name: str = "新工作流") -> Dict[str, Any]:
         "outputs": [],
         "triggers": [{"id": "manual", "type": "manual", "config": {}}],
         "nodes": [
-            {"id": "start", "type": "start", "name": "开始", "position": {"x": 80, "y": 160}, "config": {}, "error_policy": {"mode": "stop"}},
-            {"id": "end", "type": "end", "name": "结束", "position": {"x": 420, "y": 160}, "config": {}, "error_policy": {"mode": "stop"}},
+            {
+                "id": "start", "type": "start", "name": "开始",
+                "position": {"x": 80, "y": 160}, "config": {}, "error_policy": {"mode": "stop"},
+            },
+            {
+                "id": "end", "type": "end", "name": "结束",
+                "position": {"x": 420, "y": 160}, "config": {}, "error_policy": {"mode": "stop"},
+            },
         ],
-        "edges": [{"id": "start-end", "source": "start", "source_port": "default", "target": "end", "target_port": "default"}],
+        "edges": [
+            {
+                "id": "start-end", "source": "start", "source_port": "default",
+                "target": "end", "target_port": "default",
+            },
+        ],
         "settings": {"timeout_seconds": 86400, "max_steps": 500},
     }
 
@@ -403,7 +636,11 @@ def _require_config(node_id: str, node_type: str, config: Mapping[str, Any]) -> 
         key = "categories" if node_type == "classifier" else "fields"
         values = config.get(key)
         if not isinstance(values, list):
-            raise WorkflowValidationError("节点 {} 的{}必须是数组".format(node_id, NODE_CATALOG[node_type]["config_fields"][-1]["label"]))
+            raise WorkflowValidationError(
+                "节点 {} 的{}必须是数组".format(
+                    node_id, NODE_CATALOG[node_type]["config_fields"][-1]["label"]
+                )
+            )
         if node_type == "human_input":
             _fields(values, "节点 {} 输入".format(node_id))
             return
@@ -467,7 +704,8 @@ def validate_definition(raw: Any, *, allow_incomplete: bool = False) -> Dict[str
         raise WorkflowValidationError("工作流至少需要开始和结束节点")
     if len(nodes_raw) > 500:
         raise WorkflowValidationError("工作流节点不能超过 500 个")
-    nodes, node_ids, node_types = [], set(), {}
+    nodes: List[Dict[str, Any]] = []
+    node_ids, node_types = set(), {}
     for raw_node in nodes_raw:
         if not isinstance(raw_node, Mapping):
             raise WorkflowValidationError("节点必须是对象")
@@ -516,7 +754,8 @@ def validate_definition(raw: Any, *, allow_incomplete: bool = False) -> Dict[str
     edges_raw = value.get("edges", [])
     if not isinstance(edges_raw, list):
         raise WorkflowValidationError("连线必须是数组")
-    edges, edge_ids, outgoing = [], set(), {}
+    edges, edge_ids = [], set()
+    outgoing: Dict[str, List[Dict[str, Any]]] = {}
     for raw_edge in edges_raw:
         if not isinstance(raw_edge, Mapping):
             raise WorkflowValidationError("连线必须是对象")
@@ -617,7 +856,12 @@ def validate_definition(raw: Any, *, allow_incomplete: bool = False) -> Dict[str
                 raise WorkflowValidationError("节点 {} 引用了不存在的输入：{}".format(node["id"], expression))
             if root[0] == "nodes" and (len(root) < 2 or root[1] not in node_ids):
                 raise WorkflowValidationError("节点 {} 引用了不存在的节点：{}".format(node["id"], expression))
-            if not allow_incomplete and root[0] == "nodes" and root[1] in node_ids and order[root[1]] >= order[node["id"]]:
+            if (
+                not allow_incomplete
+                and root[0] == "nodes"
+                and root[1] in node_ids
+                and order[root[1]] >= order[node["id"]]
+            ):
                 raise WorkflowValidationError("节点 {} 只能引用已经执行的上游节点：{}".format(node["id"], expression))
             if root[0] not in {"input", "nodes", "item", "trigger"}:
                 raise WorkflowValidationError("不支持的变量引用：{}".format(expression))

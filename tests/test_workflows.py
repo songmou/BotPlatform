@@ -62,23 +62,28 @@ class WorkflowFixture(unittest.TestCase):
         self.database = Database(Path(self.temporary.name) / "botplatform.sqlite3")
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "INSERT INTO admin_users(username,password_hash,role_id,created_at) VALUES ('owner','x',1,'2026-08-11T00:00:00Z')"
+                "INSERT INTO admin_users(username,password_hash,role_id,created_at) "
+                "VALUES ('owner','x',1,'2026-08-11T00:00:00Z')"
             )
             user_id = int(connection.execute("SELECT user_id FROM admin_users WHERE username='owner'").fetchone()[0])
             connection.execute(
-                "INSERT INTO users(user_id,display_name,created_at,updated_at) VALUES (?, 'Owner','2026-08-11T00:00:00Z','2026-08-11T00:00:00Z')",
+                "INSERT INTO users(user_id,display_name,created_at,updated_at) "
+                "VALUES (?, 'Owner','2026-08-11T00:00:00Z','2026-08-11T00:00:00Z')",
                 (user_id,),
             )
             connection.execute(
-                "INSERT INTO tenants(tenant_id,bot_id,user_id,created_at) VALUES (?, 'organization', ?, '2026-08-11T00:00:00Z')",
+                "INSERT INTO tenants(tenant_id,bot_id,user_id,created_at) "
+                "VALUES (?, 'organization', ?, '2026-08-11T00:00:00Z')",
                 (ORG_ID, "organization:" + ORG_ID),
             )
             connection.execute(
-                "INSERT INTO organizations(organization_id,name,created_at,updated_at) VALUES (?, '测试组织','2026-08-11T00:00:00Z','2026-08-11T00:00:00Z')",
+                "INSERT INTO organizations(organization_id,name,created_at,updated_at) "
+                "VALUES (?, '测试组织','2026-08-11T00:00:00Z','2026-08-11T00:00:00Z')",
                 (ORG_ID,),
             )
             connection.execute(
-                "INSERT INTO organization_memberships(membership_id,organization_id,user_id,role,created_at,updated_at) "
+                "INSERT INTO organization_memberships(membership_id,organization_id,user_id,role,"
+                "created_at,updated_at) "
                 "VALUES ('membership', ?, ?, 'owner','2026-08-11T00:00:00Z','2026-08-11T00:00:00Z')",
                 (ORG_ID, user_id),
             )
@@ -147,7 +152,11 @@ class WorkflowDefinitionTests(unittest.TestCase):
             })
             value["edges"] = [
                 {"id": "a", "source": "start", "source_port": "default", "target": "subject", "target_port": "default"},
-                {"id": "b", "source": "subject", "source_port": "true" if node_type == "condition" else "default", "target": "end", "target_port": "default"},
+                {
+                    "id": "b", "source": "subject",
+                    "source_port": "true" if node_type == "condition" else "default",
+                    "target": "end", "target_port": "default",
+                },
             ]
             return value
 
@@ -165,7 +174,14 @@ class WorkflowDefinitionTests(unittest.TestCase):
             ("script", {"script_id": "demo", "parameters": []}, "脚本参数必须是对象"),
             ("subworkflow", {"workflow_id": "child", "inputs": []}, "输入映射必须是对象"),
             ("datasource", {"datasource_id": "db", "sql": "DELETE FROM x"}, "只允许只读"),
-            ("datasource", {"datasource_id": "db", "sql": "WITH changed AS (DELETE FROM x RETURNING *) SELECT * FROM changed"}, "只允许只读"),
+            (
+                "datasource",
+                {
+                    "datasource_id": "db",
+                    "sql": "WITH changed AS (DELETE FROM x RETURNING *) SELECT * FROM changed",
+                },
+                "只允许只读",
+            ),
             ("http", {"method": "GET", "url": "http://example.com"}, "HTTPS"),
             ("http", {"method": "GET", "url": "https://user:secret@example.com"}, "HTTPS"),
             ("for_each", {"workflow_id": "child", "items": list(range(101))}, "100 项"),
@@ -332,7 +348,12 @@ class WorkflowStoreTests(WorkflowFixture):
         self.assertTrue(token["token"].startswith("bpwf_"))
         self.assertIsNotNone(self.store.authenticate_token(workflow["workflow_id"], token["token"]))
         with self.database.read() as connection:
-            stored = str(connection.execute("SELECT token_hash FROM workflow_access_tokens WHERE token_id=?", (token["token_id"],)).fetchone()[0])
+            stored = str(
+                connection.execute(
+                    "SELECT token_hash FROM workflow_access_tokens WHERE token_id=?",
+                    (token["token_id"],),
+                ).fetchone()[0]
+            )
         self.assertNotEqual(stored, token["token"])
         self.store.revoke_access_token(ORG_ID, workflow["workflow_id"], token["token_id"])
         self.assertIsNone(self.store.authenticate_token(workflow["workflow_id"], token["token"]))
@@ -435,17 +456,31 @@ class WorkflowNodeContractTests(WorkflowFixture):
         self.assertEqual(self.execute("agent", {"agent_id": "general", "prompt": "x"}).output, {"text": "agent"})
         self.knowledge.search.return_value = [{"content": "hit"}]
         self.assertEqual(self.execute("knowledge", {"query": "x", "limit": 2}).output["items"][0]["content"], "hit")
-        with patch.object(self.service, "_execute_tool", return_value={"data": 3}), patch.object(self.service, "_safety_required", return_value=False):
+        with (
+            patch.object(self.service, "_execute_tool", return_value={"data": 3}),
+            patch.object(self.service, "_safety_required", return_value=False),
+        ):
             self.assertEqual(self.execute("tool", {"tool_name": "get_current_time"}).output, {"data": 3})
         self.scripts.requires_approval.return_value = False
         self.scripts.submit.return_value = {"run_id": "script-run", "status": "queued"}
         with patch.object(self.service, "_tenant", return_value=MagicMock()):
-            self.assertEqual(self.execute("script", {"script_id": "demo", "parameters": {}}).output["run_id"], "script-run")
+            self.assertEqual(
+                self.execute("script", {"script_id": "demo", "parameters": {}}).output["run_id"],
+                "script-run",
+            )
         self.datasource.query.return_value = {"rows": [[1]], "row_count": 1}
         self.assertEqual(self.execute("datasource", {"datasource_id": "db", "sql": "SELECT 1"}).output["row_count"], 1)
-        with patch.object(self.service, "_http", return_value={"status_code": 200, "body": {"ok": True}}), patch.object(self.service, "_safety_required", return_value=False):
-            self.assertEqual(self.execute("http", {"method": "GET", "url": "https://example.com"}).output["status_code"], 200)
-        self.notifications.enqueue_text_to_tenant.return_value = SimpleNamespace(notification_ids=["n1"], status="queued")
+        with (
+            patch.object(self.service, "_http", return_value={"status_code": 200, "body": {"ok": True}}),
+            patch.object(self.service, "_safety_required", return_value=False),
+        ):
+            self.assertEqual(
+                self.execute("http", {"method": "GET", "url": "https://example.com"}).output["status_code"],
+                200,
+            )
+        self.notifications.enqueue_text_to_tenant.return_value = SimpleNamespace(
+            notification_ids=["n1"], status="queued"
+        )
         with patch.object(self.service, "_safety_required", return_value=False):
             self.assertEqual(self.execute("notification", {"message": "hello"}).output["notification_ids"], ["n1"])
 
@@ -487,8 +522,14 @@ class WorkflowNodeContractTests(WorkflowFixture):
             self.service, "_create_wait", return_value={"wait_id": "wait-1", "status": "pending"}
         ):
             self.assertEqual(self.execute("delay", {"seconds": 1}).wait["wait_id"], "wait-1")
-            self.assertEqual(self.execute("approval", {"title": "approve", "ttl_seconds": 60}).wait["wait_id"], "wait-1")
-            self.assertEqual(self.execute("human_input", {"title": "input", "ttl_seconds": 60, "fields": []}).wait["wait_id"], "wait-1")
+            self.assertEqual(
+                self.execute("approval", {"title": "approve", "ttl_seconds": 60}).wait["wait_id"],
+                "wait-1",
+            )
+            self.assertEqual(
+                self.execute("human_input", {"title": "input", "ttl_seconds": 60, "fields": []}).wait["wait_id"],
+                "wait-1",
+            )
 
         resolved_wait = {
             "status": "resolved",
@@ -505,8 +546,12 @@ class WorkflowNodeContractTests(WorkflowFixture):
             )
         self.assertEqual(resumed.output, {"count": 2, "enabled": True})
 
-        self.service.store.enqueue_run = MagicMock(side_effect=[{"run_id": "child-1"}, {"run_id": "child-2"}, {"run_id": "child-3"}])
-        self.service.store.start_specific_run = MagicMock(side_effect=lambda _org, run_id, _owner: {**self.run, "run_id": run_id, "state": {}})
+        self.service.store.enqueue_run = MagicMock(
+            side_effect=[{"run_id": "child-1"}, {"run_id": "child-2"}, {"run_id": "child-3"}]
+        )
+        self.service.store.start_specific_run = MagicMock(
+            side_effect=lambda _org, run_id, _owner: {**self.run, "run_id": run_id, "state": {}}
+        )
         self.service.store.get_run = MagicMock(side_effect=[
             {"status": "succeeded", "output": {"answer": 1}},
             {"status": "succeeded", "output": "a"},
@@ -617,7 +662,11 @@ class WorkflowRuntimeTests(WorkflowFixture):
         definition["nodes"][-1]["config"] = {"output": output}
         definition["edges"] = [
             {"id": "a", "source": "start", "source_port": "default", "target": "unstable", "target_port": "default"},
-            {"id": "b", "source": "unstable", "source_port": "error" if mode == "error_branch" else "default", "target": "end", "target_port": "default"},
+            {
+                "id": "b", "source": "unstable",
+                "source_port": "error" if mode == "error_branch" else "default",
+                "target": "end", "target_port": "default",
+            },
         ]
         return definition
 
@@ -826,13 +875,27 @@ class WorkflowRuntimeTests(WorkflowFixture):
                 "id": "gate", "type": "approval", "name": "审批", "position": {"x": 250, "y": 160},
                 "config": {"title": "请审批", "ttl_seconds": 3600}, "error_policy": {"mode": "stop"},
             },
-            {"id": "approved_end", "type": "end", "name": "通过", "position": {"x": 500, "y": 100}, "config": {"output": {"approved": True}}, "error_policy": {"mode": "stop"}},
-            {"id": "rejected_end", "type": "end", "name": "拒绝", "position": {"x": 500, "y": 240}, "config": {"output": {"approved": False}}, "error_policy": {"mode": "stop"}},
+            {
+                "id": "approved_end", "type": "end", "name": "通过",
+                "position": {"x": 500, "y": 100}, "config": {"output": {"approved": True}},
+                "error_policy": {"mode": "stop"},
+            },
+            {
+                "id": "rejected_end", "type": "end", "name": "拒绝",
+                "position": {"x": 500, "y": 240}, "config": {"output": {"approved": False}},
+                "error_policy": {"mode": "stop"},
+            },
         ]
         definition["edges"] = [
             {"id": "a", "source": "start", "source_port": "default", "target": "gate", "target_port": "default"},
-            {"id": "b", "source": "gate", "source_port": "approved", "target": "approved_end", "target_port": "default"},
-            {"id": "c", "source": "gate", "source_port": "rejected", "target": "rejected_end", "target_port": "default"},
+            {
+                "id": "b", "source": "gate", "source_port": "approved",
+                "target": "approved_end", "target_port": "default",
+            },
+            {
+                "id": "c", "source": "gate", "source_port": "rejected",
+                "target": "rejected_end", "target_port": "default",
+            },
         ]
         workflow = self.store.create_workflow(
             ORG_ID, "approval_restart", "审批恢复", self.user_id, definition
@@ -886,8 +949,13 @@ class WorkflowMigrationTests(unittest.TestCase):
             upgraded = Database(path)
             with upgraded.read() as connection:
                 self.assertEqual(connection.execute("SELECT format_version FROM schema_metadata").fetchone()[0], 2)
-                self.assertEqual(connection.execute("SELECT COUNT(*) FROM tenants WHERE tenant_id='preserved'").fetchone()[0], 1)
-                self.assertIsNotNone(connection.execute("SELECT name FROM sqlite_master WHERE name='workflow_runs'").fetchone())
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM tenants WHERE tenant_id='preserved'").fetchone()[0],
+                    1,
+                )
+                self.assertIsNotNone(
+                    connection.execute("SELECT name FROM sqlite_master WHERE name='workflow_runs'").fetchone()
+                )
             self.assertEqual(len(list((Path(temporary) / "backups").glob("*-v1-*.sqlite3"))), 1)
 
     def test_failed_v2_migration_rolls_back_and_keeps_backup(self):

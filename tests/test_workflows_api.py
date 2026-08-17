@@ -28,7 +28,9 @@ class WorkflowApiTests(unittest.TestCase):
         registry.database = database
         registry.system_root = Path(self.temporary.name)
         registry.tenant_root.side_effect = lambda tenant_id: Path(self.temporary.name) / tenant_id
-        registry.get.side_effect = lambda tenant_id: TenantContext(tenant_id, "organization", "organization:" + tenant_id)
+        registry.get.side_effect = lambda tenant_id: TenantContext(
+            tenant_id, "organization", "organization:" + tenant_id
+        )
         admin_users = AdminUserStore(database)
         admin_roles = AdminRoleStore(database)
         sessions = AdminSessionStore(database, b"workflow-tests")
@@ -226,8 +228,16 @@ class WorkflowApiTests(unittest.TestCase):
                 },
                 "error_policy": {"mode": "stop"},
             },
-            {"id": "yes", "type": "end", "name": "通过", "position": {"x": 500, "y": 80}, "config": {"output": {"approved": True}}, "error_policy": {"mode": "stop"}},
-            {"id": "no", "type": "end", "name": "拒绝", "position": {"x": 500, "y": 240}, "config": {"output": {"approved": False}}, "error_policy": {"mode": "stop"}},
+            {
+                "id": "yes", "type": "end", "name": "通过",
+                "position": {"x": 500, "y": 80}, "config": {"output": {"approved": True}},
+                "error_policy": {"mode": "stop"},
+            },
+            {
+                "id": "no", "type": "end", "name": "拒绝",
+                "position": {"x": 500, "y": 240}, "config": {"output": {"approved": False}},
+                "error_policy": {"mode": "stop"},
+            },
         ]
         definition["edges"] = [
             {"id": "a", "source": "start", "source_port": "default", "target": "gate", "target_port": "default"},

@@ -397,7 +397,7 @@ class FeishuAdapter(AsyncAdapterBridge):
             send = getattr(self._client, "send", None)
             if not callable(send):
                 raise UnsupportedCapability("当前飞书 SDK 不支持发送消息")
-            image = {"source": message.image_bytes}
+            image: Dict[str, Any] = {"source": message.image_bytes}
             if message.text.strip():
                 image["caption"] = message.text
             result = send(target, {"image": image}, options)

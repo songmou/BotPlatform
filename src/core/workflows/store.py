@@ -9,7 +9,7 @@ import secrets
 import uuid
 import copy
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 
 from .definition import empty_definition, validate_definition
 
@@ -315,7 +315,8 @@ class WorkflowStore:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(workflow_id, trigger_key) DO UPDATE SET "
                     "trigger_type=excluded.trigger_type, config_json=excluded.config_json, "
-                    "published_version=excluded.published_version, enabled=excluded.enabled, updated_at=excluded.updated_at",
+                    "published_version=excluded.published_version, enabled=excluded.enabled, "
+                    "updated_at=excluded.updated_at",
                     (
                         trigger_id,
                         workflow_id,
@@ -332,7 +333,8 @@ class WorkflowStore:
                 )
             for key in set(existing) - active_keys:
                 connection.execute(
-                    "UPDATE workflow_trigger_bindings SET enabled=0, updated_at=? WHERE workflow_id=? AND trigger_key=?",
+                    "UPDATE workflow_trigger_bindings SET enabled=0, updated_at=? "
+                    "WHERE workflow_id=? AND trigger_key=?",
                     (timestamp, workflow_id, key),
                 )
         return self.get_workflow(organization_id, workflow_id)
@@ -347,7 +349,11 @@ class WorkflowStore:
             )
             if cursor.rowcount != 1:
                 raise WorkflowError("工作流不存在或尚未发布")
-            connection.execute("UPDATE workflow_trigger_bindings SET enabled=0, updated_at=? WHERE workflow_id=?", (timestamp, workflow_id))
+            connection.execute(
+                "UPDATE workflow_trigger_bindings SET enabled=0, updated_at=? "
+                "WHERE workflow_id=?",
+                (timestamp, workflow_id),
+            )
         return self.get_workflow(organization_id, workflow_id)
 
     def archive(self, organization_id: str, workflow_id: str, actor_user_id: int) -> Dict[str, Any]:
@@ -360,12 +366,17 @@ class WorkflowStore:
             if active:
                 raise WorkflowError("工作流仍有运行中任务，不能归档")
             cursor = connection.execute(
-                "UPDATE organization_workflows SET status='archived', updated_by=?, updated_at=? WHERE organization_id=? AND workflow_id=?",
+                "UPDATE organization_workflows SET status='archived', updated_by=?, updated_at=? "
+                "WHERE organization_id=? AND workflow_id=?",
                 (actor_user_id, timestamp, organization_id, workflow_id),
             )
             if cursor.rowcount != 1:
                 raise WorkflowError("工作流不存在")
-            connection.execute("UPDATE workflow_trigger_bindings SET enabled=0, updated_at=? WHERE workflow_id=?", (timestamp, workflow_id))
+            connection.execute(
+                "UPDATE workflow_trigger_bindings SET enabled=0, updated_at=? "
+                "WHERE workflow_id=?",
+                (timestamp, workflow_id),
+            )
         return self.get_workflow(organization_id, workflow_id)
 
     def list_versions(self, organization_id: str, workflow_id: str) -> List[Dict[str, Any]]:
@@ -484,11 +495,14 @@ class WorkflowStore:
                     definition = definitions[resource_id]
                     connection.execute(
                         "INSERT INTO organization_workflows("
-                        "workflow_id, organization_id, workflow_key, name, description, status, draft_json, draft_revision, "
-                        "published_version, template_resource_id, template_revision, created_by, updated_by, created_at, updated_at) "
+                        "workflow_id, organization_id, workflow_key, name, description, status, "
+                        "draft_json, draft_revision, "
+                        "published_version, template_resource_id, template_revision, created_by, "
+                        "updated_by, created_at, updated_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
                         (
-                            workflow_ids[resource_id], organization_id, item_key, definition["name"], definition["description"],
+                            workflow_ids[resource_id], organization_id, item_key,
+                            definition["name"], definition["description"],
                             "draft" if is_root else "published", _dump(definition), None if is_root else 1,
                             resource_id, template["revision"], actor_user_id, actor_user_id, timestamp, timestamp,
                         ),
@@ -500,7 +514,8 @@ class WorkflowStore:
                     payload = _dump(definition)
                     connection.execute(
                         "INSERT INTO organization_workflow_versions("
-                        "workflow_id, version, definition_json, definition_hash, dependency_json, published_by, published_at) "
+                        "workflow_id, version, definition_json, definition_hash, dependency_json, "
+                        "published_by, published_at) "
                         "VALUES (?, 1, ?, ?, ?, ?, ?)",
                         (
                             workflow_ids[resource_id], payload, _hash(payload), _dump(dependency_maps[resource_id]),
@@ -520,7 +535,13 @@ class WorkflowStore:
         available = max(1, 128 - len(template_part) - len(digest) - 3)
         return "{}__{}_{}".format(root_key[:available], template_part, digest)
 
-    def issue_access_token(self, organization_id: str, workflow_id: str, label: str, actor_user_id: int) -> Dict[str, Any]:
+    def issue_access_token(
+        self,
+        organization_id: str,
+        workflow_id: str,
+        label: str,
+        actor_user_id: int,
+    ) -> Dict[str, Any]:
         workflow = self.get_workflow(organization_id, workflow_id, include_draft=False)
         if workflow["status"] != "published":
             raise WorkflowError("工作流尚未发布或已停用")
@@ -534,7 +555,8 @@ class WorkflowStore:
             if api_trigger is None:
                 raise WorkflowError("工作流未配置 API 触发器")
             connection.execute(
-                "INSERT INTO workflow_access_tokens(token_id, workflow_id, organization_id, label, token_hash, created_by, created_at) "
+                "INSERT INTO workflow_access_tokens("
+                "token_id, workflow_id, organization_id, label, token_hash, created_by, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (token_id, workflow_id, organization_id, str(label)[:128], _hash(secret), actor_user_id, timestamp),
             )
@@ -599,7 +621,8 @@ class WorkflowStore:
     def revoke_access_token(self, organization_id: str, workflow_id: str, token_id: str) -> None:
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
-                "UPDATE workflow_access_tokens SET revoked_at=? WHERE organization_id=? AND workflow_id=? AND token_id=? AND revoked_at IS NULL",
+                "UPDATE workflow_access_tokens SET revoked_at=? "
+                "WHERE organization_id=? AND workflow_id=? AND token_id=? AND revoked_at IS NULL",
                 (_now(), organization_id, workflow_id, token_id),
             )
             if cursor.rowcount != 1:
@@ -619,7 +642,10 @@ class WorkflowStore:
                 (workflow_id, digest),
             ).fetchone()
             if row is not None:
-                connection.execute("UPDATE workflow_access_tokens SET last_used_at=? WHERE token_id=?", (_now(), row["token_id"]))
+                connection.execute(
+                    "UPDATE workflow_access_tokens SET last_used_at=? WHERE token_id=?",
+                    (_now(), row["token_id"]),
+                )
         return dict(row) if row is not None else None
 
     def authenticate_run_token(self, run_id: str, secret: str) -> Optional[Dict[str, Any]]:
@@ -633,7 +659,10 @@ class WorkflowStore:
                 (run_id, digest),
             ).fetchone()
             if row is not None:
-                connection.execute("UPDATE workflow_access_tokens SET last_used_at=? WHERE token_id=?", (_now(), row["token_id"]))
+                connection.execute(
+                    "UPDATE workflow_access_tokens SET last_used_at=? WHERE token_id=?",
+                    (_now(), row["token_id"]),
+                )
         return dict(row) if row is not None else None
 
     def authenticate_webhook(self, trigger_id: str, secret: str) -> Optional[Dict[str, Any]]:
@@ -650,7 +679,10 @@ class WorkflowStore:
     def _definition_for_run(self, workflow_id: str, version: int) -> Dict[str, Any]:
         with self.database.read() as connection:
             if version == 0:
-                row = connection.execute("SELECT draft_json FROM organization_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+                row = connection.execute(
+                    "SELECT draft_json FROM organization_workflows WHERE workflow_id=?",
+                    (workflow_id,),
+                ).fetchone()
                 payload = row["draft_json"] if row is not None else None
             else:
                 row = connection.execute(
@@ -677,7 +709,10 @@ class WorkflowStore:
         version_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         workflow = self.get_workflow(organization_id, workflow_id)
-        version = int(version_override if version_override is not None else (0 if test_mode else workflow.get("published_version") or 0))
+        version = int(
+            version_override if version_override is not None
+            else (0 if test_mode else workflow.get("published_version") or 0)
+        )
         if not test_mode and (workflow["status"] != "published" or version <= 0):
             raise WorkflowError("工作流尚未发布或已停用")
         definition = validate_definition(self._definition_for_run(workflow_id, version))
@@ -705,7 +740,8 @@ class WorkflowStore:
                 connection.execute(
                     "INSERT INTO workflow_runs("
                     "run_id, workflow_id, organization_id, workflow_version, trigger_type, trigger_ref, "
-                    "idempotency_key, status, input_json, state_json, initiated_by, test_mode, allow_side_effects, created_at) "
+                    "idempotency_key, status, input_json, state_json, initiated_by, "
+                    "test_mode, allow_side_effects, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
                     (
                         run_id,
@@ -755,15 +791,27 @@ class WorkflowStore:
     def _run_row(row: Any) -> Dict[str, Any]:
         result = dict(row)
         for key in ("input_json", "output_json", "state_json", "error_json"):
-            result[key[:-5] if key.endswith("_json") else key] = _load(result.pop(key, None), None if key in {"output_json", "error_json"} else {})
+            result[key[:-5] if key.endswith("_json") else key] = _load(
+                result.pop(key, None), None if key in {"output_json", "error_json"} else {}
+            )
         result["test_mode"] = bool(result["test_mode"])
         result["allow_side_effects"] = bool(result["allow_side_effects"])
         return result
 
     def get_run(self, organization_id: str, run_id: str) -> Dict[str, Any]:
         with self.database.read() as connection:
-            row = connection.execute("SELECT * FROM workflow_runs WHERE organization_id=? AND run_id=?", (organization_id, run_id)).fetchone()
-            nodes = connection.execute("SELECT * FROM workflow_node_runs WHERE run_id=? ORDER BY started_at, node_run_id", (run_id,)).fetchall() if row is not None else []
+            row = connection.execute(
+                "SELECT * FROM workflow_runs WHERE organization_id=? AND run_id=?",
+                (organization_id, run_id),
+            ).fetchone()
+            nodes = (
+                connection.execute(
+                    "SELECT * FROM workflow_node_runs WHERE run_id=? ORDER BY started_at, node_run_id",
+                    (run_id,),
+                ).fetchall()
+                if row is not None
+                else []
+            )
         if row is None:
             raise WorkflowError("工作流运行记录不存在")
         result = self._run_row(row)
@@ -774,8 +822,16 @@ class WorkflowStore:
             item["error"] = _load(item.pop("error_json"), None)
         return result
 
-    def list_runs(self, organization_id: str, workflow_id: str = "", status: str = "", limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        where, params = ["organization_id=?"], [organization_id]
+    def list_runs(
+        self,
+        organization_id: str,
+        workflow_id: str = "",
+        status: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        where = ["organization_id=?"]
+        params: List[Any] = [organization_id]
         if workflow_id:
             where.append("workflow_id=?")
             params.append(workflow_id)
@@ -785,7 +841,9 @@ class WorkflowStore:
         params.extend([max(1, min(limit, 500)), max(0, offset)])
         with self.database.read() as connection:
             rows = connection.execute(
-                "SELECT * FROM workflow_runs WHERE {} ORDER BY created_at DESC LIMIT ? OFFSET ?".format(" AND ".join(where)),
+                "SELECT * FROM workflow_runs WHERE {} ORDER BY created_at DESC LIMIT ? OFFSET ?".format(
+                    " AND ".join(where)
+                ),
                 tuple(params),
             ).fetchall()
         return [self._run_row(row) for row in rows]
@@ -814,7 +872,10 @@ class WorkflowStore:
                     "WHERE run_id=? AND status='running' ORDER BY started_at DESC LIMIT 1",
                     (row["run_id"],),
                 ).fetchone()
-                if unfinished is not None and str(unfinished["node_type"]) in {"tool", "script", "http", "notification"}:
+                if (
+                    unfinished is not None
+                    and str(unfinished["node_type"]) in {"tool", "script", "http", "notification"}
+                ):
                     self._mark_uncertain_write(connection, row, unfinished, now_text)
                     return None
             connection.execute(
@@ -842,7 +903,8 @@ class WorkflowStore:
             (_log_dump(detail), run["run_id"]),
         )
         existing = connection.execute(
-            "SELECT wait_id FROM workflow_waits WHERE run_id=? AND node_id=? AND wait_type='attention' AND status='pending'",
+            "SELECT wait_id FROM workflow_waits "
+            "WHERE run_id=? AND node_id=? AND wait_type='attention' AND status='pending'",
             (run["run_id"], node_id),
         ).fetchone()
         if existing is None:
@@ -851,11 +913,20 @@ class WorkflowStore:
             connection.execute(
                 "INSERT INTO workflow_waits(wait_id, run_id, organization_id, node_id, wait_type, assignees_json, "
                 "payload_json, payload_hash, created_at) VALUES (?, ?, ?, ?, 'attention', ?, ?, ?, ?)",
-                (wait_id, run["run_id"], run["organization_id"], node_id, _dump({"roles": ["owner", "admin"]}), payload, _hash(payload), timestamp),
+                (
+                    wait_id, run["run_id"], run["organization_id"], node_id,
+                    _dump({"roles": ["owner", "admin"]}), payload, _hash(payload), timestamp,
+                ),
             )
         self._event(connection, str(run["run_id"]), str(run["organization_id"]), "run.needs_attention", node_id, detail)
 
-    def start_specific_run(self, organization_id: str, run_id: str, owner: str, lease_seconds: int = 600) -> Dict[str, Any]:
+    def start_specific_run(
+        self,
+        organization_id: str,
+        run_id: str,
+        owner: str,
+        lease_seconds: int = 600,
+    ) -> Dict[str, Any]:
         timestamp = _now()
         expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
         with self.database.transaction(immediate=True) as connection:
@@ -880,13 +951,21 @@ class WorkflowStore:
             if cursor.rowcount != 1:
                 raise WorkflowError("工作流运行租约已经失效")
 
-    def update_run_state(self, run_id: str, state: Mapping[str, Any], *, status: str = "running", wake_at: Optional[str] = None) -> None:
+    def update_run_state(
+        self,
+        run_id: str,
+        state: Mapping[str, Any],
+        *,
+        status: str = "running",
+        wake_at: Optional[str] = None,
+    ) -> None:
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute("SELECT organization_id FROM workflow_runs WHERE run_id=?", (run_id,)).fetchone()
             if row is None:
                 raise WorkflowError("工作流运行记录不存在")
             connection.execute(
-                "UPDATE workflow_runs SET state_json=?, status=?, wake_at=?, lease_owner=NULL, lease_expires_at=NULL WHERE run_id=?",
+                "UPDATE workflow_runs SET state_json=?, status=?, wake_at=?, "
+                "lease_owner=NULL, lease_expires_at=NULL WHERE run_id=?",
                 (_dump(state), status, wake_at, run_id),
             )
             self._event(connection, run_id, str(row["organization_id"]), "run." + status, "", {})
@@ -902,7 +981,13 @@ class WorkflowStore:
             connection.execute(
                 "UPDATE workflow_runs SET status=?, output_json=?, error_json=?, finished_at=?, "
                 "lease_owner=NULL, lease_expires_at=NULL WHERE run_id=?",
-                (status, _dump(output) if output is not None else None, _dump(error) if error is not None else None, timestamp, run_id),
+                (
+                    status,
+                    _dump(output) if output is not None else None,
+                    _dump(error) if error is not None else None,
+                    timestamp,
+                    run_id,
+                ),
             )
             self._event(connection, run_id, str(row["organization_id"]), "run." + status, "", error or {})
 
@@ -962,12 +1047,17 @@ class WorkflowStore:
             )
             if action == "terminate":
                 connection.execute(
-                    "UPDATE workflow_runs SET status='failed', error_json=?, finished_at=? WHERE organization_id=? AND run_id=? AND status='needs_attention'",
-                    (_log_dump({"message": "管理员终止了无法确认结果的外部操作", "comment": comment[:1000]}), timestamp, organization_id, run_id),
+                    "UPDATE workflow_runs SET status='failed', error_json=?, finished_at=? "
+                    "WHERE organization_id=? AND run_id=? AND status='needs_attention'",
+                    (
+                        _log_dump({"message": "管理员终止了无法确认结果的外部操作", "comment": comment[:1000]}),
+                        timestamp, organization_id, run_id,
+                    ),
                 )
             else:
                 connection.execute(
-                    "UPDATE workflow_runs SET status='queued', state_json=?, error_json=NULL, wake_at=NULL WHERE organization_id=? AND run_id=? AND status='needs_attention'",
+                    "UPDATE workflow_runs SET status='queued', state_json=?, error_json=NULL, "
+                    "wake_at=NULL WHERE organization_id=? AND run_id=? AND status='needs_attention'",
                     (_dump(state), organization_id, run_id),
                 )
                 if action == "skip":
@@ -975,7 +1065,10 @@ class WorkflowStore:
                         "UPDATE workflow_node_runs SET status='skipped' WHERE node_run_id=?",
                         (affected["node_run_id"],),
                     )
-            self._event(connection, run_id, organization_id, "attention." + action, node_id, {"comment": comment[:1000]})
+            self._event(
+                connection, run_id, organization_id, "attention." + action,
+                node_id, {"comment": comment[:1000]},
+            )
         return self.get_run(organization_id, run_id)
 
     def cancel_run(self, organization_id: str, run_id: str) -> Dict[str, Any]:
@@ -987,25 +1080,52 @@ class WorkflowStore:
             )
             if cursor.rowcount != 1:
                 raise WorkflowError("工作流运行不存在或已结束")
-            connection.execute("UPDATE workflow_waits SET status='canceled', resolved_at=? WHERE run_id=? AND status='pending'", (_now(), run_id))
+            connection.execute(
+                "UPDATE workflow_waits SET status='canceled', resolved_at=? "
+                "WHERE run_id=? AND status='pending'",
+                (_now(), run_id),
+            )
         return self.get_run(organization_id, run_id)
 
     def begin_node(self, run: Mapping[str, Any], node: Mapping[str, Any], rendered_input: Any, attempt: int) -> str:
         node_run_id = str(uuid.uuid4())
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "INSERT INTO workflow_node_runs(node_run_id, run_id, node_id, node_type, attempt, status, input_json, operation_key, started_at) "
+                "INSERT INTO workflow_node_runs("
+                "node_run_id, run_id, node_id, node_type, attempt, status, input_json, "
+                "operation_key, started_at) "
                 "VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
-                (node_run_id, run["run_id"], node["id"], node["type"], attempt, _log_dump(rendered_input), "{}:{}".format(run["run_id"], node["id"]), _now()),
+                (
+                    node_run_id, run["run_id"], node["id"], node["type"], attempt,
+                    _log_dump(rendered_input), "{}:{}".format(run["run_id"], node["id"]), _now(),
+                ),
             )
-            self._event(connection, run["run_id"], run["organization_id"], "node.running", node["id"], {"attempt": attempt})
+            self._event(
+                connection, run["run_id"], run["organization_id"], "node.running",
+                node["id"], {"attempt": attempt},
+            )
         return node_run_id
 
-    def finish_node(self, run: Mapping[str, Any], node_run_id: str, node_id: str, status: str, output: Any = None, error: Any = None) -> None:
+    def finish_node(
+        self,
+        run: Mapping[str, Any],
+        node_run_id: str,
+        node_id: str,
+        status: str,
+        output: Any = None,
+        error: Any = None,
+    ) -> None:
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE workflow_node_runs SET status=?, output_json=?, error_json=?, finished_at=? WHERE node_run_id=?",
-                (status, _log_dump(output) if output is not None else None, _log_dump(error) if error is not None else None, _now(), node_run_id),
+                "UPDATE workflow_node_runs SET status=?, output_json=?, "
+                "error_json=?, finished_at=? WHERE node_run_id=?",
+                (
+                    status,
+                    _log_dump(output) if output is not None else None,
+                    _log_dump(error) if error is not None else None,
+                    _now(),
+                    node_run_id,
+                ),
             )
             self._event(connection, run["run_id"], run["organization_id"], "node." + status, node_id, error or {})
 
@@ -1022,11 +1142,19 @@ class WorkflowStore:
         payload_json = _log_dump(payload)
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "INSERT INTO workflow_waits(wait_id, run_id, organization_id, node_id, wait_type, assignees_json, payload_json, payload_hash, expires_at, created_at) "
+                "INSERT INTO workflow_waits("
+                "wait_id, run_id, organization_id, node_id, wait_type, assignees_json, "
+                "payload_json, payload_hash, expires_at, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (wait_id, run["run_id"], run["organization_id"], node_id, wait_type, _dump(assignees), payload_json, _hash(payload_json), expires_at, timestamp),
+                (
+                    wait_id, run["run_id"], run["organization_id"], node_id, wait_type,
+                    _dump(assignees), payload_json, _hash(payload_json), expires_at, timestamp,
+                ),
             )
-            self._event(connection, run["run_id"], run["organization_id"], "wait.created", node_id, {"wait_id": wait_id, "wait_type": wait_type})
+            self._event(
+                connection, run["run_id"], run["organization_id"], "wait.created",
+                node_id, {"wait_id": wait_id, "wait_type": wait_type},
+            )
         return self.get_wait(run["organization_id"], wait_id)
 
     @staticmethod
@@ -1039,7 +1167,10 @@ class WorkflowStore:
 
     def get_wait(self, organization_id: str, wait_id: str) -> Dict[str, Any]:
         with self.database.read() as connection:
-            row = connection.execute("SELECT * FROM workflow_waits WHERE organization_id=? AND wait_id=?", (organization_id, wait_id)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM workflow_waits WHERE organization_id=? AND wait_id=?",
+                (organization_id, wait_id),
+            ).fetchone()
         if row is None:
             raise WorkflowError("工作流待办不存在")
         return self._wait_row(row)
@@ -1055,39 +1186,74 @@ class WorkflowStore:
     def list_waits(self, organization_id: str, status: str = "pending") -> List[Dict[str, Any]]:
         with self.database.read() as connection:
             rows = connection.execute(
-                "SELECT * FROM workflow_waits WHERE organization_id=? AND (?='' OR status=?) ORDER BY created_at DESC LIMIT 200",
+                "SELECT * FROM workflow_waits WHERE organization_id=? AND (?='' OR status=?) "
+                "ORDER BY created_at DESC LIMIT 200",
                 (organization_id, status, status),
             ).fetchall()
         return [self._wait_row(row) for row in rows]
 
-    def resolve_wait(self, organization_id: str, wait_id: str, response: Mapping[str, Any], actor_user_id: int) -> Dict[str, Any]:
+    def resolve_wait(
+        self,
+        organization_id: str,
+        wait_id: str,
+        response: Mapping[str, Any],
+        actor_user_id: int,
+    ) -> Dict[str, Any]:
         status = str(response.get("status") or "resolved")
         if status not in {"approved", "rejected", "resolved"}:
             raise WorkflowError("待办处理状态无效")
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
-            row = connection.execute("SELECT * FROM workflow_waits WHERE organization_id=? AND wait_id=? AND status='pending'", (organization_id, wait_id)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM workflow_waits "
+                "WHERE organization_id=? AND wait_id=? AND status='pending'",
+                (organization_id, wait_id),
+            ).fetchone()
             if row is None:
                 raise WorkflowError("工作流待办不存在或已处理")
             if row["expires_at"] and str(row["expires_at"]) <= timestamp:
-                connection.execute("UPDATE workflow_waits SET status='expired', resolved_at=? WHERE wait_id=?", (timestamp, wait_id))
+                connection.execute(
+                    "UPDATE workflow_waits SET status='expired', resolved_at=? WHERE wait_id=?",
+                    (timestamp, wait_id),
+                )
                 raise WorkflowError("工作流待办已经过期")
             connection.execute(
                 "UPDATE workflow_waits SET status=?, response_json=?, resolved_by=?, resolved_at=? WHERE wait_id=?",
                 (status, _dump(dict(response)), actor_user_id, timestamp, wait_id),
             )
-            connection.execute("UPDATE workflow_runs SET status='queued', wake_at=NULL WHERE run_id=? AND status='waiting'", (row["run_id"],))
-            self._event(connection, str(row["run_id"]), organization_id, "wait." + status, str(row["node_id"]), {"wait_id": wait_id})
+            connection.execute(
+                "UPDATE workflow_runs SET status='queued', wake_at=NULL "
+                "WHERE run_id=? AND status='waiting'",
+                (row["run_id"],),
+            )
+            self._event(
+                connection, str(row["run_id"]), organization_id, "wait." + status,
+                str(row["node_id"]), {"wait_id": wait_id},
+            )
         return self.get_wait(organization_id, wait_id)
 
     def expire_waits(self) -> int:
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
-            rows = connection.execute("SELECT wait_id, run_id, organization_id, node_id FROM workflow_waits WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?", (timestamp,)).fetchall()
+            rows = connection.execute(
+                "SELECT wait_id, run_id, organization_id, node_id FROM workflow_waits "
+                "WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?",
+                (timestamp,),
+            ).fetchall()
             for row in rows:
-                connection.execute("UPDATE workflow_waits SET status='expired', resolved_at=? WHERE wait_id=?", (timestamp, row["wait_id"]))
-                connection.execute("UPDATE workflow_runs SET status='queued', wake_at=NULL WHERE run_id=? AND status='waiting'", (row["run_id"],))
-                self._event(connection, str(row["run_id"]), str(row["organization_id"]), "wait.expired", str(row["node_id"]), {"wait_id": row["wait_id"]})
+                connection.execute(
+                    "UPDATE workflow_waits SET status='expired', resolved_at=? WHERE wait_id=?",
+                    (timestamp, row["wait_id"]),
+                )
+                connection.execute(
+                    "UPDATE workflow_runs SET status='queued', wake_at=NULL "
+                    "WHERE run_id=? AND status='waiting'",
+                    (row["run_id"],),
+                )
+                self._event(
+                    connection, str(row["run_id"]), str(row["organization_id"]),
+                    "wait.expired", str(row["node_id"]), {"wait_id": row["wait_id"]},
+                )
         return len(rows)
 
     def list_events(self, organization_id: str, run_id: str, after: int = 0) -> List[Dict[str, Any]]:
@@ -1107,7 +1273,9 @@ class WorkflowStore:
     @staticmethod
     def _event(connection: Any, run_id: str, organization_id: str, event_type: str, node_id: str, detail: Any) -> None:
         connection.execute(
-            "INSERT INTO workflow_events(run_id, organization_id, event_type, node_id, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO workflow_events("
+            "run_id, organization_id, event_type, node_id, detail_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (run_id, organization_id, event_type, node_id, _log_dump(detail, 64 * 1024), _now()),
         )
 
@@ -1122,4 +1290,7 @@ class WorkflowStore:
 
     def set_schedule_next_fire(self, trigger_id: str, next_fire_at: str) -> None:
         with self.database.transaction() as connection:
-            connection.execute("UPDATE workflow_trigger_bindings SET next_fire_at=?, updated_at=? WHERE trigger_id=?", (next_fire_at, _now(), trigger_id))
+            connection.execute(
+                "UPDATE workflow_trigger_bindings SET next_fire_at=?, updated_at=? WHERE trigger_id=?",
+                (next_fire_at, _now(), trigger_id),
+            )

@@ -13,7 +13,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from src.core.config.loader import validate_mcp_server_entries
 from src.core.config.mcp_headers import (

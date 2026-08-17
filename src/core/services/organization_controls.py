@@ -335,7 +335,11 @@ class OrganizationControlStore:
             plugin = self.config.plugins.get(str(action.get("plugin_id") or ""))
             if plugin is None or not plugin.enabled:
                 raise OrganizationControlError("引用的平台插件不存在或已停用")
-            payload = asdict(plugin) if is_dataclass(plugin) else dict(plugin)
+            payload = (
+                asdict(plugin)
+                if is_dataclass(plugin) and not isinstance(plugin, type)
+                else dict(plugin)
+            )
             return hashlib.sha256(
                 json.dumps(
                     payload, ensure_ascii=False, sort_keys=True, default=str

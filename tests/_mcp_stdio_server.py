@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-import sys
-
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("local_echo")

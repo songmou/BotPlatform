@@ -13,7 +13,11 @@ from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
 from src.core.config.loader import AgentPreset, AppConfig
-from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
+from src.core.services.agent_tools import (
+    build_system_prompt,
+    resolve_tool_names,
+    sanitize_tool_call_text,
+)
 from src.core.services.approvals import ApprovalStore, build_approval_request
 from src.core.modeling import (
     CanonicalMessage,
@@ -996,6 +1000,8 @@ class AgentService:
                         ),
                         provider=model.identity.provider,
                     )
+                # 硬拦截：模型输出文本格式工具调用（幻觉）时替换为友好提示
+                answer = sanitize_tool_call_text(answer)
                 return self._finish(
                     user_id, history, question, answer, thinking_parts,
                     session_key=session_key,

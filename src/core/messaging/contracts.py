@@ -271,8 +271,10 @@ class ChannelCapabilities:
 class MessagingAdapter(Protocol):
     channel_id: str
     platform: str
-    account_id: str
     capabilities: ChannelCapabilities
+
+    @property
+    def account_id(self) -> str: ...
 
     def start(
         self,

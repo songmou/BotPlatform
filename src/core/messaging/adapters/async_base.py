@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import Future
 from contextlib import contextmanager
-from typing import Any, Awaitable, Iterator, Optional
+from typing import Any, Coroutine, Iterator, Optional
 
 from src.core.messaging.errors import TransientTransportError
 
@@ -30,27 +31,27 @@ class AsyncAdapterBridge:
 
     def _run_sync(
         self,
-        awaitable: Awaitable[Any],
+        coroutine: Coroutine[Any, Any, Any],
         *,
         timeout: float = 30.0,
     ) -> Any:
         if not self._ready.wait(timeout=min(timeout, 5.0)):
-            closer = getattr(awaitable, "close", None)
+            closer = getattr(coroutine, "close", None)
             if callable(closer):
                 closer()
             raise TransientTransportError("消息渠道尚未连接")
         loop = self._loop
         if loop is None or loop.is_closed():
-            closer = getattr(awaitable, "close", None)
+            closer = getattr(coroutine, "close", None)
             if callable(closer):
                 closer()
             raise TransientTransportError("消息渠道连接已经关闭")
         if self._loop_thread_id == threading.get_ident():
-            closer = getattr(awaitable, "close", None)
+            closer = getattr(coroutine, "close", None)
             if callable(closer):
                 closer()
             raise TransientTransportError("消息渠道发生循环内同步调用")
-        future = asyncio.run_coroutine_threadsafe(awaitable, loop)
+        future: Future[Any] = asyncio.run_coroutine_threadsafe(coroutine, loop)
         try:
             return future.result(timeout=timeout)
         except TimeoutError as exc:

@@ -318,8 +318,12 @@ def platform_design_suggestion(
     principal=Depends(require_permission("panel.write")),
 ):
     try:
-        current = body.get("definition") or get_platform_workflow_template(template_id, request, principal)["payload"]
-        return _service(request).design_suggestion("", str(body.get("instruction") or ""), current, principal.user.user_id)
+        current = body.get("definition") or get_platform_workflow_template(
+            template_id, request, principal
+        )["payload"]
+        return _service(request).design_suggestion(
+            "", str(body.get("instruction") or ""), current, principal.user.user_id
+        )
     except (WorkflowError, WorkflowValidationError) as exc:
         raise _error(exc) from exc
 
@@ -483,7 +487,14 @@ def copy_template(
         raise _error(exc) from exc
 
 
-def _enqueue_run(organization_id: str, workflow_id: str, request: Request, body: Dict[str, Any], context: Any, test_mode: bool):
+def _enqueue_run(
+    organization_id: str,
+    workflow_id: str,
+    request: Request,
+    body: Dict[str, Any],
+    context: Any,
+    test_mode: bool,
+):
     service = _service(request)
     wait = bool(body.get("wait", False))
     timeout = float(body.get("timeout", 30)) if wait else 30.0
@@ -508,7 +519,13 @@ def _enqueue_run(organization_id: str, workflow_id: str, request: Request, body:
 
 
 @router.post("/orgs/{organization_id}/workflows/{workflow_id}/test", status_code=202)
-def test_workflow(organization_id: str, workflow_id: str, request: Request, body: Dict[str, Any] = Body(default={}), principal=Depends(get_principal)):
+def test_workflow(
+    organization_id: str,
+    workflow_id: str,
+    request: Request,
+    body: Dict[str, Any] = Body(default={}),
+    principal=Depends(get_principal),
+):
     context = _context(request, principal, organization_id)
     try:
         return _enqueue_run(organization_id, workflow_id, request, body, context, True)
@@ -517,7 +534,13 @@ def test_workflow(organization_id: str, workflow_id: str, request: Request, body
 
 
 @router.post("/orgs/{organization_id}/workflows/{workflow_id}/runs", status_code=202)
-def run_workflow(organization_id: str, workflow_id: str, request: Request, body: Dict[str, Any] = Body(default={}), principal=Depends(get_principal)):
+def run_workflow(
+    organization_id: str,
+    workflow_id: str,
+    request: Request,
+    body: Dict[str, Any] = Body(default={}),
+    principal=Depends(get_principal),
+):
     context = _context(request, principal, organization_id)
     try:
         return _enqueue_run(organization_id, workflow_id, request, body, context, False)
@@ -565,7 +588,13 @@ def list_workflow_runs_for_workflow(
 
 @router.get("/orgs/{organization_id}/workflow-runs/{run_id}")
 @router.get("/orgs/{organization_id}/workflows/{workflow_id}/runs/{run_id}")
-def get_workflow_run(organization_id: str, run_id: str, request: Request, workflow_id: str = "", principal=Depends(get_principal)):
+def get_workflow_run(
+    organization_id: str,
+    run_id: str,
+    request: Request,
+    workflow_id: str = "",
+    principal=Depends(get_principal),
+):
     _context(request, principal, organization_id)
     try:
         run = _service(request).store.get_run(organization_id, run_id)
@@ -578,10 +607,19 @@ def get_workflow_run(organization_id: str, run_id: str, request: Request, workfl
 
 @router.post("/orgs/{organization_id}/workflow-runs/{run_id}/cancel")
 @router.post("/orgs/{organization_id}/workflows/{workflow_id}/runs/{run_id}/cancel")
-def cancel_workflow_run(organization_id: str, run_id: str, request: Request, workflow_id: str = "", principal=Depends(get_principal)):
+def cancel_workflow_run(
+    organization_id: str,
+    run_id: str,
+    request: Request,
+    workflow_id: str = "",
+    principal=Depends(get_principal),
+):
     _context(request, principal, organization_id)
     try:
-        if workflow_id and _service(request).store.get_run(organization_id, run_id)["workflow_id"] != workflow_id:
+        if (
+            workflow_id
+            and _service(request).store.get_run(organization_id, run_id)["workflow_id"] != workflow_id
+        ):
             raise WorkflowError("工作流运行记录不存在")
         return _organization_run_response(
             _service(request).store.cancel_run(organization_id, run_id)
@@ -614,7 +652,13 @@ def resolve_workflow_attention(
 
 
 @router.get("/orgs/{organization_id}/workflow-runs/{run_id}/events")
-def workflow_run_events(organization_id: str, run_id: str, request: Request, after: int = Query(default=0, ge=0), principal=Depends(get_principal)):
+def workflow_run_events(
+    organization_id: str,
+    run_id: str,
+    request: Request,
+    after: int = Query(default=0, ge=0),
+    principal=Depends(get_principal),
+):
     _context(request, principal, organization_id)
     try:
         return {"items": _service(request).store.list_events(organization_id, run_id, after)}
@@ -644,7 +688,12 @@ def workflow_run_stream(organization_id: str, run_id: str, request: Request, pri
 
 
 @router.get("/orgs/{organization_id}/workflow-waits")
-def list_workflow_waits(organization_id: str, request: Request, status: str = "pending", principal=Depends(get_principal)):
+def list_workflow_waits(
+    organization_id: str,
+    request: Request,
+    status: str = "pending",
+    principal=Depends(get_principal),
+):
     context = _context(request, principal, organization_id)
     items = _service(request).store.list_waits(organization_id, status)
     return {"items": [item for item in items if _can_handle_wait(context, item)]}
@@ -699,17 +748,29 @@ def design_suggestion(
 ):
     context = _context(request, principal, organization_id)
     try:
-        current = body.get("definition") or _service(request).store.get_workflow(organization_id, workflow_id)["definition"]
-        return _service(request).design_suggestion(organization_id, str(body.get("instruction") or ""), current, context.user_id)
+        current = body.get("definition") or _service(request).store.get_workflow(
+            organization_id, workflow_id
+        )["definition"]
+        return _service(request).design_suggestion(
+            organization_id, str(body.get("instruction") or ""), current, context.user_id
+        )
     except (WorkflowError, WorkflowValidationError) as exc:
         raise _error(exc) from exc
 
 
 @router.post("/orgs/{organization_id}/workflows/{workflow_id}/access-tokens", status_code=201)
-def create_access_token(organization_id: str, workflow_id: str, request: Request, body: Dict[str, Any] = Body(default={}), principal=Depends(get_principal)):
+def create_access_token(
+    organization_id: str,
+    workflow_id: str,
+    request: Request,
+    body: Dict[str, Any] = Body(default={}),
+    principal=Depends(get_principal),
+):
     context = _context(request, principal, organization_id, "admin")
     try:
-        return _service(request).store.issue_access_token(organization_id, workflow_id, str(body.get("label") or ""), context.user_id)
+        return _service(request).store.issue_access_token(
+            organization_id, workflow_id, str(body.get("label") or ""), context.user_id
+        )
     except WorkflowError as exc:
         raise _error(exc) from exc
 
@@ -724,7 +785,13 @@ def list_access_tokens(organization_id: str, workflow_id: str, request: Request,
 
 
 @router.delete("/orgs/{organization_id}/workflows/{workflow_id}/access-tokens/{token_id}")
-def delete_access_token(organization_id: str, workflow_id: str, token_id: str, request: Request, principal=Depends(get_principal)):
+def delete_access_token(
+    organization_id: str,
+    workflow_id: str,
+    token_id: str,
+    request: Request,
+    principal=Depends(get_principal),
+):
     _context(request, principal, organization_id, "admin")
     try:
         _service(request).store.revoke_access_token(organization_id, workflow_id, token_id)

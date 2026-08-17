@@ -147,7 +147,10 @@ class WorkflowService:
                         version_override=int(trigger["published_version"]),
                     )
                 if next_fire is not None:
-                    self.store.set_schedule_next_fire(str(trigger["trigger_id"]), next_fire.astimezone(timezone.utc).isoformat())
+                    self.store.set_schedule_next_fire(
+                        str(trigger["trigger_id"]),
+                        next_fire.astimezone(timezone.utc).isoformat(),
+                    )
             except Exception:
                 self.store.set_schedule_next_fire(
                     str(trigger["trigger_id"]),
@@ -343,7 +346,9 @@ class WorkflowService:
                     if mode in {"continue", "error_branch"}:
                         state["nodes"][node_id] = {"ok": False, "error": str(exc)}
                         state["completed"].append(node_id)
-                        next_nodes = self._next_nodes(definition, node_id, "error" if mode == "error_branch" else "default")
+                        next_nodes = self._next_nodes(
+                            definition, node_id, "error" if mode == "error_branch" else "default"
+                        )
                         state["queue"].extend(next_nodes)
                         self.store.checkpoint_run(run["run_id"], state, owner)
                         continue
@@ -351,7 +356,9 @@ class WorkflowService:
                 if outcome.wait is not None:
                     state["queue"].insert(0, node_id)
                     self.store.checkpoint_run(run["run_id"], state, owner)
-                    self.store.finish_node(run, node_run_id, node_id, "waiting", output={"wait_id": outcome.wait["wait_id"]})
+                    self.store.finish_node(
+                        run, node_run_id, node_id, "waiting", output={"wait_id": outcome.wait["wait_id"]}
+                    )
                     self.store.update_run_state(run["run_id"], state, status="waiting")
                     return
                 self.store.finish_node(run, node_run_id, node_id, "succeeded", output=outcome.output)
@@ -366,7 +373,13 @@ class WorkflowService:
                     raise WorkflowError("节点 {} 的分支 {} 未连接后续节点".format(node_id, outcome.port))
                 state["queue"].extend(next_nodes)
                 self.store.checkpoint_run(run["run_id"], state, owner)
-            self.store.finish_run(run["run_id"], "succeeded", output=state["nodes"].get(state["completed"][-1], {}) if state["completed"] else {})
+            self.store.finish_run(
+                run["run_id"],
+                "succeeded",
+                output=(
+                    state["nodes"].get(state["completed"][-1], {}) if state["completed"] else {}
+                ),
+            )
         except Exception as exc:
             try:
                 self.store.finish_run(run["run_id"], "failed", error={"message": str(exc)})
@@ -422,7 +435,10 @@ class WorkflowService:
             if existing is not None and existing["status"] != "pending":
                 if node_type == "approval":
                     approved = existing["status"] == "approved"
-                    return NodeOutcome(existing.get("response") or {"approved": approved}, "approved" if approved else "rejected")
+                    return NodeOutcome(
+                        existing.get("response") or {"approved": approved},
+                        "approved" if approved else "rejected",
+                    )
                 if existing["status"] in {"expired", "rejected"}:
                     raise WorkflowError("补充输入未在有效期内完成")
                 resolved = existing.get("response") or {}
@@ -433,7 +449,11 @@ class WorkflowService:
                 run,
                 node_id,
                 "approval" if node_type == "approval" else "input",
-                {"title": config.get("title") or node["name"], "fields": config.get("fields") or [], "payload": config.get("payload")},
+                {
+                    "title": config.get("title") or node["name"],
+                    "fields": config.get("fields") or [],
+                    "payload": config.get("payload"),
+                },
                 config.get("assignees") or {"roles": ["owner", "admin"]},
                 ttl,
             )
@@ -464,7 +484,12 @@ class WorkflowService:
         if node_type == "agent":
             if self.agent_service is None:
                 raise WorkflowError("智能体服务不可用")
-            return NodeOutcome({"text": self.agent_service.generate(str(config.get("agent_id") or ""), str(config.get("prompt") or ""))})
+            return NodeOutcome({
+                "text": self.agent_service.generate(
+                    str(config.get("agent_id") or ""),
+                    str(config.get("prompt") or ""),
+                )
+            })
         if node_type == "knowledge":
             if self.knowledge_service is None:
                 raise WorkflowError("知识库服务不可用")
@@ -493,7 +518,13 @@ class WorkflowService:
         if node_type == "datasource":
             if self.datasource_service is None:
                 raise WorkflowError("数据源服务不可用")
-            return NodeOutcome(self.datasource_service.query(str(config.get("datasource_id") or ""), str(config.get("sql") or ""), limit=config.get("limit")))
+            return NodeOutcome(
+                self.datasource_service.query(
+                    str(config.get("datasource_id") or ""),
+                    str(config.get("sql") or ""),
+                    limit=config.get("limit"),
+                )
+            )
         if node_type == "http":
             return NodeOutcome(self._http(run, config, node_id))
         if node_type == "notification":
@@ -581,14 +612,25 @@ class WorkflowService:
                 return False
         raise WorkflowError("不支持的条件操作符：{}".format(operator))
 
-    def _create_wait(self, run: Mapping[str, Any], node_id: str, wait_type: str, payload: Any, assignees: Any, ttl_seconds: int) -> Dict[str, Any]:
+    def _create_wait(
+        self,
+        run: Mapping[str, Any],
+        node_id: str,
+        wait_type: str,
+        payload: Any,
+        assignees: Any,
+        ttl_seconds: int,
+    ) -> Dict[str, Any]:
         expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
         wait = self.store.create_wait(run, node_id, wait_type, payload, assignees, expires)
         if wait_type in {"approval", "input"} and self.notification_service is not None:
             try:
                 self.notification_service.enqueue_text_to_tenant(
                     run["organization_id"],
-                    "【工作流待办】{}\n请登录组织工作台处理，截止时间：{}".format(payload.get("title") or node_id, expires),
+                    (
+                        "【工作流待办】{}\n"
+                        "请登录组织工作台处理，截止时间：{}"
+                    ).format(payload.get("title") or node_id, expires),
                     source_type="workflow_wait",
                     source_key=wait["wait_id"],
                     source_ref=run["run_id"],
@@ -600,9 +642,13 @@ class WorkflowService:
 
     def _safety_required(self, node_type: str, config: Mapping[str, Any]) -> bool:
         if node_type == "tool":
-            return bool(self.tool_runtime is None or self.tool_runtime.requires_approval(str(config.get("tool_name") or ""), dict(config.get("arguments") or {})))
+            return bool(self.tool_runtime is None or self.tool_runtime.requires_approval(
+                str(config.get("tool_name") or ""), dict(config.get("arguments") or {})
+            ))
         if node_type == "script":
-            return bool(self.script_service is None or self.script_service.requires_approval(str(config.get("script_id") or "")))
+            return bool(self.script_service is None or self.script_service.requires_approval(
+                str(config.get("script_id") or "")
+            ))
         if node_type == "http":
             return str(config.get("method") or "GET").upper() not in {"GET", "HEAD"}
         return node_type == "notification"
@@ -640,9 +686,15 @@ class WorkflowService:
             raise WorkflowError("模型服务不可用")
         prompt = str(config.get("prompt") or config.get("text") or "")
         if node_type == "extract":
-            prompt = "请只返回 JSON 对象，并按字段要求提取信息。\n字段：{}\n内容：{}".format(json.dumps(config.get("fields") or [], ensure_ascii=False), prompt)
+            prompt = (
+                "请只返回 JSON 对象，并按字段要求提取信息。\n"
+                "字段：{}\n内容：{}"
+            ).format(json.dumps(config.get("fields") or [], ensure_ascii=False), prompt)
         elif node_type == "classifier":
-            prompt = "请只返回最匹配的分类编号。\n分类：{}\n内容：{}".format(json.dumps(config.get("categories") or [], ensure_ascii=False), prompt)
+            prompt = (
+                "请只返回最匹配的分类编号。\n"
+                "分类：{}\n内容：{}"
+            ).format(json.dumps(config.get("categories") or [], ensure_ascii=False), prompt)
         try:
             session = self.model_router.session(
                 "auto", start_profile_id=config.get("model") or None
@@ -678,7 +730,12 @@ class WorkflowService:
         if parsed.scheme != "https" or not parsed.hostname:
             raise WorkflowError("工作流 HTTP 节点仅允许有效的 HTTPS 地址")
         try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(
+                    parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
+                )
+            }
             for address in addresses:
                 ip = ipaddress.ip_address(address)
                 if not ip.is_global:
@@ -699,7 +756,10 @@ class WorkflowService:
                 raise WorkflowError("工作流 HTTPS 凭据格式无效")
             headers.update({str(key): str(value) for key, value in parsed_secret.items()})
         try:
-            with httpx.Client(trust_env=False, follow_redirects=False, timeout=float(config.get("timeout_seconds", 30))) as client:
+            with httpx.Client(
+                trust_env=False, follow_redirects=False,
+                timeout=float(config.get("timeout_seconds", 30)),
+            ) as client:
                 response = client.request(
                     str(config.get("method") or "GET").upper(),
                     url,
@@ -713,7 +773,13 @@ class WorkflowService:
         except httpx.HTTPError as exc:
             raise WorkflowError("工作流 HTTPS 请求失败：{}".format(type(exc).__name__)) from exc
 
-    def design_suggestion(self, organization_id: str, instruction: str, current: Mapping[str, Any], user_id: int) -> Dict[str, Any]:
+    def design_suggestion(
+        self,
+        organization_id: str,
+        instruction: str,
+        current: Mapping[str, Any],
+        user_id: int,
+    ) -> Dict[str, Any]:
         if self.model_router is None:
             raise WorkflowError("模型服务不可用")
         instruction = instruction.strip()
@@ -764,7 +830,10 @@ class WorkflowService:
                     CanonicalMessage("assistant", text),
                     CanonicalMessage(
                         "user",
-                        "候选 DSL 未通过校验：{}。请修复并仅返回完整 JSON；这是唯一一次自动修复。".format(str(first_error)[:1000]),
+                        (
+                            "候选 DSL 未通过校验：{}。"
+                            "请修复并仅返回完整 JSON；这是唯一一次自动修复。"
+                        ).format(str(first_error)[:1000]),
                     ),
                 ],
                 context=ModelCallContext(

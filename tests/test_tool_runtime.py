@@ -109,6 +109,49 @@ class ToolRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(read.data["content"], "hello world")
 
+    def test_search_text_python_fallback_when_ripgrep_missing(self) -> None:
+        (self.root / "notes.txt").write_text("hello world\n", encoding="utf-8")
+        with patch("src.core.tooling.runtime._find_ripgrep", return_value=None):
+            searched = self.runtime.execute("search_text", {"query": "hello"})
+        self.assertTrue(searched.ok)
+        self.assertEqual(len(searched.data["results"]), 1)
+
+    def test_search_text_ripgrep_matches_python_results(self) -> None:
+        import shutil
+
+        if shutil.which("rg") is None:
+            self.skipTest("ripgrep 未安装")
+        (self.root / "notes.txt").write_text("第一行\nhello world\n", encoding="utf-8")
+        (self.root / "folder").mkdir()
+        (self.root / "folder" / "code.py").write_text("print('hello')\n", encoding="utf-8")
+
+        with patch("src.core.tooling.runtime._find_ripgrep", return_value=None):
+            python_result = self.runtime.execute("search_text", {"query": "hello"})
+        rg_result = self.runtime.execute("search_text", {"query": "hello"})
+        self.assertTrue(rg_result.ok)
+
+        def normalize(data):
+            return sorted(
+                (Path(item["path"]).name, item["line"]) for item in data["results"]
+            )
+
+        self.assertEqual(normalize(rg_result.data), normalize(python_result.data))
+
+    def test_search_text_ripgrep_filters_denied_paths(self) -> None:
+        import shutil
+
+        if shutil.which("rg") is None:
+            self.skipTest("ripgrep 未安装")
+        (self.root / ".env").write_text("SECRET=hello\n", encoding="utf-8")
+        (self.root / ".git").mkdir()
+        (self.root / ".git" / "config").write_text("hello\n", encoding="utf-8")
+        (self.root / "safe.txt").write_text("hello\n", encoding="utf-8")
+
+        searched = self.runtime.execute("search_text", {"query": "hello"})
+        self.assertTrue(searched.ok)
+        names = [Path(item["path"]).name for item in searched.data["results"]]
+        self.assertEqual(names, ["safe.txt"])
+
     def test_audit_logger_receives_model_context_without_output_body(self) -> None:
         logs = []
         self.runtime.audit_logger = lambda *values: logs.append(values)

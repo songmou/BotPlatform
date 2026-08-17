@@ -100,6 +100,7 @@ BUILTIN_TOOL_NAMES = {
     "db_describe_table",
     "db_query",
     "db_execute",
+    "git",
 }
 KNOWN_TOOL_NAMES = BUILTIN_TOOL_NAMES | plugin_tool_names()
 
@@ -122,6 +123,18 @@ KNOWN_COMMAND_PROFILES = {
     "workspace_script",
 }
 
+KNOWN_GIT_COMMANDS = {
+    "init", "clone", "status", "log", "diff", "show",
+    "add", "commit", "push", "pull", "branch", "checkout",
+    "grep", "remote", "fetch",
+}
+
+_GIT_FIELDS = {
+    "git_enabled", "git_root", "git_author_name", "git_author_email",
+    "git_default_timeout_seconds", "git_max_timeout_seconds",
+    "git_allowed_commands", "git_max_output_bytes", "git_binary_path",
+}
+
 
 @dataclass(frozen=True)
 class ToolConfig:
@@ -140,6 +153,15 @@ class ToolConfig:
     default_command_timeout_seconds: int
     max_command_timeout_seconds: int
     enabled_command_profiles: List[str]
+    git_enabled: bool = True
+    git_root: str = "$TENANT_WORKSPACE/git_repos"
+    git_author_name: str = "BotPlatform Agent"
+    git_author_email: str = "agent@botplatform.local"
+    git_default_timeout_seconds: int = 60
+    git_max_timeout_seconds: int = 300
+    git_allowed_commands: List[str] = field(default_factory=lambda: sorted(KNOWN_GIT_COMMANDS))
+    git_max_output_bytes: int = 65536
+    git_binary_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -376,6 +398,19 @@ class ProjectConfig:
         self.models.clear()
         self.models.update(models)
 
+    def update_agents(self, agents: "Dict[str, AgentPreset]") -> None:
+        """Apply a runtime agent registry update in place.
+
+        The dict object is mutated in place so ``AgentService.agents``
+        (same reference) observes the change immediately.  Used by the
+        catalog activation path so a platform-level agent edit (e.g. tool
+        list change) becomes effective without a process restart.
+        """
+        if not isinstance(agents, dict):
+            raise ConfigError("运行时 agents 更新必须提供字典")
+        self.agents.clear()
+        self.agents.update(agents)
+
     @property
     def active_agent(self) -> AgentPreset:
         return self.agents[self.app.default_agent]
@@ -492,7 +527,7 @@ def _load_tools(path: Path) -> ToolConfig:
         "max_search_results", "max_command_output_bytes",
         "default_command_timeout_seconds", "max_command_timeout_seconds",
         "enabled_command_profiles",
-    }, path)
+    } | _GIT_FIELDS, path)
     enabled = data.get("enabled")
     if not isinstance(enabled, bool):
         raise _error(path, "enabled", "必须是布尔值")
@@ -545,6 +580,55 @@ def _load_tools(path: Path) -> ToolConfig:
             "不能大于 max_command_timeout_seconds",
         )
 
+    # --- Git 配置解析 ---
+    git_enabled = data.get("git_enabled", True)
+    if not isinstance(git_enabled, bool):
+        raise _error(path, "git_enabled", "必须是布尔值")
+
+    git_root = data.get("git_root", "$TENANT_WORKSPACE/git_repos")
+    if not isinstance(git_root, str) or not git_root.strip():
+        raise _error(path, "git_root", "必须是非空字符串")
+
+    git_author_name = data.get("git_author_name", "BotPlatform Agent")
+    if not isinstance(git_author_name, str) or not git_author_name.strip():
+        raise _error(path, "git_author_name", "必须是非空字符串")
+
+    git_author_email = data.get("git_author_email", "agent@botplatform.local")
+    if not isinstance(git_author_email, str) or not git_author_email.strip():
+        raise _error(path, "git_author_email", "必须是非空字符串")
+
+    git_default_timeout = data.get("git_default_timeout_seconds", 60)
+    if not isinstance(git_default_timeout, int) or isinstance(git_default_timeout, bool) or git_default_timeout < 1:
+        raise _error(path, "git_default_timeout_seconds", "必须是大于 0 的整数")
+    git_max_timeout = data.get("git_max_timeout_seconds", 300)
+    if not isinstance(git_max_timeout, int) or isinstance(git_max_timeout, bool) or git_max_timeout < 1:
+        raise _error(path, "git_max_timeout_seconds", "必须是大于 0 的整数")
+    if git_default_timeout > git_max_timeout:
+        raise _error(
+            path,
+            "git_default_timeout_seconds",
+            "不能大于 git_max_timeout_seconds",
+        )
+
+    git_allowed_commands = data.get("git_allowed_commands", sorted(KNOWN_GIT_COMMANDS))
+    if not isinstance(git_allowed_commands, list) or not git_allowed_commands:
+        raise _error(path, "git_allowed_commands", "必须是非空数组")
+    unknown_git = sorted(set(git_allowed_commands) - KNOWN_GIT_COMMANDS)
+    if unknown_git:
+        raise _error(
+            path,
+            "git_allowed_commands",
+            "包含未知 git 命令：{}".format(", ".join(unknown_git)),
+        )
+
+    git_max_output_bytes = data.get("git_max_output_bytes", 65536)
+    if not isinstance(git_max_output_bytes, int) or isinstance(git_max_output_bytes, bool) or git_max_output_bytes < 1:
+        raise _error(path, "git_max_output_bytes", "必须是大于 0 的整数")
+
+    git_binary_path = data.get("git_binary_path", "")
+    if not isinstance(git_binary_path, str):
+        raise _error(path, "git_binary_path", "必须是字符串")
+
     return ToolConfig(
         enabled=enabled,
         default_working_directory=str(default_directory),
@@ -561,6 +645,15 @@ def _load_tools(path: Path) -> ToolConfig:
         default_command_timeout_seconds=default_timeout,
         max_command_timeout_seconds=max_timeout,
         enabled_command_profiles=profiles,
+        git_enabled=git_enabled,
+        git_root=git_root,
+        git_author_name=git_author_name,
+        git_author_email=git_author_email,
+        git_default_timeout_seconds=git_default_timeout,
+        git_max_timeout_seconds=git_max_timeout,
+        git_allowed_commands=git_allowed_commands,
+        git_max_output_bytes=git_max_output_bytes,
+        git_binary_path=git_binary_path,
     )
 
 

@@ -31,5 +31,18 @@
     "npm_script",
     "ollama_readonly",
     "workspace_script"
-  ]
+  ],
+  "git_enabled": true,
+  "git_root": "$TENANT_WORKSPACE/git_repos",
+  "git_author_name": "BotPlatform Agent",
+  "git_author_email": "agent@botplatform.local",
+  "git_default_timeout_seconds": 60,
+  "git_max_timeout_seconds": 300,
+  "git_allowed_commands": [
+    "init", "clone", "status", "log", "diff", "show",
+    "add", "commit", "push", "pull", "branch", "checkout", "grep",
+    "remote", "fetch"
+  ],
+  "git_max_output_bytes": 65536,
+  "git_binary_path": ""
 }

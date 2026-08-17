@@ -35,14 +35,30 @@ document.addEventListener("click", function (evt) {
     group.classList.toggle("open");
     toggle.setAttribute("aria-expanded", group.classList.contains("open") ? "true" : "false");
     // When the group was collapsed (i.e. we are on a different page), navigate to
-    // its primary page so the header still works as an entry point. Otherwise the
-    // click is a pure expand/collapse toggle and no navigation should happen.
+    // the last clicked sub-item, or the default toggle href if none saved.
+    // This lets users switch between sub-items (工具/Skill/MCP/数据库) without
+    // always being forced back to the first one.
     if (!wasOpen) {
-        var href = toggle.getAttribute("href");
+        var key = "bp-nav-last-sub:" + toggle.getAttribute("href");
+        var saved = null;
+        try { saved = localStorage.getItem(key); } catch (e) {}
+        var href = saved || toggle.getAttribute("href");
         if (href && href !== location.pathname) {
             window.location.href = href;
         }
     }
+});
+
+// Remember the last clicked sub-item per nav-group so re-expanding the group
+// goes to the previously selected page, not the default first one.
+document.addEventListener("click", function (evt) {
+    var sub = evt.target.closest && evt.target.closest(".nav-group .nav-sub-item");
+    if (!sub) return;
+    var group = sub.closest(".nav-group");
+    if (!group) return;
+    var toggle = group.querySelector(".nav-group-toggle");
+    if (!toggle) return;
+    try { localStorage.setItem("bp-nav-last-sub:" + toggle.getAttribute("href"), sub.getAttribute("href")); } catch (e) {}
 });
 
 function showToast(message, type) {

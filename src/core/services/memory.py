@@ -276,7 +276,8 @@ class MemoryService:
         if self.extractor is None:
             return True, [], False
         if SECRET_PATTERN.search(question):
-            succeeded, raw_candidates = True, []
+            succeeded = True
+            raw_candidates: List[Any] = []
         else:
             succeeded, raw_candidates = self._call_extractor(question, answer)
         if not succeeded:

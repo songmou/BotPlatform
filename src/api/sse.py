@@ -53,6 +53,10 @@ def sse_tool_result(name: str, result: dict) -> str:
     return sse_event({"type": "tool_result", "name": name, "result": result})
 
 
+def sse_tool_progress(name: str, detail: str, percent: int) -> str:
+    return sse_event({"type": "tool_progress", "name": name, "detail": detail, "percent": percent})
+
+
 def sse_sources(sources: list) -> str:
     return sse_event({"type": "sources", "sources": sources})
 

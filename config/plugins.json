@@ -7,7 +7,7 @@
     },
     {
       "id": "browser_automation",
-      "enabled": true,
+      "enabled": false,
       "settings": {
         "headless": true,
         "navigation_timeout_seconds": 30,
@@ -43,7 +43,7 @@
     },
     {
       "id": "ocr",
-      "enabled": true,
+      "enabled": false,
       "settings": {
         "auto_process_chat_images": true,
         "engine": "paddleocr",

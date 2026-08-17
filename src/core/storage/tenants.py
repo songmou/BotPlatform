@@ -53,6 +53,8 @@ class TenantRegistry:
         _secure_directory(self.data_root)
         _secure_directory(self.system_root)
         _secure_directory(self.users_root)
+        # Back-reference installed lazily by OrganizationStore.__init__.
+        self.organization_store: Any = None
         try:
             self.database = database or Database(self.system_root / "botplatform.sqlite3")
         except DatabaseError as exc:

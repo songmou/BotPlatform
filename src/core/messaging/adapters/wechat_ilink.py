@@ -8,7 +8,7 @@ import logging
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from src.core.integrations.ilink import (
     ILinkAPIError,
@@ -136,7 +136,7 @@ class WeChatILinkAdapter:
             )
         conversation_id = group_id or sender_id
         text, image_item = extract_text_and_image(message)
-        attachments = ()
+        attachments: Tuple[AttachmentRef, ...] = ()
         if image_item is not None:
             attachments = (
                 AttachmentRef(
@@ -172,13 +172,6 @@ class WeChatILinkAdapter:
             ),
             occurred_at=occurred_at,
         )
-
-    @staticmethod
-    def _context_token(endpoint: DeliveryEndpoint) -> str:
-        token = str(endpoint.route_context.get("context_token") or "").strip()
-        if not token:
-            raise RecipientUnavailable("微信收件上下文缺失，等待用户再次私聊机器人")
-        return token
 
     @staticmethod
     def _translate(exc: ILinkError) -> Exception:
@@ -243,7 +236,7 @@ class WeChatILinkAdapter:
     @contextmanager
     def typing(self, endpoint: DeliveryEndpoint) -> Iterator[None]:
         token = self._resolve_token(endpoint)
-        errors: List[str] = []
+        errors: List[ILinkError] = []
         try:
             with self.client.typing(
                 endpoint.recipient_id,

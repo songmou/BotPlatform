@@ -14,11 +14,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from src.core.config.loader import load_project_config
 from src.core.datasource.errors import DataSourceError
 from src.core.modeling import CanonicalMessage
 from src.core.datasource.service import DataSourceService
-from src.core.services.agent import AgentService
 from src.core.tooling import ApprovalRequired, FinalAnswer, ToolRuntime
 
 from tests._pg_docker import require_postgres

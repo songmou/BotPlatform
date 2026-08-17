@@ -93,7 +93,7 @@ def check_configuration(
         "feishu": "私聊、群聊 @、文字、图片、主动通知",
     }
     for channel in config.channels.values():
-        target = config_dir / "channels.json"
+        channel_target = config_dir / "channels.json"
         if channel.enabled:
             destination = (
                 report.ready
@@ -113,12 +113,12 @@ def check_configuration(
                         capability_labels.get(channel.type, "能力由适配器声明"),
                         suffix,
                     ),
-                    target,
+                    channel_target,
                 )
             )
         else:
             report.warnings.append(
-                Diagnostic("消息渠道 {} 未启用".format(channel.id), target)
+                Diagnostic("消息渠道 {} 未启用".format(channel.id), channel_target)
             )
 
     active = config.models[config.app.active_model]
@@ -325,12 +325,12 @@ def check_configuration(
         ocr_available, ocr_reason = paddle_ocr_availability(
             build_config(ocr_plugin.settings)
         )
-        target = config_dir / "plugins.json"
+        plugin_target = config_dir / "plugins.json"
         if ocr_available:
-            report.ready.append(Diagnostic("本地 OCR 依赖和模型可用", target))
+            report.ready.append(Diagnostic("本地 OCR 依赖和模型可用", plugin_target))
         else:
             report.warnings.append(
-                Diagnostic("本地 OCR 已启用但不可用：{}".format(ocr_reason), target)
+                Diagnostic("本地 OCR 已启用但不可用：{}".format(ocr_reason), plugin_target)
             )
 
     for plugin_id, plugin in config.plugins.items():
@@ -348,14 +348,14 @@ def check_configuration(
                 or ("Chromium" if shutil.which("chromium") else None)
                 or ("Google Chrome" if shutil.which("google-chrome") else None)
             )
-            target = config_dir / "plugins.json"
+            plugin_target = config_dir / "plugins.json"
             if runtime:
-                report.ready.append(Diagnostic("浏览器运行环境可用：{}".format(runtime), target))
+                report.ready.append(Diagnostic("浏览器运行环境可用：{}".format(runtime), plugin_target))
             else:
                 report.warnings.append(
                     Diagnostic(
                         "浏览器插件已启用；请确认 Playwright Chromium 或系统浏览器已安装",
-                        target,
+                        plugin_target,
                     )
                 )
 

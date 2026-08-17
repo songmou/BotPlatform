@@ -1028,7 +1028,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lock_path.chmod(0o600)
         try:
             if os.name == "nt":
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                # Windows 特有 msvcrt 锁定调用，typeshed 未收录
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             else:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):
@@ -1069,15 +1070,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             safe_message = f"{type(exc).__name__}: {clean_text(exc, 500)}"
             logger.error("监控失败：%s", safe_message)
             result = build_error_result(target_date, safe_message)
-            paths: Dict[str, str] = {}
+            error_paths: Dict[str, str] = {}
             try:
-                paths = save_artifacts(result, results_root, config)
+                error_paths = save_artifacts(result, results_root, config)
             except Exception as save_exc:
                 logger.error("错误报告保存失败：%s", type(save_exc).__name__)
             write_script_result(
                 "failed",
                 "CTS EHR 监控运行失败，请查看本地脱敏日志。",
-                artifacts=[paths["png"]] if paths.get("png") else [],
+                artifacts=[error_paths["png"]] if error_paths.get("png") else [],
                 error=type(exc).__name__,
             )
             print("CTS EHR 监控运行失败，请查看本地日志。", file=sys.stderr)
