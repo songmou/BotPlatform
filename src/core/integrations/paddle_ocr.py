@@ -179,7 +179,7 @@ class PaddleOcrProcess:
     def __init__(self, config: OcrConfig) -> None:
         self.config = config
         self._context = multiprocessing.get_context("spawn")
-        self._process: Optional[multiprocessing.Process] = None
+        self._process: Optional[multiprocessing.context.SpawnProcess] = None
         self._requests: Any = None
         self._responses: Any = None
         self._lock = threading.RLock()
@@ -330,15 +330,25 @@ def prepare_models(config: OcrConfig) -> None:
     print("OCR 模型准备完成：{}".format(root))
 
 
+def _load_ocr_config() -> OcrConfig:
+    """Load the OCR plugin settings from the project config when enabled."""
+    from src.core.config.loader import load_project_config
+    from src.core.plugins.ocr import build_config
+
+    plugin = load_project_config(CONFIG_DIR).plugins.get("ocr")
+    if plugin is None or not plugin.enabled:
+        return OcrConfig(enabled=False)
+    return build_config(plugin.settings)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="准备 BotPlatform 本地 OCR 模型")
     parser.add_argument(
         "action", choices=["prepare", "check"], help="下载模型或检查模型状态"
     )
     args = parser.parse_args()
-    from src.core.config.loader import load_project_config
 
-    config = load_project_config(CONFIG_DIR).tools.ocr
+    config = _load_ocr_config()
     if args.action == "prepare":
         prepare_models(config)
         return

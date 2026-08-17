@@ -353,13 +353,13 @@ def run_channel_command(
         return 0
     if args.action == "test":
         try:
-            credentials = credential_store.load(
+            channel_credentials = credential_store.load(
                 channel.id,
                 channel.type,
                 required=True,
             )
-            assert credentials is not None
-            build_channel_adapter(channel, credentials).close()
+            assert channel_credentials is not None
+            build_channel_adapter(channel, channel_credentials).close()
         except (ChannelCredentialError, OSError, ValueError) as exc:
             print("渠道检查失败：{}。".format(exc), file=error_stream)
             return 1

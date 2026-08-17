@@ -68,7 +68,7 @@ def _now() -> str:
 
 
 def _json_value(value: Any) -> Any:
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return {key: _json_value(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}
@@ -795,6 +795,45 @@ class ScopedResourceStore:
                 "organization_id, default_agent_id, updated_at) VALUES (?, ?, ?)",
                 (organization_id, default_id, timestamp),
             )
+
+    def sync_organization_agents(
+        self, agent_id: str, payload: Optional[Dict[str, Any]]
+    ) -> int:
+        """Propagate a platform agent update to seeded organization rows.
+
+        Organizations that seeded their agent from this platform template
+        (``template_resource_id``) get the new payload immediately, so a
+        platform-level edit (e.g. tool list change) is visible to the web
+        chat path without a restart.  Returns the number of rows updated.
+        """
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            if payload is None:
+                cursor = connection.execute(
+                    "DELETE FROM organization_agents "
+                    "WHERE template_resource_id=? AND agent_id=template_resource_id",
+                    (agent_id,),
+                )
+                return cursor.rowcount
+            normalized = dict(payload)
+            normalized["id"] = agent_id
+            enabled = 1 if bool(normalized.get("enabled", True)) else 0
+            serialized = json.dumps(
+                normalized, ensure_ascii=False, separators=(",", ":")
+            )
+            cursor = connection.execute(
+                "UPDATE organization_agents SET revision=revision+1, "
+                "enabled=?, payload_json=?, template_revision=?, updated_at=? "
+                "WHERE template_resource_id=? AND agent_id=template_resource_id",
+                (
+                    enabled,
+                    serialized,
+                    int(payload.get("revision", 0)),
+                    timestamp,
+                    agent_id,
+                ),
+            )
+            return cursor.rowcount
 
     @staticmethod
     def _organization_agent_row(row: Any) -> Dict[str, Any]:

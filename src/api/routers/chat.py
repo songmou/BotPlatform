@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
+import threading
+import time
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -32,6 +35,7 @@ from src.api.sse import (
     sse_thinking,
     sse_token,
     sse_tool_call,
+    sse_tool_progress,
     sse_tool_result,
     streaming_response,
 )
@@ -43,11 +47,17 @@ from src.core.modeling.contracts import (
     ModelRequest,
 )
 from src.core.config.loader import AgentPreset, Capability
-from src.core.services.agent_tools import build_system_prompt, resolve_tool_names
+from src.core.services.agent_tools import (
+    build_system_prompt,
+    is_tool_call_text,
+    resolve_tool_names,
+    sanitize_tool_call_text,
+    strip_tool_call_text,
+)
 from src.core.services.resources import ResourceError
 from src.core.storage.organizations import OrganizationError
 from src.core.storage.tenants import TenantContext
-from src.core.tooling.models import ToolAuditContext
+from src.core.tooling.models import ToolAuditContext, ToolError
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +415,7 @@ def _orchestrate(
         for item in plan:
             yield sse_agent_start(item["agent_id"], item["agent_name"], item["subtask"])
 
-        results = [None] * len(plan)
+        results: List[Optional[Dict[str, Any]]] = [None] * len(plan)
         with ThreadPoolExecutor(max_workers=min(len(plan), 4)) as executor:
             future_to_idx = {}
             for idx, item in enumerate(plan):
@@ -786,7 +796,16 @@ def chat(
                 if hasattr(client, "complete_stream"):
                     for chunk in client.complete_stream(req):
                         full_text += chunk
+                        # 硬拦截：模型输出文本格式工具调用（幻觉）时立即停止，
+                        # 不把 <tool_calls> 等原文展示给用户。
+                        if is_tool_call_text(full_text):
+                            break
                         yield sse_token(chunk)
+                    if is_tool_call_text(full_text):
+                        # 已发出的 token 无法撤回，只发 done 让前端用全文覆盖显示。
+                        full_text = sanitize_tool_call_text(full_text)
+                        yield sse_done(full_text, run_id)
+                        return
                     if knowledge_service is not None and knowledge_hits:
                         cited = knowledge_service.append_citations(
                             full_text, knowledge_hits
@@ -799,6 +818,10 @@ def chat(
                 else:
                     resp = session.complete(req)
                     full_text = resp.message.content.strip()
+                    if is_tool_call_text(full_text):
+                        full_text = sanitize_tool_call_text(full_text)
+                        yield sse_done(full_text, run_id)
+                        return
                     if knowledge_service is not None and knowledge_hits:
                         full_text = knowledge_service.append_citations(
                             full_text, knowledge_hits
@@ -810,7 +833,13 @@ def chat(
                 yield from stream_final(current_messages)
             else:
                 tool_used = False
+                loop_started = time.monotonic()
                 for _round in range(max_tool_rounds):
+                    if time.monotonic() - loop_started > 600:
+                        full_text = "工具执行超过 10 分钟，已停止。请重试。"
+                        yield sse_token(full_text)
+                        yield sse_done(full_text)
+                        return
                     current_request = ModelRequest(
                         messages=current_messages,
                         generation=generation,
@@ -828,9 +857,22 @@ def chat(
                             thinking_content = str(val).strip()
                             break
                     if thinking_content:
-                        yield sse_thinking(thinking_content)
+                        # 思考草稿里常混有文本格式工具调用（幻觉），剥离后
+                        # 为空则不再发送，避免把 <tool_calls> 原文展示给用户。
+                        if is_tool_call_text(thinking_content):
+                            thinking_content = strip_tool_call_text(thinking_content)
+                        if thinking_content:
+                            yield sse_thinking(thinking_content)
 
                     if not response.message.tool_calls:
+                        # 硬拦截：模型应调用工具却输出文本格式调用（幻觉）时，
+                        # 直接给出友好提示，不把 <tool_calls> 原文展示给用户。
+                        answer = response.message.content.strip()
+                        if is_tool_call_text(answer):
+                            answer = sanitize_tool_call_text(answer)
+                            yield sse_token(answer)
+                            yield sse_done(answer, run_id)
+                            return
                         if not tool_used:
                             yield from stream_final(current_messages)
                         else:
@@ -838,12 +880,27 @@ def chat(
                         break
 
                     tool_used = True
+                    # assistant(tool_calls) 消息每个 round 只追加一次；
+                    # 若在循环内追加，多个 tool_calls 时会被重复加入，导致
+                    # 后一条 assistant 缺少对应 tool 响应而触发 400。
+                    current_messages.append(response.message)
                     for tc in response.message.tool_calls:
                         tool_name = tc.name or "unknown"
                         tool_args = tc.arguments if isinstance(tc.arguments, dict) else {}
                         yield sse_tool_call(tool_name, tool_args)
 
                         try:
+                            # Web 聊天没有审批交互，需要确认的 git 写操作
+                            # （commit/push/reset/branch -d 等）一律拒绝执行；
+                            # clone/pull/fetch 只写沙箱，不在此列。
+                            if tool_name == "git" and tool_runtime.requires_approval(
+                                tool_name, tool_args
+                            ):
+                                raise ToolError(
+                                    "该 git 操作需要人工确认，Web 聊天暂不支持审批；"
+                                    "请改用支持审批的聊天渠道执行，"
+                                    "或改用 clone/pull/fetch 等拉取类操作。"
+                                )
                             _bind_agent_scope(tool_runtime, tenant, agent)
                             if tool_name == "knowledge_search":
                                 result = tool_runtime.execute(
@@ -854,6 +911,45 @@ def chat(
                                         agent_id=agent.id,
                                     ),
                                 )
+                            elif tool_name == "git":
+                                progress_queue: queue.Queue[Any] = queue.Queue()
+                                holder: dict = {}
+
+                                def _progress(percent: int, detail: str) -> None:
+                                    try:
+                                        progress_queue.put(
+                                            {"percent": int(percent), "detail": str(detail)}
+                                        )
+                                    except Exception:
+                                        pass
+
+                                def _run_tool() -> None:
+                                    try:
+                                        # 租户绑定是线程局部的，新线程必须重新绑定
+                                        _bind_agent_scope(tool_runtime, tenant, agent)
+                                        holder["result"] = tool_runtime.execute(
+                                            tool_name,
+                                            tool_args,
+                                            progress_callback=_progress,
+                                        )
+                                    except Exception as exc:
+                                        holder["error"] = exc
+                                    finally:
+                                        progress_queue.put(None)
+
+                                worker = threading.Thread(target=_run_tool, daemon=True)
+                                worker.start()
+                                while True:
+                                    item = progress_queue.get()
+                                    if item is None:
+                                        break
+                                    yield sse_tool_progress(
+                                        tool_name, item["detail"], item["percent"]
+                                    )
+                                worker.join(timeout=2)
+                                if "error" in holder:
+                                    raise holder["error"]
+                                result = holder["result"]
                             else:
                                 result = tool_runtime.execute(
                                     tool_name, tool_args
@@ -864,7 +960,6 @@ def chat(
 
                         yield sse_tool_result(tool_name, result_payload)
 
-                        current_messages.append(response.message)
                         current_messages.append(CanonicalMessage(
                             role="tool",
                             content=json.dumps(result_payload, ensure_ascii=False),

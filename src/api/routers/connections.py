@@ -156,8 +156,8 @@ def list_connections(request: Request, principal=Depends(get_principal)):
             manager = managers.get(item["connection_id"])
             item["login"] = manager.status() if manager else None
         if item["platform"] == "feishu":
-            manager = feishu_managers.get(item["connection_id"])
-            item["registration"] = manager.status() if manager else None
+            feishu_manager = feishu_managers.get(item["connection_id"])
+            item["registration"] = feishu_manager.status() if feishu_manager else None
         items.append(item)
     return {"items": items}
 

@@ -21,6 +21,7 @@ from src.api.deps import (
     require_permission,
 )
 from src.api.schemas import (
+    GitCredentialIn,
     PluginDataDeleteIn,
     PluginOut,
     PluginPackageIn,
@@ -49,6 +50,8 @@ from src.core.plugins.setup import (
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 tools_router = APIRouter(prefix="/api/tools", tags=["tools"])
+# 无前缀路由：承载租户级工具端点（如 git 凭据管理）
+tenant_tools_router = APIRouter(tags=["tools"])
 
 PLUGINS_FILE = CONFIG_DIR / "plugins.json"
 PLUGIN_PACKAGES_DIR = SYSTEM_DATA_DIR / "plugins"
@@ -67,6 +70,7 @@ TOOL_CATEGORIES = [
     ]),
     ("系统信息", ["get_current_time", "get_system_info", "get_disk_usage", "list_processes"]),
     ("命令执行", ["run_command"]),
+    ("Git", ["git"]),
     ("脚本", [
         "list_scripts", "run_script", "get_script_run", "cancel_script_run",
         "list_script_schedules", "manage_script_schedule",
@@ -516,14 +520,14 @@ def list_tools(request: Request):
     result = []
     for category, tool_names in TOOL_CATEGORIES:
         for name in tool_names:
-            definition = TOOL_DEFINITIONS.get(name, {})
+            builtin_definition = TOOL_DEFINITIONS.get(name, {})
             state = runtime.get_tool_state(name) if runtime else {
                 "enabled": True,
                 "require_approval": name in APPROVAL_TOOLS,
             }
             result.append({
                 "name": name,
-                "description": definition.get("description", ""),
+                "description": builtin_definition.get("description", ""),
                 "category": category,
                 "source_type": "builtin",
                 "source_id": None,
@@ -564,6 +568,69 @@ def _load_tool_states() -> dict:
     if TOOL_STATE_FILE.exists():
         return json.loads(TOOL_STATE_FILE.read_text(encoding="utf-8"))
     return {"tools": {}}
+
+
+def _tenant(request: Request, tenant_id: str):
+    from src.core.storage.tenants import TenantStoreError
+
+    registry = get_registry(request)
+    if registry is None:
+        raise HTTPException(status_code=503, detail="租户服务不可用")
+    try:
+        return registry.get(tenant_id)
+    except TenantStoreError as exc:
+        raise HTTPException(status_code=404, detail="租户不存在") from exc
+
+
+@tenant_tools_router.post("/api/tenants/{tenant_id}/git/credentials")
+def save_git_credential(
+    tenant_id: str,
+    body: GitCredentialIn,
+    request: Request,
+    principal=Depends(require_permission("tenants.manage")),
+):
+    """保存某个租户、某个 git 平台域名（如 github.com）的 HTTPS Token。"""
+    from src.core.config.git_credentials import save_token
+    from src.core.integrations.keychain import KeychainError
+
+    tenant = _tenant(request, tenant_id)
+    host = body.host.strip().lower()
+    try:
+        save_token(tenant.tenant_id, host, body.token)
+    except KeychainError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"tenant_id": tenant.tenant_id, "host": host, "configured": True}
+
+
+@tenant_tools_router.get("/api/tenants/{tenant_id}/git/credentials")
+def list_git_credentials(
+    tenant_id: str,
+    request: Request,
+    principal=Depends(require_permission("tenants.read")),
+):
+    """列出某个租户已配置的 git 凭据域名（不返回 Token 明文）。"""
+    from src.core.config.git_credentials import list_credentials
+
+    tenant = _tenant(request, tenant_id)
+    return list_credentials(tenant.tenant_id)
+
+
+@tenant_tools_router.delete("/api/tenants/{tenant_id}/git/credentials/{host}")
+def delete_git_credential(
+    tenant_id: str,
+    host: str,
+    request: Request,
+    principal=Depends(require_permission("tenants.manage")),
+):
+    """删除某个租户、某个 git 平台域名的 Token。"""
+    from src.core.config.git_credentials import delete_token
+
+    tenant = _tenant(request, tenant_id)
+    normalized = host.strip().lower()
+    delete_token(tenant.tenant_id, normalized)
+    return {"tenant_id": tenant.tenant_id, "host": normalized, "configured": False}
 
 
 @tools_router.patch("/{name}")

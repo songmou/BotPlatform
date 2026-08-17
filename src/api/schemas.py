@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthResponse(BaseModel):
@@ -118,6 +118,13 @@ class PluginDataDeleteIn(BaseModel):
 class ToolStateUpdate(BaseModel):
     enabled: Optional[bool] = None
     require_approval: Optional[bool] = None
+
+
+class GitCredentialIn(BaseModel):
+    """Store a git HTTPS token for a specific host (e.g. github.com)."""
+
+    host: str = Field(..., min_length=1, max_length=200)
+    token: str = Field(..., min_length=1, max_length=4096)
 
 
 class McpTemplateAuth(BaseModel):

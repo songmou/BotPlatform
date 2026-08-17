@@ -819,12 +819,12 @@ class NotificationService:
                     str(exc),
                 )
             except NotificationImageError as exc:
-                path = self.outbox.finish(
+                cleanup_path = self.outbox.finish(
                     int(claimed["outbox_id"]), "failed", str(exc)
                 )
-                if path:
+                if cleanup_path:
                     try:
-                        Path(path).unlink()
+                        Path(cleanup_path).unlink()
                     except OSError:
                         pass
             except (NotificationError, OSError, ValueError) as exc:
@@ -846,10 +846,10 @@ class NotificationService:
                     self._retry_delay(int(claimed["attempt_count"])),
                 )
             else:
-                path = self.outbox.finish(int(claimed["outbox_id"]), "sent")
-                if path:
+                cleanup_path = self.outbox.finish(int(claimed["outbox_id"]), "sent")
+                if cleanup_path:
                     try:
-                        Path(path).unlink()
+                        Path(cleanup_path).unlink()
                     except OSError:
                         pass
                 delivered += 1

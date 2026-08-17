@@ -732,10 +732,10 @@ class MessageBot:
             else:
                 sources = self.knowledge_service.list(tenant.tenant_id)
                 ready = sum(1 for item in sources if item["status"] == "ready")
-                pending = len(sources) - ready
+                pending_count = len(sources) - ready
                 chunks = sum(int(item["chunks"]) for item in sources)
                 reply = "私人知识库：{} 个来源，{} 个分块；已完成 {}，待向量化 {}。".format(
-                    len(sources), chunks, ready, pending
+                    len(sources), chunks, ready, pending_count
                 )
             self._reply(endpoint, reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, reply)

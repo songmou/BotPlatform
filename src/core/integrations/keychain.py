@@ -235,4 +235,15 @@ class KeychainService:
         except KeychainError:
             return False
 
+    def list_keys(self) -> list[str]:
+        """Return all stored reference keys (``service\\naccount`` strings).
+
+        Only supported for the file-backed store; the native keychain path
+        has no enumeration API and returns an empty list.
+        """
+        if self.runner is not None:
+            return []
+        with self._lock:
+            return list(self._read_file().keys())
+
 

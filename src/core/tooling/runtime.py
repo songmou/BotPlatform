@@ -23,8 +23,16 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
 from src.core.config.loader import ToolConfig
+from src.core.paths import PROJECT_ROOT
 from src.core.plugins.base import PlatformPlugin, PluginError
 from .commands import CommandRunner
+from .git_manager import GitManager
+from .git_runner import (
+    FETCH_ONLY_COMMANDS,
+    GitRunner,
+    is_write_operation,
+    requires_manual_approval,
+)
 # APPROVAL_TOOLS/TOOL_DEFINITIONS are re-exported here for backward
 # compatibility: existing callers import them from ``runtime``.
 from .definitions import (  # noqa: F401
@@ -38,6 +46,35 @@ from .models import ToolAuditContext, ToolError, ToolResult
 from src.core.storage.tenants import TenantContext, TenantRegistry
 
 logger = logging.getLogger(__name__)
+
+_RIPGREP_PATH: Optional[str] = None
+_RIPGREP_PROBE_DONE = False
+
+
+def _find_ripgrep() -> Optional[str]:
+    """Locate the ripgrep binary once per process; None when unavailable."""
+    global _RIPGREP_PATH, _RIPGREP_PROBE_DONE
+    if not _RIPGREP_PROBE_DONE:
+        _RIPGREP_PATH = shutil.which("rg")
+        _RIPGREP_PROBE_DONE = True
+    return _RIPGREP_PATH
+
+
+def _ripgrep_json_text(value: Any) -> str:
+    """Extract text from an rg --json field (text or base64 bytes)."""
+    if not isinstance(value, dict):
+        return ""
+    if isinstance(value.get("text"), str):
+        return value["text"]
+    if isinstance(value.get("bytes"), str):
+        import base64
+
+        try:
+            return base64.b64decode(value["bytes"]).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            return ""
+    return ""
+
 
 if TYPE_CHECKING:
     from src.core.services.script import ScriptService
@@ -298,6 +335,15 @@ class ToolRuntime:
             return False
         if name == "run_command":
             return self.command_runner.available
+        if name == "git":
+            if not self.config.git_enabled:
+                return False
+            configured = self.config.git_binary_path or None
+            if GitManager.find_git(configured) is not None:
+                return True
+            # Probing must never block the caller on a multi-megabyte download.
+            GitManager.prefetch_async(configured)
+            return False
         if name in {
             "list_scripts", "run_script", "get_script_run", "cancel_script_run"
         }:
@@ -362,6 +408,16 @@ class ToolRuntime:
                 )
                 if catalog:
                     description = "{}可用脚本：{}。".format(description, catalog)
+            if name == "git":
+                # 上限与默认值来自 tools.json，不能在 schema 里写死。
+                timeout = parameters["properties"]["timeout_seconds"]
+                timeout["maximum"] = self.config.git_max_timeout_seconds
+                timeout["description"] = (
+                    "命令超时秒数，默认 {}；clone/pull/fetch 默认 {}"
+                ).format(
+                    self.config.git_default_timeout_seconds,
+                    self._git_network_timeout(),
+                )
             if name in DATASOURCE_TOOLS and self.datasource_service is not None:
                 configs = self.datasource_service.list_configs()
                 ds_ids = [c["id"] for c in configs if c.get("enabled", True)]
@@ -415,6 +471,14 @@ class ToolRuntime:
             return self.script_service.requires_approval(arguments.get("script_id"))
         if name in {"cancel_script_run", "manage_script_schedule"}:
             return True
+        if name == "git":
+            if not isinstance(arguments, dict):
+                return True
+            args = arguments.get("args", [])
+            return requires_manual_approval(
+                str(arguments.get("command", "")),
+                [a for a in args if isinstance(a, str)] if isinstance(args, list) else [],
+            )
         state = self._tool_states.get(name)
         if state is not None and "require_approval" in state:
             return state["require_approval"]
@@ -655,6 +719,22 @@ class ToolRuntime:
                 reason,
                 plan.get("sql", sql),
             )
+        if name == "git":
+            command = self._string(arguments, "command")
+            args = arguments.get("args", [])
+            if not isinstance(args, list):
+                args = []
+            args = [a for a in args if isinstance(a, str)]
+            repo = self._string(arguments, "repo_path")
+            timeout = arguments.get("timeout_seconds", self.config.git_default_timeout_seconds)
+            rendered = " ".join(args) if args else "（无）"
+            action = "写入" if is_write_operation(command, args) else "读取"
+            return (
+                "Git {}操作：git {}\n"
+                "参数：{}\n"
+                "仓库：{}\n"
+                "超时：{} 秒"
+            ).format(action, command, rendered, repo, timeout)
         raise ToolError("工具缺少审批预览：{}".format(name))
 
     def execute(
@@ -662,6 +742,7 @@ class ToolRuntime:
         name: str,
         arguments: Dict[str, Any],
         audit_context: Optional[ToolAuditContext] = None,
+        progress_callback=None,
     ) -> ToolResult:
         if not self.is_tool_enabled(name):
             return ToolResult(False, error="工具已被禁用")
@@ -689,7 +770,10 @@ class ToolRuntime:
                 handler = getattr(self, "_tool_{}".format(name), None)
                 if name not in TOOL_DEFINITIONS or not handler:
                     raise ToolError("未知工具：{}".format(name))
-                data = handler(arguments)
+                if name == "git" and progress_callback is not None:
+                    data = handler(arguments, progress_callback=progress_callback)
+                else:
+                    data = handler(arguments)
             status = "成功"
             output_size = len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             return ToolResult(True, data=data)
@@ -1103,6 +1187,111 @@ class ToolRuntime:
             arguments, "max_results", min(100, self.config.max_search_results), 1,
             self.config.max_search_results,
         )
+        if _find_ripgrep() is not None:
+            outcome = self._search_text_ripgrep(
+                root, query, file_glob, case_sensitive, limit
+            )
+            if outcome is not None:
+                return outcome
+        return self._search_text_python(root, query, file_glob, case_sensitive, limit)
+
+    def _search_text_ripgrep(
+        self,
+        root: Path,
+        query: str,
+        file_glob: str,
+        case_sensitive: bool,
+        limit: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Search with ripgrep; return None so the caller falls back on failure."""
+        argv = [
+            _find_ripgrep() or "rg",
+            "--json",
+            "--fixed-strings",
+            "--line-number",
+            "--no-ignore",
+            "--hidden",
+            "--color=never",
+            "--max-filesize",
+            str(self.config.max_read_bytes),
+            "-i" if not case_sensitive else "--case-sensitive",
+        ]
+        if file_glob != "*":
+            argv += ["--glob", file_glob]
+        argv += ["--", query, str(root)]
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            return None
+        results: List[Dict[str, Any]] = []
+        truncated = False
+        deadline = time.monotonic() + 60
+        try:
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                try:
+                    event = json.loads(raw_line)
+                except ValueError:
+                    continue
+                if event.get("type") != "match":
+                    continue
+                data = event.get("data") or {}
+                path_text = _ripgrep_json_text(data.get("path"))
+                if not path_text:
+                    continue
+                try:
+                    candidate = Path(path_text).resolve()
+                except OSError:
+                    continue
+                # rg honors no ignore rules, so denied paths (.env/.git/…) must
+                # still be filtered against the platform security policy.
+                if not self._is_within_roots(candidate) or self._is_denied(candidate):
+                    continue
+                results.append(
+                    {
+                        "path": str(candidate),
+                        "line": int(data.get("line_number") or 0),
+                        "text": _ripgrep_json_text(data.get("lines")).rstrip("\r\n")[:500],
+                    }
+                )
+                if len(results) >= limit:
+                    truncated = True
+                    break
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        # Exit codes: 0 = matches, 1 = no matches, 2 = error (possibly with
+        # partial matches).  Only trust a clean run or an empty no-match run.
+        if process.returncode not in (0, 1) and not results:
+            return None
+        return {
+            "root": str(root),
+            "query": query,
+            "results": results,
+            "truncated": truncated,
+        }
+
+    def _search_text_python(
+        self,
+        root: Path,
+        query: str,
+        file_glob: str,
+        case_sensitive: bool,
+        limit: int,
+    ) -> Dict[str, Any]:
         needle = query if case_sensitive else query.lower()
         results: List[Dict[str, Any]] = []
         for candidate in self._walk(root):
@@ -1365,6 +1554,77 @@ class ToolRuntime:
     def _tool_run_command(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         prepared = self.command_runner.prepare(arguments)
         return self.command_runner.execute(prepared)
+
+    def _git_network_timeout(self) -> int:
+        """Timeout for clone/pull/fetch: the configured ceiling, never lower
+        than the ordinary default."""
+        return max(
+            self.config.git_default_timeout_seconds,
+            self.config.git_max_timeout_seconds,
+        )
+
+    def _tool_git(self, arguments: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        if not self.config.git_enabled:
+            raise ToolError("Git 工具未启用")
+        command = self._string(arguments, "command")
+        if command not in self.config.git_allowed_commands:
+            raise ToolError("git {} 不在启用的命令白名单中".format(command))
+        args = arguments.get("args", [])
+        if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
+            raise ToolError("args 必须是字符串数组")
+        repo_path = self._string(arguments, "repo_path")
+        default_timeout = (
+            self._git_network_timeout()
+            if command in FETCH_ONLY_COMMANDS
+            else self.config.git_default_timeout_seconds
+        )
+        timeout = arguments.get("timeout_seconds", default_timeout)
+        if not isinstance(timeout, int) or isinstance(timeout, bool):
+            raise ToolError("timeout_seconds 必须是整数")
+        if timeout < 1 or timeout > self.config.git_max_timeout_seconds:
+            raise ToolError("timeout_seconds 超出范围（1-{}）".format(
+                self.config.git_max_timeout_seconds
+            ))
+        git_binary = GitManager.ensure_git(self.config.git_binary_path or None)
+        # git_root 支持 $TENANT_WORKSPACE 占位符：解析为当前租户的
+        # workspace（租户文件库），使各租户的 git 仓库天然隔离。
+        raw_root = self.config.git_root
+        if "$TENANT_WORKSPACE" in raw_root:
+            if self.tenant is None or self.tenant_registry is None:
+                # 不能回退到跨租户共享目录：那既不在任何租户的文件库里，
+                # 也会让不同租户的代码混在一起。
+                raise ToolError(
+                    "git_root 配置为租户工作区，但当前未绑定租户工作区，无法执行 git 操作"
+                )
+            workspace = (
+                self.tenant_registry.tenant_root(self.tenant.tenant_id) / "workspace"
+            )
+            workspace.mkdir(parents=True, exist_ok=True)
+            git_root = Path(raw_root.replace("$TENANT_WORKSPACE", str(workspace)))
+        else:
+            git_root = Path(raw_root).expanduser()
+            if not git_root.is_absolute():
+                git_root = PROJECT_ROOT / git_root
+        git_root = git_root.resolve()
+        git_root.mkdir(parents=True, exist_ok=True)
+        display_root = git_root
+        if self.tenant is not None and self.tenant_registry is not None:
+            # 展示给用户的仓库位置以文件库（租户目录）为基准。
+            display_root = self.tenant_registry.tenant_root(
+                self.tenant.tenant_id
+            ).resolve()
+        runner = GitRunner(
+            git_binary=git_binary,
+            git_root=git_root,
+            author_name=self.config.git_author_name,
+            author_email=self.config.git_author_email,
+            max_output_bytes=self.config.git_max_output_bytes,
+            tenant_id=self.tenant.tenant_id if self.tenant is not None else None,
+            display_root=display_root,
+        )
+        return runner.execute(
+            command, args, repo_path, timeout, progress_callback=progress_callback
+        )
 
 
 def _limited_diff(old: str, new: str, label: str, limit: int = 8192) -> str:

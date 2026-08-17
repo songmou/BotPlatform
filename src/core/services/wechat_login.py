@@ -59,6 +59,7 @@ class WeChatLoginManager:
         self._qr_data_url = ""
         self._error = ""
         self._bot_id = ""
+        self.pending_holder: Dict[str, Any] = {}
 
     def is_connected(self) -> bool:
         if self._connected_checker is not None:

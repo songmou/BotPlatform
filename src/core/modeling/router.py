@@ -269,6 +269,10 @@ class ModelRouter:
             start_profile_id=start_profile_id,
         )
 
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        """Complete a request through the default per-turn routing rules."""
+        return self.session().complete(request)
+
     def can_fail_over(self, mode: str, profile_id: str, *, has_image: bool) -> bool:
         return bool(
             mode == "auto"

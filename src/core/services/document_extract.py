@@ -132,7 +132,7 @@ def _extract_docx(path: Path) -> str:
         blocks: List[str] = []
         # iter_inner_content keeps paragraphs and tables in document order.
         if hasattr(document, "iter_inner_content"):
-            items = document.iter_inner_content()
+            items: List[object] = list(document.iter_inner_content())
         else:  # pragma: no cover - older python-docx fallback
             items = list(document.paragraphs) + list(document.tables)
         for item in items:

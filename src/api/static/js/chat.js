@@ -619,16 +619,25 @@ function initChat() {
         var inSummary = false;
         var currentRunId = null;
         var activeAgentName = null;
+        var streamFinished = false;
         if (ids.length >= 1) {
             var matched = allAgents.filter(function (a) { return a.id === ids[0]; })[0];
             activeAgentName = matched ? matched.name : null;
         }
+
+        var streamStatusEl = null;
 
         if (!isMultiAgent) {
             var refs = appendMessage("assistant", "", true, activeAgentName);
             summaryBubble = refs.bubble;
             streamContentEl = refs.contentEl;
             summaryRow = refs.row;
+            // 状态行独立于正文容器：正文只放模型输出，避免占位文字被当成回答。
+            streamStatusEl = document.createElement("div");
+            streamStatusEl.className = "msg-status";
+            streamStatusEl.innerHTML =
+                '<span class="typing-dots"><i></i><i></i><i></i></span>';
+            summaryBubble.appendChild(streamStatusEl);
         }
 
         var chatUrl = organizationMode()
@@ -660,8 +669,9 @@ function initChat() {
             }
             read();
         }).catch(function (err) {
+            fullText = "⚠️ 网络错误：" + err.message;
             if (streamContentEl) {
-                streamContentEl.innerHTML = "<p>网络错误：" + escapeHtml(err.message) + "</p>";
+                renderMarkdown(streamContentEl, fullText);
             }
             showToast("网络错误：" + err.message, "error");
             finishStream();
@@ -669,6 +679,36 @@ function initChat() {
 
         var traceContainer = null;
         var sourcesData = [];
+
+        function setStatus(html) {
+            if (!streamStatusEl) return;
+            streamStatusEl.innerHTML = html;
+            scrollToBottom();
+        }
+
+        function clearStatus() {
+            if (streamStatusEl && streamStatusEl.parentElement) {
+                streamStatusEl.parentElement.removeChild(streamStatusEl);
+            }
+            streamStatusEl = null;
+        }
+
+        function showToolStatus() {
+            setStatus(
+                '<span class="msg-status-spinner"></span>' +
+                '<span class="msg-status-text">正在处理…</span>'
+            );
+        }
+
+        function showToolProgress(percent) {
+            var p = Math.max(0, Math.min(100, Math.round(percent || 0)));
+            setStatus(
+                '<span class="msg-status-text">正在处理 ' + p + "%</span>" +
+                '<span class="git-progress">' +
+                '<span class="git-progress-bar" style="width:' + p + '%"></span>' +
+                "</span>"
+            );
+        }
 
         function getTraceContainer() {
             if (!traceContainer) {
@@ -684,6 +724,18 @@ function initChat() {
             return traceContainer;
         }
 
+        function sanitizeToolCallText(text) {
+            if (!text) return text;
+            var stripped = text
+                .replace(/<\s*(?:antml:)?(?:tool_calls?|function_calls?|use_mcp_tool|use_mcp_server|invoke)\b[^>]*>[\s\S]*?<\s*\/\s*(?:antml:)?(?:tool_calls?|function_calls?|use_mcp_tool|use_mcp_server|invoke)\s*>/gi, "")
+                .replace(/<\s*(?:antml:)?parameter\s+name\s*=[^>]*>[\s\S]*?<\s*\/\s*(?:antml:)?parameter\s*>/gi, "")
+                .replace(/<\s*\/?\s*(?:antml:)?(?:tool_calls?|function_calls?|use_mcp_tool|use_mcp_server|invoke)\b[^>]*>/gi, "");
+            // 截断尾部未闭合的工具标签前缀（如流式到达一半的 <tool_c），等待后续内容
+            var m = stripped.match(/<\s*\/?\s*(?:antml:)?(?:tool_calls?|function_calls?|use_mcp_tool|use_mcp_server|invoke)[^>]*$/i);
+            if (m) stripped = stripped.slice(0, m.index);
+            return stripped.trim();
+        }
+
         function handleSSEEvent(ev) {
             if (ev.type === "thinking") {
                 var container = getTraceContainer();
@@ -692,11 +744,15 @@ function initChat() {
                 card.innerHTML = '<div class="trace-card-header" onclick="this.parentElement.classList.toggle(\'expanded\')">' +
                     '<span class="trace-card-icon">💭</span><span class="trace-card-title">思考过程</span>' +
                     '<span class="trace-card-toggle">▶</span></div>' +
-                    '<div class="trace-card-body"><pre>' + escapeHtml(ev.content) + '</pre></div>';
+                    '<div class="trace-card-body"><pre>' + escapeHtml(sanitizeToolCallText(ev.content)) + '</pre></div>';
                 container.appendChild(card);
                 scrollToBottom();
-            } else if (ev.type === "tool_call" || ev.type === "tool_result") {
-                // 工具调用过程不在页面展示
+            } else if (ev.type === "tool_call") {
+                showToolStatus();
+            } else if (ev.type === "tool_progress") {
+                showToolProgress(ev.percent);
+            } else if (ev.type === "tool_result") {
+                // 不向用户展示工具调用结果，成败都由模型在正文里说明
             } else if (ev.type === "sources") {
                 sourcesData = ev.sources || [];
             } else if (ev.type === "plan") {
@@ -706,7 +762,7 @@ function initChat() {
                 updateOrchItem(ev.agent_id, "working", ev.subtask);
                 scrollToBottom();
             } else if (ev.type === "agent_done") {
-                updateOrchItem(ev.agent_id, ev.status || "done", null, ev.full_text);
+                updateOrchItem(ev.agent_id, ev.status || "done", null, sanitizeToolCallText(ev.full_text));
                 scrollToBottom();
             } else if (ev.type === "summary_start") {
                 inSummary = true;
@@ -714,22 +770,30 @@ function initChat() {
                 summaryBubble = refs.bubble;
                 streamContentEl = refs.contentEl;
                 summaryRow = refs.row;
+                streamStatusEl = document.createElement("div");
+                streamStatusEl.className = "msg-status";
+                streamStatusEl.innerHTML =
+                    '<span class="typing-dots"><i></i><i></i><i></i></span>';
+                summaryBubble.appendChild(streamStatusEl);
                 scrollToBottom();
             } else if (ev.type === "token") {
                 fullText += ev.content;
+                clearStatus();
                 if (streamContentEl) {
-                    renderMarkdown(streamContentEl, fullText);
+                    renderMarkdown(streamContentEl, sanitizeToolCallText(fullText));
                 }
                 scrollToBottom();
             } else if (ev.type === "error") {
+                clearStatus();
                 fullText += "\n\n⚠️ " + ev.message;
                 if (streamContentEl) {
                     renderMarkdown(streamContentEl, fullText);
                 }
                 showToast(ev.message, "error");
             } else if (ev.type === "done") {
-                fullText = ev.full_text || fullText;
+                fullText = sanitizeToolCallText(ev.full_text || fullText);
                 currentRunId = ev.run_id || currentRunId;
+                finishStream();
             }
         }
 
@@ -789,6 +853,13 @@ function initChat() {
         }
 
         function finishStream() {
+            if (streamFinished) return;
+            streamFinished = true;
+            clearStatus();
+            if (streamContentEl && !fullText.trim()) {
+                streamContentEl.innerHTML =
+                    '<p class="msg-empty">本次没有生成回复内容</p>';
+            }
             if (summaryBubble && summaryBubble.parentElement) {
                 summaryBubble.parentElement.classList.remove("streaming");
                 addCodeCopyButtons(streamContentEl || summaryBubble);

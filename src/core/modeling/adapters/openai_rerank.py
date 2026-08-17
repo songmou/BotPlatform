@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -41,7 +41,7 @@ class OpenAIRerankAdapter:
             raise RerankError("重排查询必须是非空文本")
         if not documents:
             return []
-        payload = {
+        payload: Dict[str, object] = {
             "model": self.model,
             "query": query,
             "documents": list(documents),

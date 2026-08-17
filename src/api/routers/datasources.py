@@ -26,7 +26,7 @@ from src.core.config.datasource_secrets import (
 )
 from src.core.config.loader import ConfigError
 from src.core.datasource.drivers import driver_availability
-from src.core.paths import CONFIG_DIR
+from src.core.paths import CONFIG_DIR, SYSTEM_DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +207,7 @@ def _datasource_references(request: Request, datasource_id: str) -> list:
     try:
         from src.core.storage.database import Database
 
-        with Database().read() as connection:
+        with Database(SYSTEM_DATA_DIR / "botplatform.sqlite3").read() as connection:
             rows = connection.execute(
                 "SELECT organization_id, agent_id, payload_json "
                 "FROM organization_agents"
@@ -438,7 +438,7 @@ def get_datasource_audit(
     try:
         from src.core.storage.database import Database
 
-        db = Database()
+        db = Database(SYSTEM_DATA_DIR / "botplatform.sqlite3")
         store = DatasourceQueryAuditStore()
         with db.read() as conn:
             rows = store.list_paginated(

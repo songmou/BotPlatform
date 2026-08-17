@@ -49,7 +49,8 @@ class SingleInstanceLock:
                 handle.write("\n")
                 handle.flush()
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            # Windows 特有 msvcrt 调用，typeshed 未收录
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             return
 
         import fcntl
@@ -62,7 +63,8 @@ class SingleInstanceLock:
             import msvcrt
 
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            # Windows 特有 msvcrt 调用，typeshed 未收录
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
             return
 
         import fcntl
@@ -103,13 +105,13 @@ class SingleInstanceLock:
             raise AlreadyRunning(info) from None
 
         try:
-            info = {
+            payload = {
                 "pid": os.getpid(),
                 "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             }
             handle.seek(0)
             handle.truncate()
-            json.dump(info, handle, ensure_ascii=False)
+            json.dump(payload, handle, ensure_ascii=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())

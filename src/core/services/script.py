@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from src.core.config.loader import (
     ScriptDefinition,
@@ -128,7 +128,7 @@ class ScriptService:
         self._processes: Dict[str, subprocess.Popen] = {}
         self._recipients: Dict[str, Recipient] = {}
         self._credential_tenants: Dict[str, str] = {}
-        self._cancelled = set()
+        self._cancelled: Set[str] = set()
         self._completion_listeners: List[Callable[[ScriptRun], None]] = []
         self._shutting_down = False
         self.input_registry = ScriptInputRegistry()

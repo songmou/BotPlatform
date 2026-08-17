@@ -197,8 +197,8 @@ class SqliteTodoStore:
             "WHERE todo.tenant_id=? ORDER BY todo.todo_number",
             (self.tenant_id,),
         ).fetchall()
-        items = []
-        archived_items = []
+        items: List[Dict[str, Any]] = []
+        archived_items: List[Dict[str, Any]] = []
         for row in rows:
             archived = row["status"] == "archived"
             item = {
@@ -393,7 +393,7 @@ class SqliteTodoStore:
                 )
 
 
-def _require_absent(name: str, value: Optional[str]) -> None:
+def _require_absent(name: str, value: object) -> None:
     if value is not None:
         raise TodoError("当前操作不接受参数 {}".format(name))
 

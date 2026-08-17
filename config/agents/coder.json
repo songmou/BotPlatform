@@ -12,7 +12,8 @@
     "write_text_file",
     "replace_text",
     "create_directory",
-    "run_command"
+    "run_command",
+    "git"
   ],
   "capabilities": [
     {

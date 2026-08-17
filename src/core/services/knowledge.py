@@ -1390,7 +1390,7 @@ class KnowledgeService:
         tenant_id: Optional[str],
         category_ids: Optional[Sequence[str]] = None,
         force: bool = False,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         if self.embedding is None:
             raise ValueError("embedding 服务未配置")
         allowed = self._visible_category_ids(tenant_id, requested=category_ids)

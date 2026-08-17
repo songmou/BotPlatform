@@ -50,11 +50,9 @@ class AgentServiceTests(unittest.TestCase):
 
     def test_active_system_prompt_and_history_limit_are_used(self) -> None:
         self.service.chat("user", "第一问")
-        self.assertTrue(
-            self.ollama.calls[0].messages[0].content.startswith(
-                self.config.active_agent.system_prompt
-            )
-        )
+        prompt = self.ollama.calls[0].messages[0].content
+        self.assertIn("# 工具使用规范", prompt)
+        self.assertIn(self.config.active_agent.system_prompt, prompt)
 
         for index in range(7):
             self.service.chat("user", "追加{}".format(index))
@@ -184,9 +182,9 @@ class AgentServiceTests(unittest.TestCase):
         self.service.generate("translator", "翻译 hello")
         self.assertEqual(self.service.histories["user"], before)
         scheduled_messages = self.ollama.calls[-1].messages
-        self.assertEqual(
-            scheduled_messages[0].content,
+        self.assertIn(
             self.config.agents["translator"].system_prompt,
+            scheduled_messages[0].content,
         )
 
     def test_proactive_message_is_visible_to_the_next_chat_turn(self) -> None:

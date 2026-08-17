@@ -25,6 +25,7 @@ APPROVAL_TOOLS = {
     "knowledge_delete",
     "drive_delete_file",
     "db_execute",
+    "git",
 }
 
 
@@ -425,6 +426,57 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                 },
             },
             ["datasource_id", "sql", "reason"],
+        ),
+    },
+    "git": {
+        "description": (
+            "在平台管理的 Git 仓库中执行 Git 操作（subprocess 列表参数调用，非 shell）。"
+            "支持 init/clone/status/log/diff/show/add/commit/push/pull/branch/"
+            "checkout/grep/remote/fetch。"
+            "首次获取远程代码必须用 clone；pull/fetch 只能用于已克隆过的仓库。"
+            "clone/pull/fetch 只写沙箱目录，可直接执行；"
+            "init/add/commit/push/checkout/remote 以及创建或删除分支需要用户审批。"
+            "仓库必须在 git 配置根目录内；远程地址仅支持 HTTPS。"
+            "clone 默认浅克隆（--depth=1），需要完整历史请显式传 --no-single-branch。"
+            "返回结果中的 repo 是仓库在文件库中的位置（如 workspace/git_repos/code-reviewer）；"
+            "回复用户时用该路径说明存放位置，不要提及服务器本地路径。"
+        ),
+        "parameters": _object_schema(
+            {
+                "command": {
+                    "type": "string",
+                    "enum": [
+                        "init", "clone", "status", "log", "diff", "show",
+                        "add", "commit", "push", "pull", "branch", "checkout",
+                        "grep", "remote", "fetch",
+                    ],
+                    "description": "Git 子命令（仅白名单内）",
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                    "description": (
+                        "传递给 git 子命令的参数列表（字符串数组）。"
+                        "clone 时只放仓库地址，不要写目标目录——目标目录由 repo_path 决定。"
+                    ),
+                },
+                "repo_path": {
+                    "type": "string",
+                    "description": (
+                        "仓库目录名，如 code-reviewer。平台会自动放到 git 根目录下，"
+                        "不要带任何上级目录（例如不要写 git_repos/code-reviewer）。"
+                        "clone 时为新建仓库的目标目录，其他命令时为已有仓库目录。"
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "description": "命令超时秒数，默认 60",
+                },
+            },
+            ["command", "repo_path"],
         ),
     },
 }

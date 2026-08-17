@@ -34,18 +34,17 @@ def create_model_client(
             "模型档案 {} 不是对话模型，无法作为对话客户端构建".format(profile.id),
             provider=profile.provider,
         )
-    common = dict(
-        profile_id=profile.id,
-        provider=profile.provider,
-        base_url=profile.base_url,
-        model=profile.model,
-        temperature=profile.temperature,
-        max_tokens=profile.max_tokens,
-        timeout_seconds=profile.timeout_seconds,
-        capabilities=profile.capabilities,
-    )
     if profile.type == "ollama":
-        client: ModelClient = OllamaAdapter(**common)
+        client: ModelClient = OllamaAdapter(
+            profile_id=profile.id,
+            provider=profile.provider,
+            base_url=profile.base_url,
+            model=profile.model,
+            temperature=profile.temperature,
+            max_tokens=profile.max_tokens,
+            timeout_seconds=profile.timeout_seconds,
+            capabilities=profile.capabilities,
+        )
     elif profile.type == "openai_compatible":
         api_key = get_model_api_key(profile.id)
         if not api_key and profile.api_key_env:
@@ -58,7 +57,14 @@ def create_model_client(
                 provider=profile.provider,
             )
         client = OpenAICompatibleAdapter(
-            **common,
+            profile_id=profile.id,
+            provider=profile.provider,
+            base_url=profile.base_url,
+            model=profile.model,
+            temperature=profile.temperature,
+            max_tokens=profile.max_tokens,
+            timeout_seconds=profile.timeout_seconds,
+            capabilities=profile.capabilities,
             api_key=api_key,
             request_extra=profile.request_extra,
             assistant_passthrough_fields=profile.assistant_passthrough_fields,

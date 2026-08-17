@@ -298,7 +298,17 @@ body {
 
 .nav-group-toggle .nav-arrow {
     margin-left: auto;
-    transition: transform 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+}
+
+.nav-group-toggle .nav-arrow svg {
+    width: 16px;
+    height: 16px;
+    display: block;
 }
 
 .nav-group.open .nav-group-toggle .nav-arrow {
@@ -669,10 +679,87 @@ body {
 .message .bubble h3 { font-size: 15px; }
 .message .bubble h4 { font-size: 14px; }
 
-.streaming .bubble::after {
+.streaming .bubble .bubble-content > :last-child::after {
     content: "▊";
     color: var(--accent);
     animation: blink 1s step-end infinite;
+}
+
+.msg-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.msg-status:empty {
+    display: none;
+}
+
+.msg-status-text {
+    white-space: nowrap;
+}
+
+.msg-status-spinner {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.typing-dots {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.typing-dots i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes typing-bounce {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+}
+
+.msg-empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.git-progress {
+    display: inline-block;
+    vertical-align: middle;
+    height: 6px;
+    flex: 1;
+    max-width: 200px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.git-progress-bar {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
 }
 
 @keyframes blink {
@@ -1046,7 +1133,8 @@ body {
     background: var(--accent-hover);
 }
 
-a.btn-primary {
+a.btn-primary,
+a.btn-secondary {
     text-decoration: none;
 }
 
@@ -1777,19 +1865,20 @@ a.btn-primary {
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg);
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    transition: transform 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out),
+        border-color 0.2s var(--ease-out);
 }
 
 .builtin-tool-item:hover {
+    box-shadow: var(--shadow-lg);
     border-color: var(--accent);
-    box-shadow: var(--shadow);
+    transform: translateY(-3px);
 }
 
 .builtin-tool-header {
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
     align-items: flex-start;
-    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 6px;
 }
@@ -1806,9 +1895,8 @@ a.btn-primary {
 .builtin-tool-badges {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    margin-left: auto;
-    flex-shrink: 0;
+    gap: 6px 10px;
+    align-items: center;
 }
 
 .builtin-tool-desc {
@@ -2223,7 +2311,7 @@ a.btn-primary {
 .control-steps strong,.control-steps small { display:block; }
 .control-steps small { margin-top:6px; color:var(--text-secondary); font-size:12px; line-height:1.55; }
 .control-links { display:grid; }
-.control-links a { display:flex; justify-content:space-between; padding:13px 0; border-bottom:1px solid var(--border); color:var(--text); }
+.control-links a { display:flex; justify-content:space-between; padding:13px 0; border-bottom:1px solid var(--border); color:var(--text); text-decoration:none; }
 .control-links a:last-child { border-bottom:0; }
 .control-links a span { color:var(--accent); font-size:18px; }
 .governance-filterbar { display:flex; flex-wrap:wrap; align-items:end; gap:10px; padding:14px; margin:-8px 0 18px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg); }

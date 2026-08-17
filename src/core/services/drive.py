@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -376,7 +377,19 @@ class DriveService:
         if target.is_dir():
             if any(target.iterdir()) and not recursive:
                 raise ValueError("目录非空，如需删除请显式确认递归删除")
-            shutil.rmtree(str(target))
+            try:
+                shutil.rmtree(str(target))
+            except PermissionError:
+                # Windows 上 git 仓库的 pack 文件带只读属性，
+                # 先清除只读再重试删除。
+                def _clear_readonly(func, path, exc_info):
+                    try:
+                        os.chmod(path, stat.S_IWRITE)
+                        func(path)
+                    except Exception:
+                        raise
+
+                shutil.rmtree(str(target), onerror=_clear_readonly)
         else:
             target.unlink()
         self._notify_knowledge("mark_drive_deleted", scope, tenant_id, relative)

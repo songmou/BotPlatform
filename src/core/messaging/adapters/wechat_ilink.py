@@ -7,7 +7,7 @@ import json
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator
+from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 from src.core.integrations.ilink import (
     ILinkAPIError,
@@ -111,7 +111,7 @@ class WeChatILinkAdapter:
             raise ValueError("微信私聊消息缺少回复上下文")
         conversation_id = group_id or sender_id
         text, image_item = extract_text_and_image(message)
-        attachments = ()
+        attachments: Tuple[AttachmentRef, ...] = ()
         if image_item is not None:
             attachments = (
                 AttachmentRef(
@@ -197,7 +197,7 @@ class WeChatILinkAdapter:
     @contextmanager
     def typing(self, endpoint: DeliveryEndpoint) -> Iterator[None]:
         token = self._context_token(endpoint)
-        errors = []
+        errors: List[ILinkError] = []
         try:
             with self.client.typing(
                 endpoint.recipient_id,

@@ -13,8 +13,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, cast
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser, BrowserContext, Page, Playwright
 
 from .base import PluginContext, PluginError, PluginToolDefinition
 
@@ -100,7 +103,7 @@ def _host_is_public(hostname: str) -> bool:
         addresses = []
         for record in records:
             try:
-                address = ipaddress.ip_address(record[4][0].split("%", 1)[0])
+                address = ipaddress.ip_address(str(record[4][0]).split("%", 1)[0])
             except ValueError:
                 return False
             if address not in addresses:
@@ -132,10 +135,10 @@ class BrowserSession:
 
     def __init__(self, config: BrowserAutomationConfig) -> None:
         self.config = config
-        self._playwright = None
-        self.browser = None
-        self.context = None
-        self.page = None
+        self._playwright: Optional[Playwright] = None
+        self.browser: Optional[Browser] = None
+        self.context: Optional[BrowserContext] = None
+        self.page: Optional[Page] = None
         self.launch_name = ""
 
     def __enter__(self) -> "BrowserSession":
@@ -255,7 +258,7 @@ class _AgentPageController:
         assert self.session.page is not None
         self.session.page.goto(
             url,
-            wait_until=wait_until,
+            wait_until=cast(Any, wait_until),
             timeout=self.config.navigation_timeout_seconds * 1000,
         )
         return self.snapshot()
@@ -283,7 +286,7 @@ class _AgentPageController:
         if truncated:
             text = text[: self.config.max_snapshot_chars] + "……"
 
-        elements = []
+        elements: List[Dict[str, Any]] = []
         candidates = page.locator(INTERACTIVE_SELECTOR)
         scan_limit = min(candidates.count(), self.config.max_snapshot_elements * 5)
         for index in range(scan_limit):
@@ -369,7 +372,9 @@ class _AgentPageController:
         timeout_ms = timeout_seconds * 1000
         try:
             if condition == "load":
-                page.wait_for_load_state(value or "domcontentloaded", timeout=timeout_ms)
+                page.wait_for_load_state(
+                    cast(Any, value or "domcontentloaded"), timeout=timeout_ms
+                )
             elif condition == "selector":
                 if not value:
                     raise PluginError("等待元素时必须提供 value")

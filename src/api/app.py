@@ -57,7 +57,8 @@ def create_app(config, model_router, registry, conversation_store,
                credential_service=None,
                notification_service=None,
                datasource_service=None,
-               secure_cookies=False, owns_services=True) -> FastAPI:
+               secure_cookies=False, owns_services=True,
+               agent_service=None) -> FastAPI:
     if organization_store is None:
         from src.core.storage.organizations import OrganizationStore
 
@@ -178,6 +179,48 @@ def create_app(config, model_router, registry, conversation_store,
             resource_type, resource_id, payload, _previous
         ):
             if resource_type == "agents":
+                from src.api.routers.chat import _agent_from_payload
+
+                if payload is None:
+                    config.agents.pop(resource_id, None)
+                    try:
+                        resource_store.sync_organization_agents(
+                            resource_id, None
+                        )
+                    except Exception:
+                        logger.warning(
+                            "同步组织智能体删除失败：%s", resource_id, exc_info=True
+                        )
+                    return
+                # list_public 读的是 active_revision，而激活发生在版本切换之前，
+                # 所以当前项要用传入的 payload（与 skills/mcp 分支同模式）。
+                agents = {}
+                for item in resource_store.list_public("agents"):
+                    if item["resource_id"] == resource_id:
+                        continue
+                    try:
+                        agents[item["resource_id"]] = _agent_from_payload(
+                            item["resource_id"], item["payload"]
+                        )
+                    except Exception:
+                        logger.warning("智能体 %s 加载失败，跳过", item["resource_id"])
+                agents[resource_id] = _agent_from_payload(resource_id, payload)
+                config.update_agents(agents)
+                if (
+                    agent_service is not None
+                    and agent_service.app_config.default_agent in agents
+                ):
+                    agent_service.active_agent = agents[
+                        agent_service.app_config.default_agent
+                    ]
+                try:
+                    resource_store.sync_organization_agents(
+                        resource_id, payload
+                    )
+                except Exception:
+                    logger.warning(
+                        "同步组织智能体失败：%s", resource_id, exc_info=True
+                    )
                 return
             if resource_type == "skills":
                 values = [
@@ -313,6 +356,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(drive.router)
     app.include_router(plugins.router)
     app.include_router(plugins.tools_router)
+    app.include_router(plugins.tenant_tools_router)
     app.include_router(connections.router)
     app.include_router(scripts.router)
     app.include_router(datasources.router)

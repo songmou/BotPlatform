@@ -18,7 +18,7 @@ by an author so a script cannot hijack the sandbox environment.
 from __future__ import annotations
 
 import re
-from typing import Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List
 
 _ENV_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 RESERVED_PREFIXES = ("ILINKBOT_", "PYTHON", "LD_", "DYLD_")
@@ -103,14 +103,14 @@ class EnvResolver:
                 result[name] = glob[name]
         return result
 
-    def describe(self, tenant_id: str, names: Iterable[str]) -> List[Dict[str, str]]:
+    def describe(self, tenant_id: str, names: Iterable[str]) -> List[Dict[str, Any]]:
         """Describe each name with its source, masked value, and defined flag.
 
         Used by the web UI to render the read-only env binding table.
         """
         org = self._settings.env(tenant_id) if self._settings is not None else {}
         glob = self._global_loader() or {}
-        rows: List[Dict[str, str]] = []
+        rows: List[Dict[str, Any]] = []
         for name in names or []:
             if _reserved(name):
                 rows.append(
@@ -138,7 +138,7 @@ class EnvResolver:
             )
         return rows
 
-    def global_describe(self, names: Iterable[str]) -> List[Dict[str, str]]:
+    def global_describe(self, names: Iterable[str]) -> List[Dict[str, Any]]:
         """Describe names against the platform global layer only (no tenant).
 
         Used by the global admin popups (script/plugin/schedule detail) where a
@@ -146,7 +146,7 @@ class EnvResolver:
         per tenant on the tenant management page.
         """
         glob = self._global_loader() or {}
-        rows: List[Dict[str, str]] = []
+        rows: List[Dict[str, Any]] = []
         for name in names or []:
             if _reserved(name):
                 rows.append(

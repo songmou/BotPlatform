@@ -205,6 +205,7 @@ def _run_combined(args) -> int:
                 script_schedule_service=runtime.script_schedule_service,
                 channel_statuses=runtime.channel_statuses,
                 datasource_service=datasource_service,
+                agent_service=runtime.agent_service,
                 secure_cookies=args.behind_https,
                 owns_services=False,
             )
@@ -450,6 +451,7 @@ def _run_panel_only(args) -> int:
         settings_store=settings_store,
         env_resolver=env_resolver,
         datasource_service=datasource_service,
+        agent_service=agent_service,
         secure_cookies=args.behind_https,
     )
 
