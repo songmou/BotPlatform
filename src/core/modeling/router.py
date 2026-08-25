@@ -112,9 +112,7 @@ class ModelRouter:
             "ollama_local" if "ollama_local" in clients else primary_profile_id
         )
         self.flash_profile_id = flash_profile_id or fallback_profile_id
-        self.pro_profile_id = pro_profile_id or (
-            "deepseek_pro" if "deepseek_pro" in clients else primary_profile_id
-        )
+        self.pro_profile_id = pro_profile_id or primary_profile_id
         self.vision_profile_id = vision_profile_id or next(
             (
                 profile_id

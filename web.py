@@ -145,7 +145,8 @@ def _run_combined(args) -> int:
         except ModelError as exc:
             print("错误：{}".format(exc), file=sys.stderr)
             print(
-                "提示：将 DEEPSEEK_API_KEY=你的密钥 写入 data/system/model.env",
+                "提示：将 DASHSCOPE_API_KEY=你的百炼密钥 写入 data/system/model.env，"
+                "或启动后在 Web 面板的模型页面录入 API Key",
                 file=sys.stderr,
             )
             return 1
@@ -282,7 +283,11 @@ def _run_panel_only(args) -> int:
         return 1
     except ModelError as exc:
         print("错误：{}".format(exc), file=sys.stderr)
-        print("提示：将 DEEPSEEK_API_KEY=你的密钥 写入 data/system/model.env", file=sys.stderr)
+        print(
+            "提示：将 DASHSCOPE_API_KEY=你的百炼密钥 写入 data/system/model.env，"
+            "或启动后在 Web 面板的模型页面录入 API Key",
+            file=sys.stderr,
+        )
         return 1
     for warning in services.model_warnings:
         print("警告：{}".format(warning), file=sys.stderr)

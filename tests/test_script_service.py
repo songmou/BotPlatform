@@ -275,12 +275,12 @@ class ScriptServiceTests(unittest.TestCase):
         )
         with patch.dict(
             os.environ,
-            {"DEEPSEEK_API_KEY": "cloud-key", "MODEL_PROFILE": "deepseek_cloud"},
+            {"DASHSCOPE_API_KEY": "cloud-key", "MODEL_PROFILE": "qwen_cloud"},
             clear=False,
         ):
             environment = service._environment(run, self.root / "result.json")
-        self.assertEqual(environment["AUTOGEN_MODEL_PROFILE"], "deepseek_cloud")
-        self.assertEqual(environment["DEEPSEEK_API_KEY"], "cloud-key")
+        self.assertEqual(environment["AUTOGEN_MODEL_PROFILE"], "qwen_cloud")
+        self.assertEqual(environment["DASHSCOPE_API_KEY"], "cloud-key")
         self.assertIn("ILINKBOT_PROJECT_CONFIG", environment)
 
     def test_integration_script_is_rejected_before_queue_when_credentials_are_missing(self) -> None:

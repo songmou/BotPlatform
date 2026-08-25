@@ -31,7 +31,7 @@ class PreflightTests(unittest.TestCase):
             report = check_configuration(SOURCE_CONFIG, environment={})
         self.assertFalse(report.ok)
         self.assertEqual(
-            sum("DEEPSEEK_API_KEY" in item.message for item in report.errors), 1
+            sum("DASHSCOPE_API_KEY" in item.message for item in report.errors), 1
         )
         warning_text = "\n".join(item.message for item in report.warnings)
         self.assertIn("全文检索", warning_text)
@@ -43,7 +43,8 @@ class PreflightTests(unittest.TestCase):
             return_value=["gemma4:e4b"],
         ):
             report = check_configuration(
-                SOURCE_CONFIG, environment={"DEEPSEEK_API_KEY": "test-key"}
+                SOURCE_CONFIG,
+                environment={"DASHSCOPE_API_KEY": "test-key"},
             )
         self.assertTrue(report.ok)
 
@@ -55,18 +56,15 @@ class PreflightTests(unittest.TestCase):
             data["profiles"]["ollama_local"]["enabled"] = True
             data["profiles"]["ollama_local"]["model"] = "YOUR_OLLAMA_MODEL"
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            report = check_configuration(
-                config, environment={"DEEPSEEK_API_KEY": "test-key"}
-            )
+            environment = {"DASHSCOPE_API_KEY": "test-key"}
+            report = check_configuration(config, environment=environment)
             self.assertFalse(report.ok)
             self.assertTrue(any("占位模型名" in item.message for item in report.errors))
 
             data["profiles"]["ollama_local"]["model"] = "qwen-test"
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             with patch("src.core.infrastructure.diagnostics._ollama_models", return_value=["qwen-test"]):
-                report = check_configuration(
-                    config, environment={"DEEPSEEK_API_KEY": "test-key"}
-                )
+                report = check_configuration(config, environment=environment)
             self.assertTrue(report.ok)
             self.assertTrue(any("Ollama 档案 ollama_local 可用" in item.message for item in report.ready))
 

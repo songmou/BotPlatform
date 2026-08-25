@@ -1,0 +1,48 @@
+{
+  "enabled": true,
+  "default_working_directory": "$TENANT_WORKSPACE",
+  "allowed_roots": [
+    "$TENANT_WORKSPACE"
+  ],
+  "denied_globs": [
+    ".git/**",
+    "**/.git/**",
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key"
+  ],
+  "approval_ttl_seconds": 300,
+  "max_tool_rounds": 6,
+  "max_total_tool_calls": 12,
+  "max_read_bytes": 131072,
+  "max_write_bytes": 131072,
+  "max_directory_entries": 500,
+  "max_search_results": 200,
+  "max_command_output_bytes": 65536,
+  "default_command_timeout_seconds": 60,
+  "max_command_timeout_seconds": 120,
+  "enabled_command_profiles": [
+    "python",
+    "git_readonly",
+    "node",
+    "npm_script",
+    "ollama_readonly",
+    "workspace_script"
+  ],
+  "git_enabled": true,
+  "git_root": "$TENANT_WORKSPACE/git_repos",
+  "git_author_name": "BotPlatform Agent",
+  "git_author_email": "agent@botplatform.local",
+  "git_default_timeout_seconds": 60,
+  "git_max_timeout_seconds": 300,
+  "git_allowed_commands": [
+    "init", "clone", "status", "log", "diff", "show",
+    "add", "commit", "push", "pull", "branch", "checkout", "grep",
+    "remote", "fetch"
+  ],
+  "git_max_output_bytes": 65536,
+  "git_binary_path": ""
+}
