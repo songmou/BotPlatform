@@ -1,0 +1,96 @@
+{
+  "tasks": [
+    {
+      "id": "morning_reminder",
+      "enabled": false,
+      "cron": "0 9 * * *",
+      "target": "last_active_user",
+      "action": {
+        "type": "text",
+        "content": "早上好，今天也要记得安排最重要的三件事。"
+      }
+    },
+    {
+      "id": "evening_summary",
+      "enabled": false,
+      "cron": "0 21 * * *",
+      "target": "last_active_user",
+      "action": {
+        "type": "agent_prompt",
+        "agent_id": "general",
+        "prompt": "生成一条简短、自然的晚间提醒，引导用户回顾今天完成的事情并准备明天的计划。不要声称知道用户今天的实际经历。"
+      }
+    },
+    {
+      "id": "autogen_monitor",
+      "enabled": false,
+      "cron": "0 8,14 * * *",
+      "target": "last_active_user",
+      "action": {
+        "type": "script",
+        "script_id": "autogen_monitor",
+        "parameters": {}
+      }
+    },
+    {
+      "id": "ctsehr_check",
+      "enabled": false,
+      "crons": [
+        "50 8 * * *",
+        "0 18 * * *"
+      ],
+      "target": "last_active_user",
+      "action": {
+        "type": "script",
+        "script_id": "ctsehr_check",
+        "parameters": {}
+      }
+    },
+    {
+      "id": "todo_reminder",
+      "enabled": false,
+      "crons": [
+        "0 9 * * *",
+        "0 18 * * *"
+      ],
+      "target": "last_active_user",
+      "action": {
+        "type": "plugin",
+        "plugin_id": "todo",
+        "tool_name": "todo_manage",
+        "parameters": {
+          "action": "remind"
+        }
+      }
+    },
+    {
+      "id": "todo_monthly_archive",
+      "enabled": false,
+      "cron": "5 9 1 * *",
+      "target": "last_active_user",
+      "action": {
+        "type": "plugin",
+        "plugin_id": "todo",
+        "tool_name": "todo_manage",
+        "parameters": {
+          "action": "archive"
+        }
+      }
+    },
+    {
+      "id": "inactive_user_reminder",
+      "enabled": false,
+      "cron": "*/10 * * * *",
+      "target": "last_active_user",
+      "condition": {
+        "type": "inactivity_once",
+        "after_hours": 20,
+        "before_hours": 24
+      },
+      "action": {
+        "type": "text",
+        "content": "已经一段时间没有收到你的消息了，如有需要请及时回复我。"
+      }
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+# BotPlatform Docker Compose 部署配置
+#
+# 使用方式：
+#   1. 在本目录创建 .env 文件，写入 DASHSCOPE_API_KEY（阿里云百炼密钥）
+#   2. 把项目 config/ 文件夹复制到本目录（cp -r ../../config .）
+#   3. 执行 docker compose build  # 构建镜像（仅首次或代码变更后需要）
+#   4. 执行 docker compose up -d  # 启动容器
+#
+# 如需启用本地 Ollama 模型，取消下方 ollama 服务的注释
+#
+# 镜像源说明（国内用户默认使用清华镜像加速）：
+#   默认已在 Dockerfile 中配置了 pip 和 apt 的清华源。
+#   如需切换到其他镜像源（如阿里云、中科大），取消下方 build.args 的注释并修改：
+#
+#     docker compose build --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+#
+#   海外用户如需关闭镜像源，在 docker compose build 时覆盖为空值即可：
+#
+#     docker compose build --build-arg PIP_INDEX_URL= --build-arg APT_MIRROR=
+
+services:
+  botplatform:
+    image: botplatform:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      # 取消下方注释可自定义镜像源（默认使用清华源）
+      # args:
+      #   PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+      #   APT_MIRROR: mirrors.aliyun.com
+    container_name: botplatform
+    restart: unless-stopped
+    init: true
+    ports:
+      # 左边是宿主机端口（可改），右边是容器端口（不要改）
+      - "8080:8080"
+    environment:
+      - TZ=Asia/Shanghai
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:?请先创建 .env 文件并设置 DASHSCOPE_API_KEY}
+      - BOTPLATFORM_DATA_DIR=/data
+    volumes:
+      # 数据文件夹直接挂载到本目录的 data/ 下，方便在资源管理器中查看和备份
+      - ./data:/data
+      # 配置文件只读挂载，修改后需要重启容器
+      - ./config:/app/config:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 可选：本地 Ollama 模型服务（默认不启动）
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+
+# 如需启用 ollama 服务，取消下方注释：
+# volumes:
+#   ollama_data:
+#     name: ollama_data

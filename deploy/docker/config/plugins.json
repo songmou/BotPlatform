@@ -1,0 +1,61 @@
+{
+  "plugins": [
+    {
+      "id": "todo",
+      "enabled": true,
+      "settings": {}
+    },
+    {
+      "id": "browser_automation",
+      "enabled": false,
+      "settings": {
+        "headless": true,
+        "navigation_timeout_seconds": 30,
+        "session_ttl_seconds": 600,
+        "max_sessions_per_tenant": 1,
+        "max_snapshot_chars": 12000,
+        "max_snapshot_elements": 100
+      }
+    },
+    {
+      "id": "web_research",
+      "enabled": false,
+      "settings": {
+        "timeout_seconds": 20,
+        "max_results": 8,
+        "max_content_chars": 8000
+      }
+    },
+    {
+      "id": "codex_tasks",
+      "enabled": false,
+      "settings": {
+        "allowed_tenant_ids": [],
+        "projects": [
+          {
+            "id": "botplatform",
+            "path": "."
+          }
+        ],
+        "default_project": "botplatform",
+        "max_concurrent_tasks": 2
+      }
+    },
+    {
+      "id": "ocr",
+      "enabled": false,
+      "settings": {
+        "auto_process_chat_images": true,
+        "engine": "paddleocr",
+        "device": "cpu",
+        "model_tier": "small",
+        "max_input_bytes": 20971520,
+        "max_pdf_pages": 10,
+        "max_image_pixels": 25000000,
+        "max_output_chars": 20000,
+        "startup_timeout_seconds": 120,
+        "request_timeout_seconds": 60
+      }
+    }
+  ]
+}

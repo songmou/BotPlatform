@@ -1,0 +1,13 @@
+{
+  "channels": [
+    {
+      "id": "wechat-main",
+      "type": "wechat_ilink",
+      "enabled": true,
+      "agent_id": "general",
+      "settings": {
+        "group_policy": "private_only"
+      }
+    }
+  ]
+}

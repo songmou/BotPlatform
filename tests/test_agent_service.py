@@ -361,6 +361,7 @@ class AgentServiceTests(unittest.TestCase):
             },
             primary_profile_id="ollama_local",
             fallback_profile_id="deepseek_cloud",
+            pro_profile_id="deepseek_pro",
         )
         service = AgentService(router, self.config.app, self.config.agents)
 

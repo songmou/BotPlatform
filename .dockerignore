@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg/
+.venv*
+.venv-ci*
+*.so
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 本地数据（由 volume 挂载，不打包进镜像）
+data/
+!data/.gitkeep
+
+# 开发/日志
+*.log
+.env
+.env.local
+.DS_Store
+Thumbs.db
+
+# 文档（构建用不上的）
+docs/
+CHANGELOG.md
+README.md
+SECURITY.md
+agents.md
+
+# 测试（不打包）
+tests/
+.github/
+
+# 杂项
+scripts/
+web_8080.log
+screenshot.png
+
+# 部署产物（构建上下文不应包含旧镜像包与服务器数据）
+deploy/docker/botplatform.tar
+deploy/docker/data/

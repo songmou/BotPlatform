@@ -84,7 +84,7 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config.active_agent.mcp_servers, [])
         self.assertEqual(config.mcp_servers, [])
         self.assertIsInstance(config.datasources, list)
-        self.assertEqual(config.app.active_model, "deepseek_cloud")
+        self.assertEqual(config.app.active_model, "qwen_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
         self.assertTrue(config.active_model.enabled)
         self.assertTrue(config.models["ollama_local"].enabled)
@@ -96,18 +96,15 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config.models["bge_m3_local"].modality, "embedding")
         self.assertEqual(config.models["bge_m3_local"].dimensions, 1024)
         self.assertFalse(config.models["bge_m3_local"].enabled)
-        self.assertEqual(config.app.fallback_model, "deepseek_cloud")
+        self.assertEqual(config.app.fallback_model, "qwen_cloud")
         self.assertEqual(config.app.fallback_cooldown_seconds, 60)
-        self.assertIn("deepseek_cloud", config.models)
-        self.assertIn("deepseek_pro", config.models)
-        self.assertEqual(config.models["deepseek_cloud"].model, "deepseek-v4-flash")
-        self.assertFalse(config.models["deepseek_cloud"].capabilities.vision)
-        self.assertEqual(
-            config.models["deepseek_cloud"].request_extra["thinking"]["type"],
-            "disabled",
-        )
-        self.assertEqual(config.models["deepseek_pro"].model, "deepseek-v4-pro")
-        self.assertTrue(config.models["deepseek_pro"].capabilities.reasoning)
+        self.assertNotIn("deepseek_cloud", config.models)
+        self.assertNotIn("deepseek_pro", config.models)
+        self.assertIn("qwen_cloud", config.models)
+        self.assertTrue(config.models["qwen_cloud"].enabled)
+        self.assertEqual(config.models["qwen_cloud"].model, "qwen-flash")
+        self.assertEqual(config.models["qwen_cloud"].provider, "dashscope")
+        self.assertFalse(config.models["qwen_cloud"].capabilities.vision)
 
     def test_agent_prompts_define_user_language_and_chinese_fallback(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
@@ -606,9 +603,9 @@ class ConfigLoaderTests(unittest.TestCase):
                 load_project_config(config_dir)
 
     def test_model_profile_override_and_disabled_active_validation(self) -> None:
-        with patch.dict("os.environ", {"MODEL_PROFILE": "deepseek_cloud"}, clear=False):
+        with patch.dict("os.environ", {"MODEL_PROFILE": "qwen_cloud"}, clear=False):
             config = load_project_config(SOURCE_CONFIG)
-            self.assertEqual(config.active_model.id, "deepseek_cloud")
+            self.assertEqual(config.active_model.id, "qwen_cloud")
         with patch.dict("os.environ", {"MODEL_PROFILE": "ollama_local"}, clear=False):
             config = load_project_config(SOURCE_CONFIG)
             self.assertEqual(config.active_model.id, "ollama_local")
@@ -646,7 +643,7 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "models.json"
             data = self.load_json(path)
-            data["profiles"]["deepseek_cloud"]["base_url"] = "http://remote.example"
+            data["profiles"]["qwen_cloud"]["base_url"] = "http://remote.example"
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "HTTPS"):
                 load_project_config(config_dir)
@@ -655,7 +652,7 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "models.json"
             data = self.load_json(path)
-            data["profiles"]["deepseek_cloud"]["request_extra"] = {
+            data["profiles"]["qwen_cloud"]["request_extra"] = {
                 "model": "override"
             }
             self.save_json(path, data)
@@ -665,8 +662,8 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_modality_defaults_to_chat_when_field_absent(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
         # Existing chat profiles omit the modality field entirely.
-        self.assertEqual(config.models["deepseek_cloud"].modality, "chat")
-        self.assertIsNone(config.models["deepseek_cloud"].dimensions)
+        self.assertEqual(config.models["qwen_cloud"].modality, "chat")
+        self.assertIsNone(config.models["qwen_cloud"].dimensions)
 
     def test_embedding_profile_requires_positive_dimensions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -729,7 +726,7 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "app.json"
             data = self.load_json(path)
-            data["embedding_model"] = "deepseek_cloud"
+            data["embedding_model"] = "qwen_cloud"
             self.save_json(path, data)
             with self.assertRaisesRegex(
                 ConfigError, "embedding_model 必须引用向量（embedding）"
