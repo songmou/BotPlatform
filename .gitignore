@@ -1,4 +1,5 @@
 .venv/
+.venv-ci312/
 __pycache__/
 *.py[cod]
 .DS_Store
@@ -16,5 +17,15 @@ results/
 *.temp
 Thumbs.db
 Desktop.ini
-.github/
 .qoder/
+reports/
+
+# 部署敏感文件（含 API 密钥、数据库、镜像包）
+deploy/docker/.env
+deploy/docker/data/
+deploy/docker/botplatform.tar
+
+.workbuddy/
+.github/
+
+Future.MD

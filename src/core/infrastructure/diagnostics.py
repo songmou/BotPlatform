@@ -84,21 +84,41 @@ def check_configuration(
         return report
     report.config = config
     report.ready.append(Diagnostic("JSON 配置结构和引用关系有效", config_dir))
+    from src.core.messaging.credentials import ChannelCredentialStore
+
+    credential_store = ChannelCredentialStore()
+    capability_labels = {
+        "wechat_ilink": "私聊、文字、图片、输入状态、主动通知",
+        "wecom_aibot": "私聊、群聊 @、文字、图片、主动通知",
+        "feishu": "私聊、群聊 @、文字、图片、主动通知",
+    }
     for channel in config.channels.values():
-        target = config_dir / "channels.json"
+        channel_target = config_dir / "channels.json"
         if channel.enabled:
-            report.ready.append(
+            destination = (
+                report.ready
+                if credential_store.configured(channel.id)
+                else report.warnings
+            )
+            suffix = (
+                ""
+                if credential_store.configured(channel.id)
+                else "；尚未配置平台凭据"
+            )
+            destination.append(
                 Diagnostic(
-                    "消息渠道 {} 已启用：{}（私聊、文字、图片、输入状态、主动通知）".format(
+                    "消息渠道 {} 已启用：{}（{}）{}".format(
                         channel.id,
                         channel.type,
+                        capability_labels.get(channel.type, "能力由适配器声明"),
+                        suffix,
                     ),
-                    target,
+                    channel_target,
                 )
             )
         else:
             report.warnings.append(
-                Diagnostic("消息渠道 {} 未启用".format(channel.id), target)
+                Diagnostic("消息渠道 {} 未启用".format(channel.id), channel_target)
             )
 
     active = config.models[config.app.active_model]
@@ -213,38 +233,105 @@ def check_configuration(
                 )
             )
 
-    embedding = config.embedding
-    if not embedding.enabled:
+    embedding_id = config.app.embedding_model
+    if not embedding_id:
         report.warnings.append(
             Diagnostic(
-                "向量模型未启用；知识库将使用 FTS5 全文检索",
-                config_dir / "embeddings.json",
+                "未绑定向量模型；知识库将使用 FTS5 全文检索",
+                config_dir / "app.json",
             )
         )
     else:
-        try:
-            models = _ollama_models(embedding.base_url)
-        except (httpx.HTTPError, ValueError, TypeError):
+        embedding = config.models.get(embedding_id)
+        if embedding is None:
+            report.errors.append(
+                Diagnostic(
+                    "embedding_model 引用了不存在的档案 {}".format(embedding_id),
+                    config_dir / "app.json",
+                )
+            )
+        elif not embedding.enabled:
             report.warnings.append(
                 Diagnostic(
-                    "向量模型已启用但 Ollama 服务不可访问；知识库将降级为全文检索",
-                    config_dir / "embeddings.json",
+                    "向量模型 {} 未启用；知识库将使用 FTS5 全文检索".format(embedding_id),
+                    config_dir / "models.json",
+                )
+            )
+        elif embedding.type == "ollama":
+            try:
+                models = _ollama_models(embedding.base_url)
+            except (httpx.HTTPError, ValueError, TypeError):
+                report.warnings.append(
+                    Diagnostic(
+                        "向量模型已启用但 Ollama 服务不可访问；知识库将降级为全文检索",
+                        config_dir / "models.json",
+                    )
+                )
+            else:
+                if embedding.model in models:
+                    report.ready.append(
+                        Diagnostic(
+                            "向量模型 {} 可用".format(embedding.model),
+                            config_dir / "models.json",
+                        )
+                    )
+                else:
+                    report.warnings.append(
+                        Diagnostic(
+                            "Ollama 中未找到向量模型 {}；知识库将降级为全文检索".format(
+                                embedding.model
+                            ),
+                            config_dir / "models.json",
+                        )
+                    )
+        else:
+            report.ready.append(
+                Diagnostic(
+                    "向量模型 {} 已配置（{}）".format(embedding.model, embedding.type),
+                    config_dir / "models.json",
+                )
+            )
+
+    rerank_id = config.app.rerank_model
+    if rerank_id:
+        rerank = config.models.get(rerank_id)
+        if rerank is None:
+            report.errors.append(
+                Diagnostic(
+                    "rerank_model 引用了不存在的档案 {}".format(rerank_id),
+                    config_dir / "app.json",
+                )
+            )
+        elif not rerank.enabled:
+            report.warnings.append(
+                Diagnostic(
+                    "重排模型 {} 未启用；知识库检索将跳过重排".format(rerank_id),
+                    config_dir / "models.json",
                 )
             )
         else:
-            if embedding.model in models:
-                report.ready.append(
-                    Diagnostic("向量模型 {} 可用".format(embedding.model), config_dir / "embeddings.json")
+            report.ready.append(
+                Diagnostic(
+                    "重排模型 {} 已配置".format(rerank.model),
+                    config_dir / "models.json",
                 )
-            else:
-                report.warnings.append(
-                    Diagnostic(
-                        "Ollama 中未找到向量模型 {}；知识库将降级为全文检索".format(
-                            embedding.model
-                        ),
-                        config_dir / "embeddings.json",
-                    )
-                )
+            )
+
+    ocr_plugin = config.plugins.get("ocr")
+    if ocr_plugin is not None and ocr_plugin.enabled:
+        from src.core.integrations.paddle_ocr import paddle_ocr_availability
+        from src.core.plugins.ocr import build_config
+
+        ocr_available, ocr_reason = paddle_ocr_availability(
+            build_config(ocr_plugin.settings)
+        )
+        plugin_target = config_dir / "plugins.json"
+        if ocr_available:
+            report.ready.append(Diagnostic("本地 OCR 依赖和模型可用", plugin_target))
+        else:
+            report.warnings.append(
+                Diagnostic("本地 OCR 已启用但不可用：{}".format(ocr_reason), plugin_target)
+            )
 
     for plugin_id, plugin in config.plugins.items():
         if not plugin.enabled:
@@ -261,23 +348,16 @@ def check_configuration(
                 or ("Chromium" if shutil.which("chromium") else None)
                 or ("Google Chrome" if shutil.which("google-chrome") else None)
             )
-            target = config_dir / "plugins.json"
+            plugin_target = config_dir / "plugins.json"
             if runtime:
-                report.ready.append(Diagnostic("浏览器运行环境可用：{}".format(runtime), target))
+                report.ready.append(Diagnostic("浏览器运行环境可用：{}".format(runtime), plugin_target))
             else:
                 report.warnings.append(
                     Diagnostic(
                         "浏览器插件已启用；请确认 Playwright Chromium 或系统浏览器已安装",
-                        target,
+                        plugin_target,
                     )
                 )
-        if plugin_id == "codex_tasks" and not plugin.settings.get("admin_tenant_ids"):
-            report.warnings.append(
-                Diagnostic(
-                    "Codex 插件已启用但管理员租户列表为空，相关工具不会开放",
-                    config_dir / "plugins.json",
-                )
-            )
 
     report.ready.append(
         Diagnostic(

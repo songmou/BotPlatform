@@ -6,13 +6,17 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
-import fcntl
 import html
 from html.parser import HTMLParser
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 from pathlib import Path
 import re
 import secrets
@@ -45,11 +49,11 @@ class CredentialError(MonitorError):
 
 
 class AuthenticationError(MonitorError):
-    """OA authentication failed."""
+    """CTS EHR authentication failed."""
 
 
 class ResponseSchemaError(MonitorError):
-    """An OA response no longer matches the expected schema."""
+    """A CTS EHR response no longer matches the expected schema."""
 
 
 class LoginFormParser(HTMLParser):
@@ -170,12 +174,14 @@ def read_keychain_password(account: str, service: str) -> str:
     )
     password = completed.stdout.rstrip("\r\n")
     if completed.returncode != 0 or not password:
-        raise CredentialError("未能从 macOS 钥匙串读取 OA 密码，请先运行 setup_keychain.py")
+        raise CredentialError(
+            "未能从 macOS 钥匙串读取 CTS EHR 密码，请在机器人私聊中使用 /integration setup ctsehr 配置凭据"
+        )
     return password
 
 
 def encrypt_password(password: str, key: str, initial: Optional[int] = None) -> str:
-    """Replicate the OA page's current client-side password transform."""
+    """Replicate the CTS EHR page's current client-side password transform."""
     if not key:
         raise AuthenticationError("登录页缺少密码加密参数")
     state = secrets.randbelow(256) if initial is None else initial
@@ -196,9 +202,9 @@ def validate_login(final_url: str, cookie_names: Iterable[str], page_html: str) 
     )
     error_text = clean_text(error_match.group(1)) if error_match else ""
     if error_text:
-        raise AuthenticationError(f"OA 登录失败：{error_text}")
+        raise AuthenticationError(f"CTS EHR 登录失败：{error_text}")
     if "/account/logon.aspx" in final_url.lower() or ".formsauthcookie" not in names:
-        raise AuthenticationError("OA 登录失败：未获得有效登录会话")
+        raise AuthenticationError("CTS EHR 登录失败：未获得有效登录会话")
 
 
 def clean_text(value: Any, limit: int = 240) -> str:
@@ -288,10 +294,10 @@ class OAClient:
                 return response
             except (self.httpx.HTTPError, OSError) as exc:
                 last_error = exc
-                self.logger.warning("OA 请求失败，准备重试 (%s/%s): %s", attempt, self.retries, type(exc).__name__)
+                self.logger.warning("CTS EHR 请求失败，准备重试 (%s/%s): %s", attempt, self.retries, type(exc).__name__)
                 if attempt < self.retries:
                     time.sleep(2 ** (attempt - 1))
-        raise MonitorError(f"OA 请求连续失败：{type(last_error).__name__}") from last_error
+        raise MonitorError(f"CTS EHR 请求连续失败：{type(last_error).__name__}") from last_error
 
     def login(self, account: str, password: str) -> None:
         response = self._request("GET", "/frame2021/default.aspx")
@@ -317,7 +323,7 @@ class OAClient:
         action = urljoin(str(response.url), parser.action)
         logged_in = self._request("POST", action, data=form, headers={"Referer": str(response.url)})
         validate_login(str(logged_in.url), self.client.cookies.keys(), logged_in.text)
-        self.logger.info("OA 登录成功")
+        self.logger.info("CTS EHR 登录成功")
 
     @staticmethod
     def _encoded(value: str) -> str:
@@ -574,7 +580,7 @@ def generate_ai_summary(
             "alerts": result["alerts"],
         }
         prompt = (
-            "你是企业OA双日考勤汇总助手。只根据给定JSON写3到5行简洁中文摘要，"
+            "你是企业 EHR 双日考勤汇总助手。只根据给定JSON写3到5行简洁中文摘要，"
             "分别概括昨天和今天，不得猜测；pending 必须表述为待检查，"
             "不得表述为缺卡或迟到，也不要输出Markdown标题。\n"
             + json.dumps(payload, ensure_ascii=False)
@@ -595,7 +601,7 @@ def generate_ai_summary(
 
 def build_markdown(result: Dict[str, Any]) -> str:
     lines = [
-        "# OA 双日考勤汇总",
+        "# EHR 双日考勤汇总",
         "",
         f"- 检查时间：{result['run_at']}",
         f"- 目标日期：{result['target_date']}",
@@ -691,7 +697,7 @@ def render_png(result: Dict[str, Any], target: Path, font_path: str) -> None:
     body_font = _load_font(font_path, 22)
     small_font = _load_font(font_path, 17)
     draw.rounded_rectangle((35, 30, width - 35, height - 30), 24, fill="white", outline="#DCE4EF", width=2)
-    draw.text((75, 65), "OA 双日考勤汇总", font=title_font, fill="#172B4D")
+    draw.text((75, 65), "EHR 双日考勤汇总", font=title_font, fill="#172B4D")
     draw.text((75, 125), f"检查时间 {result['run_at']}", font=small_font, fill="#6B778C")
 
     y = 180
@@ -813,13 +819,13 @@ def wechat_notification_text(result: Dict[str, Any]) -> str:
     if result.get("status") != "ok":
         return "\n".join(
             [
-                "【OA双日考勤汇总失败】",
+                "【EHR考勤双日汇总失败】",
                 f"日期：{result['target_date']}",
                 "任务执行失败，请查看本地脱敏日志。",
             ]
         )
 
-    lines = ["【OA双日考勤汇总】"]
+    lines = ["【EHR考勤双日汇总】"]
     for day in result.get("days", []):
         relation = "昨天" if day.get("relation") == "previous" else "今天"
         punches = "、".join(
@@ -870,7 +876,7 @@ def build_error_result(
             empty_day(target_date, "current"),
         ],
         "approvals": {"pending_count": 0, "items": []},
-        "alerts": [{"severity": "error", "code": "run_failed", "message": "OA 监控运行失败"}],
+        "alerts": [{"severity": "error", "code": "run_failed", "message": "CTS EHR 监控运行失败"}],
         "errors": [message],
         "model": {"used": False, "model": "", "summary": "本次监控运行失败，请查看脱敏日志。", "error": ""},
     }
@@ -885,13 +891,13 @@ def execute_monitor(
     now = (now_provider or (lambda: datetime.now().astimezone()))()
     account = os.getenv("ILINKBOT_INTEGRATION_ACCOUNT") or config["oa"].get("account", "")
     if not account:
-        raise CredentialError("未配置当前用户的 OA 账号")
+        raise CredentialError("未配置当前用户的 CTS EHR 账号")
     keychain_account = os.getenv("ILINKBOT_KEYCHAIN_ACCOUNT") or account
     keychain_service = (
         os.getenv("ILINKBOT_KEYCHAIN_SERVICE") or config["oa"].get("keychain_service", "")
     )
     if not keychain_service:
-        raise CredentialError("未配置当前用户的 OA 凭据引用")
+        raise CredentialError("未配置当前用户的 CTS EHR 凭据引用")
     if os.getenv("ILINKBOT_KEYCHAIN_SERVICE"):
         from src.core.integrations.keychain import (
             KeychainError,
@@ -904,7 +910,7 @@ def execute_monitor(
                 KeychainReference(keychain_service, keychain_account)
             )
         except KeychainError as exc:
-            raise CredentialError("未能读取当前用户的 OA 凭据") from exc
+            raise CredentialError("未能读取当前用户的 CTS EHR 凭据") from exc
     else:
         password = read_keychain_password(keychain_account, keychain_service)
     runtime_config = dict(config)
@@ -962,7 +968,7 @@ def execute_monitor(
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    parser = argparse.ArgumentParser(description="只读汇总昨天和今天的 OA 考勤与待审批")
+    parser = argparse.ArgumentParser(description="只读汇总昨天和今天的 CTS EHR 考勤与待审批")
     parser.add_argument("--date", dest="target_date", help="目标日期，格式 YYYY-MM-DD")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="配置文件路径")
     return parser.parse_args(arguments)
@@ -1010,7 +1016,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ConfigurationError as exc:
         write_script_result(
             "failed",
-            "OA 监控配置无效，请查看本地日志。",
+            "CTS EHR 监控配置无效，请查看本地日志。",
             error=type(exc).__name__,
         )
         print(str(exc), file=sys.stderr)
@@ -1021,10 +1027,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     with lock_path.open("w", encoding="utf-8") as lock_file:
         lock_path.chmod(0o600)
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            if os.name == "nt":
+                # Windows 特有 msvcrt 锁定调用，typeshed 未收录
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
             logger.info("已有监控任务在运行，本次跳过")
-            write_script_result("skipped", "已有 OA 监控任务在运行，本次检查已跳过。")
+            write_script_result("skipped", "已有 CTS EHR 监控任务在运行，本次检查已跳过。")
             return 0
 
         try:
@@ -1051,7 +1061,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             logger.error("凭据错误：%s", exc)
             write_script_result(
                 "failed",
-                "OA 凭据不可用，请检查当前租户的凭证配置。",
+                "CTS EHR 凭据不可用，请检查当前租户的凭证配置。",
                 error=type(exc).__name__,
             )
             print(str(exc), file=sys.stderr)
@@ -1060,18 +1070,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             safe_message = f"{type(exc).__name__}: {clean_text(exc, 500)}"
             logger.error("监控失败：%s", safe_message)
             result = build_error_result(target_date, safe_message)
-            paths: Dict[str, str] = {}
+            error_paths: Dict[str, str] = {}
             try:
-                paths = save_artifacts(result, results_root, config)
+                error_paths = save_artifacts(result, results_root, config)
             except Exception as save_exc:
                 logger.error("错误报告保存失败：%s", type(save_exc).__name__)
             write_script_result(
                 "failed",
-                "OA 监控运行失败，请查看本地脱敏日志。",
-                artifacts=[paths["png"]] if paths.get("png") else [],
+                "CTS EHR 监控运行失败，请查看本地脱敏日志。",
+                artifacts=[error_paths["png"]] if error_paths.get("png") else [],
                 error=type(exc).__name__,
             )
-            print("OA 监控运行失败，请查看本地日志。", file=sys.stderr)
+            print("CTS EHR 监控运行失败，请查看本地日志。", file=sys.stderr)
             return 1
 
 

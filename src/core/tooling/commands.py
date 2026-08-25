@@ -229,8 +229,8 @@ class CommandRunner:
             quoted = _sandbox_quote(str(root))
             lines.append('(deny file-read* (subpath "{}"))'.format(quoted))
             lines.append('(deny file-write* (subpath "{}"))'.format(quoted))
-        for root in [*self.config.allowed_roots, str(temp_directory)]:
-            quoted = _sandbox_quote(str(Path(root).resolve()))
+        for allowed_root in [*self.config.allowed_roots, str(temp_directory)]:
+            quoted = _sandbox_quote(str(Path(allowed_root).resolve()))
             lines.append('(allow file-read* (subpath "{}"))'.format(quoted))
             lines.append('(allow file-write* (subpath "{}"))'.format(quoted))
         if profile == "ollama_readonly":

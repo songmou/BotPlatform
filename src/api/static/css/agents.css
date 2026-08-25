@@ -1,0 +1,243 @@
+/* agents page styles (split from app.css). Loaded after app.css. */
+
+/* Agent card grid (extends .card-grid from app.css) */
+.agent-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+.agent-card {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100%;
+    padding: var(--card-padding);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg);
+    transition: transform 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out),
+        border-color 0.2s var(--ease-out);
+}
+
+.agent-card:hover {
+    box-shadow: var(--shadow-lg);
+    border-color: var(--accent);
+    transform: translateY(-3px);
+}
+
+.agent-card.disabled {
+    opacity: 0.6;
+}
+
+.agent-card h5 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.agent-card p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 4px 0;
+}
+
+.agent-card-role {
+    font-size: 12px !important;
+    color: var(--text-muted) !important;
+}
+
+.agent-card-desc {
+    line-height: 1.6;
+}
+
+.agent-cap-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.agent-cap-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+.agent-cap-more {
+    color: var(--text-muted);
+}
+
+.agent-card-actions {
+    margin-top: auto;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+/* ===== Agent tool picker ===== */
+.agent-tools-section {
+    border: 1px solid var(--border, #e2e8f0);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.agent-tool-bulk-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border, #e2e8f0);
+    background: var(--bg);
+}
+
+.tool-count {
+    font-weight: 400;
+    color: var(--text-muted, #64748b);
+    font-size: 12px;
+}
+.tool-checkboxes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px;
+    padding: 12px;
+}
+.tool-checkboxes.tool-checkboxes-nested {
+    padding: 0;
+}
+.tool-plugin-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 12px;
+}
+.tool-plugin-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+.tool-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    background: var(--bg);
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.tool-check:hover {
+    border-color: var(--accent);
+}
+.tool-check:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-light);
+}
+.tool-check input {
+    display: none;
+}
+.tool-check:has(input:checked) .tool-name {
+    color: var(--accent);
+}
+.tool-info {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+.tool-check .tool-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.35;
+    margin: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+.tool-check .tool-desc {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-muted);
+    line-height: 1.4;
+    margin: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+.tool-empty {
+    grid-column: 1 / -1;
+    color: var(--text-muted, #94a3b8);
+    font-size: 12px;
+    padding: 4px;
+}
+.tool-hint {
+    grid-column: 1 / -1;
+    color: var(--text-secondary, #475569);
+    background: var(--accent-light, #eff6ff);
+    border: 1px solid var(--border, #e2e8f0);
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 10px 12px;
+}
+.tool-warning {
+    grid-column: 1 / -1;
+    color: #b45309;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 10px 12px;
+}
+
+/* ===== Agent modal sub-tabs ===== */
+.agent-modal-tabs {
+    margin: 12px 24px 0;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
+}
+.agent-tab-panel[hidden] {
+    display: none;
+}
+.agent-tab-panel > .form-group:first-child {
+    margin-top: 0;
+}
+
+/* ===== Agent create/edit dialog: fixed-size modal layout =====
+   Fixes the bug where a long tool list in #agent-form overlapped the top
+   tab bar; the header + tab bar are pinned at top, the tab content scrolls
+   inside a fixed-height body, and the 取消/保存 footer is pinned to bottom.
+   Reuses the proven sticky-footer pattern from models.css. */
+.agent-dialog {
+    height: 85vh;
+    max-height: 85vh;
+}
+.agent-dialog .modal-header,
+.agent-dialog > .tab-bar {
+    flex-shrink: 0;
+}
+.agent-dialog #agent-form,
+.agent-dialog #organization-agent-form {
+    flex: 1 1 auto;
+    min-height: 0;          /* allow the flex item to shrink below content size */
+    overflow-y: auto;       /* sole scroll region: tab content scrolls here */
+}
+.agent-dialog > .tab-bar.agent-modal-tabs,
+.agent-dialog > .tab-bar.organization-agent-tabs {
+    position: static;       /* was a no-op sticky outside the scroll container */
+    margin: 12px 24px 0;
+    background: var(--bg);
+    z-index: 5;
+}
+.agent-dialog .modal-footer {
+    flex-shrink: 0;          /* pinned to the bottom of the dialog as a flex sibling */
+}

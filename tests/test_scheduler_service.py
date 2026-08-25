@@ -15,6 +15,7 @@ from src.core.plugins.todo import TodoPlugin
 from src.core.services.notification import TenantRecipientStore
 from src.core.services.scheduler import SchedulerService
 from src.core.storage.tenants import ScheduleStore, TenantRegistry
+from src.core.tooling.models import FinalAnswer
 
 
 class FakeAgentService:
@@ -24,6 +25,10 @@ class FakeAgentService:
     def generate(self, agent_id, prompt):
         self.calls.append((agent_id, prompt))
         return "AI 定时内容"
+
+    def chat(self, user_id, question, image_bytes=None, agent_id=None):
+        self.calls.append((agent_id or "default", question))
+        return FinalAnswer(text="AI 定时内容")
 
 
 class FakeILink:
@@ -241,6 +246,7 @@ class SchedulerServiceTests(unittest.TestCase):
             memory_service=memory_service,
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_recipient_is_atomic_private_and_reloadable(self) -> None:
         self.store.update(self.tenant, "context")
         recipient = self.store.load(self.tenant.tenant_id)
@@ -320,7 +326,7 @@ class SchedulerServiceTests(unittest.TestCase):
             ["soul_daily_maintenance", "soul_weekly_compaction"],
         )
 
-    def test_script_schedule_runs_without_recipient_and_submits_parameters(self) -> None:
+    def test_configured_script_task_runs_without_recipient(self) -> None:
         scripts = FakeScriptService()
         task = script_task()
         service = self.service([task], script_service=scripts)
@@ -366,13 +372,16 @@ class SchedulerServiceTests(unittest.TestCase):
             {}, PluginContext(Path(self.temp.name), self.registry)
         )
         service = self.service([fixed_task()], plugins=[plugin])
+        plugin._notification_service = service.notification_service
         plugin.execute_for_tenant(
             self.tenant.tenant_id, "add", title="到期事项",
             remind_at="2026-07-16T08:01:00+00:00",
             now=datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc),
         )
         self.now = datetime(2026, 7, 16, 8, 1, tzinfo=timezone.utc)
-        self.assertTrue(service.run_due_todo_reminders())
+        self.assertTrue(
+            service.run_plugin_background_job("todo", "due_reminders")
+        )
         with self.registry.database.read() as connection:
             event = connection.execute(
                 "SELECT delivery_status FROM todo_reminder_events "
@@ -401,7 +410,9 @@ class SchedulerServiceTests(unittest.TestCase):
             self.tenant.tenant_id, "list", scope="pending"
         )
         self.assertNotIn("T0001", pending.summary)
-        self.assertFalse(service.run_due_todo_reminders())
+        self.assertFalse(
+            service.run_plugin_background_job("todo", "due_reminders")
+        )
 
     def test_one_logical_task_can_register_two_cron_triggers(self) -> None:
         scheduler = FakeScheduler()

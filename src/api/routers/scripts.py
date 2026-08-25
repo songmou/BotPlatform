@@ -1,0 +1,222 @@
+"""Administrator APIs for external scripts, runs, and tenant automation."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
+from src.api.deps import (
+    get_registry,
+    get_script_registry,
+    get_script_service,
+    require_permission,
+)
+from src.core.storage.tenants import TenantStoreError
+
+
+router = APIRouter(tags=["scripts"])
+
+
+def _services(request: Request):
+    registry = get_script_registry(request)
+    scripts = get_script_service(request)
+    if registry is None or scripts is None:
+        raise HTTPException(status_code=503, detail="脚本服务不可用")
+    return registry, scripts
+
+
+def _tenant(request: Request, tenant_id: str):
+    try:
+        return get_registry(request).get(tenant_id)
+    except TenantStoreError as exc:
+        raise HTTPException(status_code=404, detail="租户不存在") from exc
+
+
+@router.get("/api/scripts/{script_id}/credentials")
+def script_credentials(
+    script_id: str,
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    principal=Depends(require_permission("scripts.read")),
+):
+    """Report the integration credential binding for a script.
+
+    Scripts backed by a platform integration (ctsehr/ctsoa/autogen) receive
+    their account/password from the per-tenant integration store and the
+    Keychain. This endpoint lets the web UI show whether those credentials
+    are configured for the selected tenant before a run or schedule.
+    """
+    scripts = get_script_service(request)
+    if scripts is None:
+        raise HTTPException(status_code=503, detail="脚本服务不可用")
+    definition = scripts.definitions.get(script_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="脚本不存在")
+    status = scripts.integration_status(tenant_id, script_id)
+    if status is None:
+        return {"requires_credentials": False}
+    return status
+
+
+@router.get("/api/scripts")
+def list_scripts(
+    request: Request,
+    principal=Depends(require_permission("scripts.read")),
+):
+    registry, scripts = _services(request)
+    return {
+        "allowed_roots": registry.allowed_roots,
+        "scripts": scripts.list_scripts(),
+        "external_entries": registry.list_entries(),
+    }
+
+
+@router.put("/api/scripts/roots")
+def update_script_roots(
+    body: Dict[str, Any],
+    request: Request,
+    principal=Depends(require_permission("scripts.manage")),
+):
+    registry, scripts = _services(request)
+    roots = body.get("allowed_roots")
+    if not isinstance(roots, list):
+        raise HTTPException(status_code=400, detail="allowed_roots 必须是数组")
+    try:
+        result = registry.configure_roots(roots)
+        scripts.reload_external_definitions()
+        return {"allowed_roots": result}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/scripts", status_code=201)
+def create_script(
+    body: Dict[str, Any],
+    request: Request,
+    principal=Depends(require_permission("scripts.manage")),
+):
+    registry, scripts = _services(request)
+    try:
+        definition = registry.create(body)
+        scripts.reload_external_definitions()
+        return next(
+            item for item in scripts.list_scripts() if item["id"] == definition.id
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/api/scripts/{script_id}")
+def update_script(
+    script_id: str,
+    body: Dict[str, Any],
+    request: Request,
+    principal=Depends(require_permission("scripts.manage")),
+):
+    registry, scripts = _services(request)
+    try:
+        registry.update(script_id, body)
+        scripts.reload_external_definitions()
+        return next(item for item in scripts.list_scripts() if item["id"] == script_id)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/scripts/{script_id}/trust-current")
+def trust_current_script(
+    script_id: str,
+    request: Request,
+    principal=Depends(require_permission("scripts.manage")),
+):
+    registry, scripts = _services(request)
+    try:
+        registry.trust_current(script_id)
+        scripts.reload_external_definitions()
+        return next(item for item in scripts.list_scripts() if item["id"] == script_id)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/api/scripts/{script_id}")
+def delete_script(
+    script_id: str,
+    request: Request,
+    principal=Depends(require_permission("scripts.manage")),
+):
+    registry, scripts = _services(request)
+    try:
+        registry.delete(script_id)
+        scripts.reload_external_definitions()
+        return {"status": "ok"}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/scripts/{script_id}/runs", status_code=202)
+def run_script(
+    script_id: str,
+    body: Dict[str, Any],
+    request: Request,
+    principal=Depends(require_permission("scripts.execute")),
+):
+    _, scripts = _services(request)
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str):
+        raise HTTPException(status_code=400, detail="tenant_id 必须是字符串")
+    tenant = _tenant(request, tenant_id)
+    try:
+        return scripts.submit(
+            tenant,
+            script_id,
+            body.get("parameters", {}),
+            trigger="web",
+            recipient=scripts.recipient_store.load(tenant_id),
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/script-runs")
+def list_script_runs(
+    request: Request,
+    tenant_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    principal=Depends(require_permission("scripts.read")),
+):
+    _, scripts = _services(request)
+    tenant = _tenant(request, tenant_id)
+    return scripts.list_runs(tenant, limit=limit)
+
+
+@router.get("/api/script-runs/{run_id}")
+def get_script_run(
+    run_id: str,
+    request: Request,
+    tenant_id: str,
+    principal=Depends(require_permission("scripts.read")),
+):
+    _, scripts = _services(request)
+    tenant = _tenant(request, tenant_id)
+    try:
+        return scripts.get_run(tenant, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/api/script-runs/{run_id}/cancel")
+def cancel_script_run(
+    run_id: str,
+    body: Dict[str, Any],
+    request: Request,
+    principal=Depends(require_permission("scripts.execute")),
+):
+    _, scripts = _services(request)
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str):
+        raise HTTPException(status_code=400, detail="tenant_id 必须是字符串")
+    tenant = _tenant(request, tenant_id)
+    try:
+        return scripts.cancel_run(tenant, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.core.services.agent import AgentService
 from src.core.config.loader import load_project_config
@@ -57,6 +58,7 @@ def tool_call(name, arguments):
 
 class AutoScriptService:
     script_ids = ["todo_manager"]
+    definitions = {}
 
     def __init__(self):
         self.calls = []
@@ -89,6 +91,52 @@ class AutoScriptService:
             "run_id": run_id,
             "status": "success",
             "summary": "【待办列表】未完成，共 0 项。",
+        }
+
+
+class IntegrationScriptService:
+    script_ids = ["ctsehr_check", "ctsoa_check"]
+
+    def __init__(self, ready=()):
+        self.ready = set(ready)
+        self.calls = []
+        self.definitions = {
+            script_id: SimpleNamespace(id=script_id, name=name, description="")
+            for script_id, name in (
+                ("ctsehr_check", "CTS EHR 考勤查询"),
+                ("ctsoa_check", "CTS OA 待办查询"),
+            )
+        }
+
+    def list_scripts(self):
+        return [
+            {
+                "id": script_id,
+                "name": definition.name,
+                "requires_approval": False,
+                "parameters": {},
+            }
+            for script_id, definition in self.definitions.items()
+        ]
+
+    def requires_approval(self, _script_id):
+        return False
+
+    def has_approval_required_scripts(self):
+        return False
+
+    def submit_for_tenant(self, tenant, script_id, parameters):
+        self.calls.append((tenant, script_id, parameters))
+        if script_id not in self.ready:
+            integration_id = "ctsehr" if script_id == "ctsehr_check" else "ctsoa"
+            raise ValueError(
+                "尚未配置 {}，请先使用 /integration setup {}".format(
+                    integration_id, integration_id
+                )
+            )
+        return {
+            "run_id": "{}-20260814T120000-12345678".format(script_id),
+            "status": "running",
         }
 
 
@@ -149,6 +197,91 @@ class ToolAgentLoopTests(unittest.TestCase):
             tool_runtime=runtime,
         )
         return service, ollama, tenant, todo
+
+    def integration_service(self, responses, ready=()):
+        scripts = IntegrationScriptService(ready)
+        registry = TenantRegistry(Path(self.temp.name) / "integration-data")
+        tenant = registry.resolve("bot", "integration-user")
+        audits = []
+        runtime = ToolRuntime(
+            self.runtime.base_config,
+            "Asia/Shanghai",
+            trash_directory=Path(self.temp.name) / "trash",
+            sandbox_available=True,
+            script_service=scripts,
+            tenant_registry=registry,
+            audit_logger=lambda _context, name, *_args: audits.append(name),
+        )
+        self.runtime = runtime
+        service, ollama = self.service(responses)
+        return service, ollama, tenant, scripts, audits
+
+    def test_explicit_ehr_query_bypasses_stale_model_history(self) -> None:
+        service, ollama, tenant, scripts, audits = self.integration_service(
+            [CanonicalMessage("assistant", "仍未配置")],
+            ready={"ctsehr_check"},
+        )
+        service.histories[tenant.tenant_id] = [
+            CanonicalMessage("user", "查看打卡"),
+            CanonicalMessage("assistant", "尚未配置 ctsehr"),
+        ]
+
+        outcome = service.chat(tenant, "查看打卡")
+
+        self.assertEqual(ollama.calls, [])
+        self.assertIn("ctsehr_check-20260814T120000-12345678", outcome.text)
+        self.assertEqual(
+            scripts.calls, [(tenant, "ctsehr_check", {})]
+        )
+        self.assertEqual(audits, ["list_scripts", "run_script"])
+
+    def test_ehr_query_rechecks_credentials_after_previous_failure(self) -> None:
+        service, ollama, tenant, scripts, _audits = self.integration_service([])
+
+        missing = service.chat(tenant, "查看打卡")
+        scripts.ready.add("ctsehr_check")
+        configured = service.chat(tenant, "查看打卡")
+
+        self.assertEqual(ollama.calls, [])
+        self.assertIn("尚未配置 ctsehr", missing.text)
+        self.assertIn("已提交", configured.text)
+        self.assertEqual(
+            [script_id for _tenant, script_id, _parameters in scripts.calls],
+            ["ctsehr_check", "ctsehr_check"],
+        )
+
+    def test_oa_and_combined_queries_submit_current_scripts(self) -> None:
+        service, ollama, tenant, scripts, _audits = self.integration_service(
+            [], ready={"ctsehr_check", "ctsoa_check"}
+        )
+
+        oa = service.chat(tenant, "请查看 OA 待办")
+        combined = service.chat(tenant, "查看打卡和 OA 审批待办")
+
+        self.assertEqual(ollama.calls, [])
+        self.assertIn("CTS OA 待办查询已提交", oa.text)
+        self.assertIn("CTS EHR 考勤查询已提交", combined.text)
+        self.assertIn("CTS OA 待办查询已提交", combined.text)
+        self.assertEqual(
+            [script_id for _tenant, script_id, _parameters in scripts.calls],
+            ["ctsoa_check", "ctsehr_check", "ctsoa_check"],
+        )
+
+    def test_non_live_integration_questions_remain_in_model_route(self) -> None:
+        service, ollama, tenant, scripts, _audits = self.integration_service(
+            [
+                CanonicalMessage("assistant", "这是私人待办问题。"),
+                CanonicalMessage("assistant", "这是系统区别说明。"),
+            ]
+        )
+
+        todo = service.chat(tenant, "查看待办")
+        explanation = service.chat(tenant, "OA 和 EHR 有什么区别？")
+
+        self.assertEqual(todo.text, "这是私人待办问题。")
+        self.assertEqual(explanation.text, "这是系统区别说明。")
+        self.assertEqual(len(ollama.calls), 2)
+        self.assertEqual(scripts.calls, [])
 
     def test_safe_tool_result_is_returned_to_model(self) -> None:
         (self.root / "actual.txt").write_text("真实文件", encoding="utf-8")
@@ -413,7 +546,7 @@ class ToolAgentLoopTests(unittest.TestCase):
                 CanonicalMessage("assistant", "已取消创建文件。"),
             ]
         )
-        pending = service.chat("user", "创建文件")
+        service.chat("user", "创建文件")
         final = service.resolve_pending_approval("user", False)
         self.assertEqual(final.text, "已取消创建文件。")
         self.assertFalse((self.root / "denied.txt").exists())

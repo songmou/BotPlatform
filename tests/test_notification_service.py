@@ -13,7 +13,7 @@ from src.core.integrations.ilink import (
     SessionExpired,
 )
 from src.core.integrations.images import ImageSource, ImageSourceError
-from src.core.plugins.codex_tasks import CodexTaskStore
+from src.core.modeling import CanonicalMessage
 from src.core.services.notification import (
     NotificationCredentialsError,
     NotificationDeliveryError,
@@ -25,7 +25,7 @@ from src.core.services.notification import (
     NotificationService,
     TenantRecipientStore,
 )
-from src.core.storage.tenants import TenantRegistry
+from src.core.storage.tenants import ConversationStore, TenantRegistry
 
 
 class FakeILink:
@@ -58,7 +58,7 @@ class NotificationServiceTests(unittest.TestCase):
         self.credentials = Credentials("token", "https://gateway", "bot", "owner")
         self.clients = []
 
-    def service(self, credentials=None, failure=None):
+    def service(self, credentials=None, failure=None, conversation_store=None):
         selected_credentials = self.credentials if credentials is None else credentials
 
         def factory(_credentials):
@@ -71,7 +71,61 @@ class NotificationServiceTests(unittest.TestCase):
             recipient_store=self.store,
             client_factory=factory,
             image_loader=FakeImageLoader(),
+            conversation_store=conversation_store,
         )
+
+    def test_delivered_notification_joins_context_and_is_idempotent(self) -> None:
+        self.store.update(self.tenant, "context-token")
+        conversations = ConversationStore(self.registry, max_messages=4)
+        service = self.service(conversation_store=conversations)
+
+        service.send_text_to_tenant(
+            self.tenant.tenant_id,
+            "插件主动推送",
+            idempotency_key="notification-one",
+        )
+        service.send_text_to_tenant(
+            self.tenant.tenant_id,
+            "插件主动推送",
+            idempotency_key="notification-one",
+        )
+
+        self.assertEqual(
+            conversations.load_context(self.tenant.tenant_id),
+            [CanonicalMessage("assistant", "插件主动推送")],
+        )
+        with self.registry.database.read() as connection:
+            events = connection.execute(
+                "SELECT role, content, event_type FROM conversation_events "
+                "WHERE tenant_id=?",
+                (self.tenant.tenant_id,),
+            ).fetchall()
+            receipts = connection.execute(
+                "SELECT delivery_key FROM conversation_delivery_receipts "
+                "WHERE tenant_id=?",
+                (self.tenant.tenant_id,),
+            ).fetchall()
+        self.assertEqual(
+            [tuple(row) for row in events],
+            [("assistant", "插件主动推送", "notification")],
+        )
+        self.assertEqual(
+            [tuple(row) for row in receipts],
+            [("notification:notification-one",)],
+        )
+
+    def test_failed_notification_does_not_join_context(self) -> None:
+        self.store.update(self.tenant, "context-token")
+        conversations = ConversationStore(self.registry, max_messages=4)
+        service = self.service(
+            failure=ILinkError("send failed"),
+            conversation_store=conversations,
+        )
+
+        with self.assertRaises(NotificationDeliveryError):
+            service.send_text_to_tenant(self.tenant.tenant_id, "未送达")
+
+        self.assertEqual(conversations.load_context(self.tenant.tenant_id), [])
 
     def test_sends_literal_text_to_recent_recipient_and_closes_client(self) -> None:
         self.store.update(self.tenant, "context-token")
@@ -337,69 +391,6 @@ class NotificationServiceTests(unittest.TestCase):
         self.assertEqual(
             reclaimed[0]["notification_id"], first.notification_ids[0]
         )
-
-    def test_existing_codex_event_is_adopted_and_status_is_mirrored(self) -> None:
-        self.store.update(self.tenant, "context")
-        with self.registry.database.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO codex_task_runs("
-                "thread_id, tenant_id, project_id, title, status, created_at, "
-                "notification_status, origin, phase, updated_at, last_seen_at"
-                ") VALUES ('thread-outbox', ?, 'project', '可靠通知', 'completed', "
-                "'2026-01-01T00:00:00+00:00', 'pending', 'external', 'completed', "
-                "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
-                (self.tenant.tenant_id,),
-            )
-            connection.execute(
-                "INSERT INTO codex_task_events("
-                "event_key, thread_id, tenant_id, event_type, message, "
-                "delivery_status, created_at"
-                ") VALUES ('codex-outbox-key', 'thread-outbox', ?, 'completed', "
-                "'Codex 已完成', 'pending', '2026-01-01T00:00:00+00:00')",
-                (self.tenant.tenant_id,),
-            )
-
-        service = self.service()
-        self.assertEqual(service.dispatch_due(), 1)
-        with self.registry.database.read() as connection:
-            event = connection.execute(
-                "SELECT delivery_status, sent_at FROM codex_task_events "
-                "WHERE event_key='codex-outbox-key'"
-            ).fetchone()
-            task = connection.execute(
-                "SELECT notification_status FROM codex_task_runs "
-                "WHERE thread_id='thread-outbox'"
-            ).fetchone()
-        self.assertEqual(event["delivery_status"], "sent")
-        self.assertIsNotNone(event["sent_at"])
-        self.assertEqual(task["notification_status"], "sent")
-
-    def test_new_codex_event_and_outbox_row_are_created_together(self) -> None:
-        store = CodexTaskStore(self.registry, durable_outbox=True)
-        store.create(
-            "thread-atomic",
-            self.tenant.tenant_id,
-            "project",
-            "原子通知",
-            notify=True,
-        )
-        event = store.enqueue_event(
-            "codex-atomic-key",
-            "thread-atomic",
-            self.tenant.tenant_id,
-            "completed",
-            "Codex 原子入队",
-        )
-
-        self.assertEqual(event["delivery_status"], "sending")
-        with self.registry.database.read() as connection:
-            outbox = connection.execute(
-                "SELECT source_ref, delivery_status, text_payload "
-                "FROM notification_outbox WHERE source_key='codex-atomic-key'"
-            ).fetchone()
-        self.assertEqual(outbox["source_ref"], str(event["event_id"]))
-        self.assertEqual(outbox["delivery_status"], "pending")
-        self.assertEqual(outbox["text_payload"], "Codex 原子入队")
 
     def test_permanently_missing_image_fails_and_unblocks_later_text(self) -> None:
         self.store.update(self.tenant, "context")

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}BotPlatform{% endblock %}</title>
+    <script>
+        (function () {
+            try {
+                document.documentElement.setAttribute(
+                    "data-theme", localStorage.getItem("bp-theme") || "light"
+                );
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/app.css?v=20260814a">
+    <link rel="stylesheet" href="/static/css/organization-module.css?v=20260804b">
+    {% block head %}{% endblock %}
+</head>
+<body data-module="{{ module|default('') }}"
+      data-navigation-scope="{{ 'organization' if organization_page|default(false) else ('platform' if platform_admin else 'organization') }}"
+      data-organization-page="{{ '1' if organization_page|default(false) else '0' }}">
+    <div id="toast-container" class="toast-container"></div>
+    <div id="confirm-overlay" class="modal-overlay" style="display:none">
+        <div class="modal confirm-modal">
+            <div class="modal-body">
+                <p id="confirm-message" class="confirm-message"></p>
+                <div class="modal-footer">
+                    <button id="confirm-cancel" class="btn-secondary">取消</button>
+                    <button id="confirm-ok" class="btn-primary">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="form-dialog-overlay" class="modal-overlay" style="display:none">
+        <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="form-dialog-title">
+            <div class="modal-header"><h3 id="form-dialog-title"></h3><button id="form-dialog-close" class="modal-close-btn" type="button">&times;</button></div>
+            <form id="form-dialog-form" class="modal-body"><div id="form-dialog-fields"></div><div class="modal-footer"><button id="form-dialog-cancel" class="btn-secondary" type="button">取消</button><button class="btn-primary" type="submit">保存</button></div></form>
+        </div>
+    </div>
+    <div id="notice-dialog-overlay" class="modal-overlay" style="display:none">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="notice-dialog-title">
+            <div class="modal-header"><h3 id="notice-dialog-title"></h3><button id="notice-dialog-close" class="modal-close-btn" type="button">&times;</button></div>
+            <div class="modal-body"><textarea id="notice-dialog-value" rows="7" readonly style="width:100%;resize:vertical"></textarea><div class="modal-footer"><button id="notice-dialog-copy" class="btn-secondary" type="button">复制</button><button id="notice-dialog-ok" class="btn-primary" type="button">关闭</button></div></div>
+        </div>
+    </div>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span class="logo">BotPlatform</span>
+                <div class="sidebar-scope-tabs" role="navigation" aria-label="工作区切换">
+                    {% if platform_admin %}
+                    <a href="/platform"
+                       class="sidebar-scope-tab {% if not organization_page|default(false) %}active{% endif %}"
+                       {% if not organization_page|default(false) %}aria-current="page"{% endif %}>
+                        <span class="scope-tab-dot" aria-hidden="true"></span>平台
+                    </a>
+                    {% endif %}
+                    <a href="/organization/overview" data-organization-link
+                       class="sidebar-scope-tab {% if organization_page|default(false) or not platform_admin %}active{% endif %}"
+                       {% if organization_page|default(false) or not platform_admin %}aria-current="page"{% endif %}>
+                        <span class="scope-tab-dot" aria-hidden="true"></span>组织
+                    </a>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                {% if platform_admin %}
+                <div class="sidebar-nav-scope" data-navigation-panel="platform">
+                <div class="nav-section-label">平台管理</div>
+                <a href="/platform" class="nav-item {% if active == 'platform-overview' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg><span>平台概览</span></a>
+                <a href="/platform/models" class="nav-item {% if active == 'platform-models' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg><span>模型服务</span></a>
+                <a href="/platform/agent-templates" class="nav-item {% if active == 'platform-agents' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 9h8M8 13h5M8 17h4"/></svg><span>智能体模板</span></a>
+                <a href="/platform/workflows" class="nav-item {% if active == 'platform-workflows' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8M18 8l-5 8"/></svg><span>工作流模板</span></a>
+                <div class="nav-group {% if active in ['platform-tools', 'platform-skills', 'platform-mcp', 'platform-database'] %}open{% endif %}">
+                    <a href="/platform/tools" class="nav-item nav-group-toggle {% if active in ['platform-tools', 'platform-skills', 'platform-mcp', 'platform-database'] %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14.7 6.3 3 3M5 19l4.2-1.1L19 8.1a2.1 2.1 0 0 0-3-3l-9.8 9.8z"/><path d="m4 20 5-1"/></svg><span>系统工具</span><span class="nav-arrow"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span></a>
+                    <div class="nav-sub">
+                        <a href="/platform/tools" class="nav-sub-item {% if active == 'platform-tools' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 7 7 14l3 3 7-7"/><path d="m13 8 3-3 3 3-3 3"/><path d="m11 16-3 3-3-3 3-3"/></svg><span>工具</span></a>
+                        <a href="/platform/skills" class="nav-sub-item {% if active == 'platform-skills' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 4 7l8 4 8-4z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></svg><span>Skill</span></a>
+                        <a href="/platform/mcp" class="nav-sub-item {% if active == 'platform-mcp' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="7" r="3"/><circle cx="17" cy="17" r="3"/><path d="m9.6 10.5 4.8-2.1M9.6 13.5l4.8 2.1"/></svg><span>MCP</span></a>
+                        <a href="/platform/database" class="nav-sub-item {% if active == 'platform-database' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span>数据库</span></a>
+                    </div>
+                </div>
+                <a href="/platform/plugins" class="nav-item {% if active == 'platform-plugins' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/><path d="M5 5h14v14H5z"/></svg><span>插件中心</span></a>
+                <a href="/platform/scripts" class="nav-item {% if active == 'platform-scripts' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6"/><path d="m14 3 7 7M21 3l-9 9"/></svg><span>运维脚本</span></a>
+                <a href="/platform/knowledge" class="nav-item {% if active == 'platform-knowledge' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5a3 3 0 0 1 3-3h13v17H7a3 3 0 0 0-3 3z"/><path d="M4 5v16a3 3 0 0 1 3-3h13"/></svg><span>公共知识库</span></a>
+                <a href="/platform/drive" class="nav-item {% if active == 'platform-drive' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>公共文件库</span></a>
+
+                <div class="nav-section-label">平台治理</div>
+                <a href="/platform/organizations" class="nav-item {% if active == 'platform-organizations' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 21V5l8-3 8 3v16"/><path d="M8 8h1M8 12h1M8 16h1M15 8h1M15 12h1M15 16h1"/></svg><span>组织管理</span></a>
+                <a href="/platform/access" class="nav-item {% if active == 'platform-access' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span>管理员与角色</span></a>
+                <a href="/platform/analytics" class="nav-item {% if active == 'platform-analytics' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg><span>聚合分析</span></a>
+                <a href="/platform/audit" class="nav-item {% if active == 'platform-audit' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 3h14v18H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>平台审计</span></a>
+                </div>
+                {% endif %}
+
+                <div class="sidebar-nav-scope" data-navigation-panel="organization">
+                <div class="nav-section-label">组织工作台</div>
+                <a href="/organization/overview" data-organization-link class="nav-item {% if active == 'organization-overview' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg><span>组织概览</span></a>
+                <a href="/organization/chat" data-organization-link class="nav-item {% if active == 'organization-chat' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3z"/></svg><span>对话</span></a>
+                <a href="/organization/agents" data-organization-link class="nav-item {% if active == 'organization-agents' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="4"/><path d="M8 10h8M8 14h5M9 3v3M15 3v3"/></svg><span>智能体</span></a>
+                <a href="/organization/workflows" data-organization-link class="nav-item {% if active == 'organization-workflows' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8M18 8l-5 8"/></svg><span>工作流</span></a>
+                <a href="/organization/knowledge" data-organization-link class="nav-item {% if active == 'organization-knowledge' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5a3 3 0 0 1 3-3h13v17H7a3 3 0 0 0-3 3z"/><path d="M4 5v16a3 3 0 0 1 3-3h13"/></svg><span>知识库</span></a>
+                <a href="/organization/drive" data-organization-link class="nav-item {% if active == 'organization-drive' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>文件库</span></a>
+                <a href="/organization/channels" data-organization-link class="nav-item {% if active == 'organization-channels' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 12h10M12 7v10"/><circle cx="12" cy="12" r="9"/></svg><span>消息渠道</span></a>
+                <a href="/organization/schedules" data-organization-link class="nav-item {% if active == 'organization-schedules' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M8 2v4M16 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01"/></svg><span>定时任务</span></a>
+                <a href="/organization/members" data-organization-link class="nav-item {% if active == 'organization-members' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M16 4a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5"/></svg><span>成员与设置</span></a>
+                <a href="/organization/analytics" data-organization-link class="nav-item {% if active == 'organization-analytics' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg><span>组织分析</span></a>
+                <a href="/organization/audit" data-organization-link class="nav-item {% if active == 'organization-audit' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 3h14v18H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>组织审计</span></a>
+                </div>
+
+                <div class="nav-section-label">帮助</div>
+                <a href="/docs" class="nav-item {% if active == 'docs' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.6 2.6 0 1 1 4.3 2c-1.8 1.3-1.8 2.1-1.8 3"/><path d="M12 17h.01"/></svg><span>帮助文档</span></a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="sidebar-user">
+                    <span id="current-user" class="current-user"></span>
+                    <div class="sidebar-user-actions">
+                        <button id="theme-toggle" class="theme-btn" type="button" title="切换主题" aria-label="切换主题">
+                            <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                            <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/></svg>
+                        </button>
+                        <button id="logout-btn" class="theme-btn" type="button" title="退出登录" aria-label="退出登录">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+        <main class="main-content">
+            {% if organization_page|default(false) %}
+            <section id="organization-context" class="organization-context" aria-label="组织上下文">
+                <label for="organization-page-switch">组织</label>
+                <select id="organization-page-switch" aria-label="选择当前页面的组织"></select>
+                <span id="organization-context-role" class="organization-pill"></span>
+            </section>
+            <div id="delegation-banner" class="delegation-banner" hidden>
+                平台代管模式：当前操作作用于 URL 指定的组织，并记录平台代管审计。
+            </div>
+            {% endif %}
+            <div id="organization-selection-required" class="status-card" hidden>
+                请选择要操作的组织。选择结果会写入当前页面 URL，不会改变其他页面的全局状态。
+            </div>
+            <div id="page-content-root">{% block content %}{% endblock %}</div>
+        </main>
+    </div>
+    <script src="/static/js/common.js?v=20260803b"></script>
+    <script src="/static/js/organization-module.js?v=20260814a"></script>
+    <script src="/static/js/catalog-api.js?v=20260806a"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

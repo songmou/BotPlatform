@@ -163,13 +163,16 @@ class PluginFrameworkTests(unittest.TestCase):
         self.assertEqual(logs[0][1:3], ("fake_read", "成功"))
         self.assertTrue(plugin.closed)
 
-    def test_browser_plugin_is_enabled_and_tools_are_automatic(self) -> None:
+    def test_browser_plugin_is_disabled_by_default_and_tools_are_prebound(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
         plugin_config = config.plugins["browser_automation"]
-        self.assertTrue(plugin_config.enabled)
+        self.assertFalse(plugin_config.enabled)
         plugin = BrowserAutomationPlugin(plugin_config.settings)
         try:
-            self.assertIn("browser_open", config.active_agent.tools)
+            self.assertIn(
+                "browser_open",
+                config.active_agent.plugin_tools["browser_automation"],
+            )
             self.assertFalse(plugin.tool_definitions["browser_interact"].requires_approval)
             self.assertEqual(plugin.config.session_ttl_seconds, 600)
             self.assertEqual(plugin.config.max_snapshot_chars, 12_000)

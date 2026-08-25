@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from src.core.services.agent import AgentService
+from src.core.services.ocr import OcrError
 from src.core.config.loader import load_project_config
 from src.core.modeling import (
     CanonicalMessage,
@@ -17,6 +20,7 @@ from src.core.modeling import (
     ModelRouter,
     ModelResponse,
 )
+from src.core.storage.tenants import ConversationStore, TenantRegistry
 
 
 class FakeOllama:
@@ -46,10 +50,9 @@ class AgentServiceTests(unittest.TestCase):
 
     def test_active_system_prompt_and_history_limit_are_used(self) -> None:
         self.service.chat("user", "第一问")
-        self.assertEqual(
-            self.ollama.calls[0].messages[0].content,
-            self.config.active_agent.system_prompt,
-        )
+        prompt = self.ollama.calls[0].messages[0].content
+        self.assertIn("# 工具使用规范", prompt)
+        self.assertIn(self.config.active_agent.system_prompt, prompt)
 
         for index in range(7):
             self.service.chat("user", "追加{}".format(index))
@@ -101,15 +104,115 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIn("图片分析助手", description)
         self.assertIn("图片文字识别", description)
 
+    def _service_with_ocr(self, plugin, model=None) -> AgentService:
+        manager = SimpleNamespace(
+            get=lambda pid: plugin if pid == "ocr" else None,
+            catalog={},
+        )
+        runtime = SimpleNamespace(
+            plugin_manager=manager,
+            is_tool_enabled=lambda name: True,
+        )
+        return AgentService(
+            model or self.ollama,
+            self.config.app,
+            self.config.agents,
+            tool_runtime=runtime,
+        )
+
+    def test_chat_image_includes_automatic_ocr_without_persisting_raw_text(self) -> None:
+        class Ocr:
+            auto_chat_images = True
+
+            def availability(self):
+                return True, ""
+
+            def recognize_chat_image(self, _data):
+                return SimpleNamespace(text="票据编号 OCR-123", truncated=False)
+
+        service = self._service_with_ocr(Ocr())
+        service.chat("user", "请读取图片", image_bytes=b"image", allow_tools=False)
+        request = self.ollama.calls[-1]
+        self.assertEqual(request.image, b"image")
+        self.assertIn("票据编号 OCR-123", request.messages[-1].content)
+        self.assertIn("不可信资料", request.messages[-1].content)
+        self.assertEqual(
+            service.histories["user"][0],
+            CanonicalMessage("user", "请读取图片"),
+        )
+        self.assertNotIn("OCR-123", repr(service.histories["user"]))
+
+    def test_automatic_ocr_allows_a_text_only_model_to_process_an_image(self) -> None:
+        class TextModel(FakeOllama):
+            capabilities = ModelCapabilities(tools=True, vision=False)
+
+        class Ocr:
+            auto_chat_images = True
+
+            def availability(self):
+                return True, ""
+
+            def recognize_chat_image(self, _data):
+                return SimpleNamespace(text="纯文本识别结果", truncated=False)
+
+        model = TextModel()
+        service = self._service_with_ocr(Ocr(), model=model)
+        service.chat("user", "识别图片", image_bytes=b"image", allow_tools=False)
+        self.assertIsNone(model.calls[-1].image)
+        self.assertIn("纯文本识别结果", model.calls[-1].messages[-1].content)
+
+    def test_ocr_failure_keeps_existing_vision_model_flow(self) -> None:
+        class BrokenOcr:
+            auto_chat_images = True
+
+            def availability(self):
+                return True, ""
+
+            def recognize_chat_image(self, _data):
+                raise OcrError("测试识别失败")
+
+        service = self._service_with_ocr(BrokenOcr())
+        service.chat("user", "描述图片", image_bytes=b"image", allow_tools=False)
+        self.assertEqual(self.ollama.calls[-1].image, b"image")
+        self.assertNotIn("测试识别失败", self.ollama.calls[-1].messages[-1].content)
+
     def test_scheduled_generation_does_not_change_chat_history(self) -> None:
         self.service.chat("user", "保留这条")
         before = list(self.service.histories["user"])
         self.service.generate("translator", "翻译 hello")
         self.assertEqual(self.service.histories["user"], before)
         scheduled_messages = self.ollama.calls[-1].messages
-        self.assertEqual(
-            scheduled_messages[0].content,
+        self.assertIn(
             self.config.agents["translator"].system_prompt,
+            scheduled_messages[0].content,
+        )
+
+    def test_proactive_message_is_visible_to_the_next_chat_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = TenantRegistry(Path(temporary) / "data")
+            tenant = registry.resolve("bot", "user")
+            conversations = ConversationStore(registry, max_messages=12)
+            conversations.record_outbound_message(
+                tenant.tenant_id,
+                "【待办提醒】提交周报",
+                delivery_key="notification:test",
+            )
+            service = AgentService(
+                self.ollama,
+                self.config.app,
+                self.config.agents,
+                conversation_store=conversations,
+            )
+
+            service.chat(tenant, "这个提醒是几点触发的？")
+
+        self.assertIn(
+            CanonicalMessage("assistant", "【待办提醒】提交周报"),
+            self.ollama.calls[-1].messages,
+        )
+        self.assertEqual(
+            self.ollama.calls[-1].messages[-1],
+            CanonicalMessage("user", "这个提醒是几点触发的？"),
         )
 
     def test_clear_and_help(self) -> None:
@@ -258,6 +361,7 @@ class AgentServiceTests(unittest.TestCase):
             },
             primary_profile_id="ollama_local",
             fallback_profile_id="deepseek_cloud",
+            pro_profile_id="deepseek_pro",
         )
         service = AgentService(router, self.config.app, self.config.agents)
 

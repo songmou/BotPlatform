@@ -20,6 +20,16 @@ class FakeScriptService:
 
     def __init__(self) -> None:
         self.calls = []
+        from types import SimpleNamespace
+
+        self.definitions = {
+            "protected_check": SimpleNamespace(
+                id="protected_check", name="受保护检查", description=""
+            ),
+            "todo_manager": SimpleNamespace(
+                id="todo_manager", name="待办管理", description=""
+            ),
+        }
 
     def list_scripts(self):
         return [
@@ -85,7 +95,8 @@ class ToolRuntimeTests(unittest.TestCase):
 
         listed = self.runtime.execute("list_directory", {"path": ".", "depth": 2})
         self.assertTrue(listed.ok)
-        paths = [item["path"] for item in listed.data["items"]]
+        # Normalize separators so the assertion also holds on Windows.
+        paths = [item["path"].replace(os.sep, "/") for item in listed.data["items"]]
         self.assertIn("notes.txt", paths)
         self.assertIn("folder/code.py", paths)
 
@@ -97,6 +108,49 @@ class ToolRuntimeTests(unittest.TestCase):
             "read_text_file", {"path": "notes.txt", "start_line": 2, "max_lines": 1}
         )
         self.assertEqual(read.data["content"], "hello world")
+
+    def test_search_text_python_fallback_when_ripgrep_missing(self) -> None:
+        (self.root / "notes.txt").write_text("hello world\n", encoding="utf-8")
+        with patch("src.core.tooling.runtime._find_ripgrep", return_value=None):
+            searched = self.runtime.execute("search_text", {"query": "hello"})
+        self.assertTrue(searched.ok)
+        self.assertEqual(len(searched.data["results"]), 1)
+
+    def test_search_text_ripgrep_matches_python_results(self) -> None:
+        import shutil
+
+        if shutil.which("rg") is None:
+            self.skipTest("ripgrep 未安装")
+        (self.root / "notes.txt").write_text("第一行\nhello world\n", encoding="utf-8")
+        (self.root / "folder").mkdir()
+        (self.root / "folder" / "code.py").write_text("print('hello')\n", encoding="utf-8")
+
+        with patch("src.core.tooling.runtime._find_ripgrep", return_value=None):
+            python_result = self.runtime.execute("search_text", {"query": "hello"})
+        rg_result = self.runtime.execute("search_text", {"query": "hello"})
+        self.assertTrue(rg_result.ok)
+
+        def normalize(data):
+            return sorted(
+                (Path(item["path"]).name, item["line"]) for item in data["results"]
+            )
+
+        self.assertEqual(normalize(rg_result.data), normalize(python_result.data))
+
+    def test_search_text_ripgrep_filters_denied_paths(self) -> None:
+        import shutil
+
+        if shutil.which("rg") is None:
+            self.skipTest("ripgrep 未安装")
+        (self.root / ".env").write_text("SECRET=hello\n", encoding="utf-8")
+        (self.root / ".git").mkdir()
+        (self.root / ".git" / "config").write_text("hello\n", encoding="utf-8")
+        (self.root / "safe.txt").write_text("hello\n", encoding="utf-8")
+
+        searched = self.runtime.execute("search_text", {"query": "hello"})
+        self.assertTrue(searched.ok)
+        names = [Path(item["path"]).name for item in searched.data["results"]]
+        self.assertEqual(names, ["safe.txt"])
 
     def test_audit_logger_receives_model_context_without_output_body(self) -> None:
         logs = []
@@ -110,6 +164,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsInstance(logs[0][4], int)
         self.assertNotIn(str(result.data), repr(logs[0]))
 
+    @unittest.skipUnless(os.name == "posix", "symlink creation needs privileges on Windows")
     def test_path_escape_symlink_and_sensitive_files_are_rejected(self) -> None:
         outside = Path(self.temp.name) / "outside.txt"
         outside.write_text("secret", encoding="utf-8")
@@ -131,6 +186,7 @@ class ToolRuntimeTests(unittest.TestCase):
             self.runtime.execute("read_text_file", {"path": "large.txt"}).ok
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_confirmed_file_changes_and_trash(self) -> None:
         write_args = {"path": "draft.txt", "content": "hello\n", "mode": "create"}
         preview = self.runtime.preview("write_text_file", write_args)
@@ -183,7 +239,11 @@ class ToolRuntimeTests(unittest.TestCase):
 
     def test_workspace_script_runs_without_shell_interpretation_and_truncates(self) -> None:
         script = self.root / "output.sh"
-        script.write_text("#!/bin/sh\nprintf 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789extra'\n", encoding="utf-8")
+        script.write_text(
+            "#!/bin/sh\nprintf '"
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789extra'\n",
+            encoding="utf-8",
+        )
         script.chmod(0o700)
         prepared = self.runtime.command_runner.prepare(
             {

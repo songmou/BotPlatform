@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from src.core.storage.database import Database
 
-from .base import PluginContext, PluginError, PluginToolDefinition
+from .base import PluginContext, PluginError, PluginJobDefinition, PluginToolDefinition
 
 
 SCHEMA_VERSION = 1
@@ -91,16 +91,6 @@ def normalize_todo_id(value: Optional[str]) -> str:
     if not TODO_ID.fullmatch(todo_id):
         raise TodoError("待办编号格式无效，应类似 T0001")
     return todo_id
-
-
-def new_store(now: datetime) -> Dict[str, Any]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "next_id": 1,
-        "updated_at": isoformat(now),
-        "items": [],
-        "archived_items": [],
-    }
 
 
 def validate_item(raw: object, archived: bool) -> Dict[str, Any]:
@@ -185,6 +175,7 @@ def validate_store(raw: object) -> Dict[str, Any]:
 
 
 class SqliteTodoStore:
+
     """Transactional tenant todo repository."""
 
     def __init__(
@@ -206,8 +197,8 @@ class SqliteTodoStore:
             "WHERE todo.tenant_id=? ORDER BY todo.todo_number",
             (self.tenant_id,),
         ).fetchall()
-        items = []
-        archived_items = []
+        items: List[Dict[str, Any]] = []
+        archived_items: List[Dict[str, Any]] = []
         for row in rows:
             archived = row["status"] == "archived"
             item = {
@@ -402,7 +393,7 @@ class SqliteTodoStore:
                 )
 
 
-def _require_absent(name: str, value: Optional[str]) -> None:
+def _require_absent(name: str, value: object) -> None:
     if value is not None:
         raise TodoError("当前操作不接受参数 {}".format(name))
 
@@ -616,7 +607,12 @@ def apply_action(
             "，提醒时间：{}".format(_format_local_time(parsed_reminder, timezone_name))
             if parsed_reminder else ""
         )
-        return OperationResult("success", "已新增待办：{} {}{}{}".format(generated_id, normalized_title, kind, suffix)), True
+        return OperationResult(
+            "success",
+            "已新增待办：{} {}{}{}".format(
+                generated_id, normalized_title, kind, suffix
+            ),
+        ), True
 
     if action == "archive":
         _require_absent("todo_id", todo_id)
@@ -700,7 +696,12 @@ def apply_action(
             if item["reminder_at"] is not None else "，已清除提醒"
         )
         kind = "，一次性任务" if item["is_one_off"] else ""
-        return OperationResult("success", "已更新待办：{} {}{}{}".format(normalized_id, item["title"], kind, suffix)), True
+        return OperationResult(
+            "success",
+            "已更新待办：{} {}{}{}".format(
+                normalized_id, item["title"], kind, suffix
+            ),
+        ), True
 
     _require_absent("title", title)
     if action == "complete":
@@ -788,11 +789,18 @@ class TodoPlugin:
                     },
                     "remind_at": {
                         "type": ["string", "null"],
-                        "description": "add/edit 的一次性提醒时间；使用带时区 ISO 时间，或“5分钟后”。edit 传 null 清除提醒。",
+                        "description": (
+                            "add/edit 的一次性提醒时间；使用带时区 ISO 时间，"
+                            "或“5分钟后”。edit 传 null 清除提醒。"
+                        ),
                     },
                     "is_one_off": {
                         "type": "boolean",
-                        "description": "是否为一次性任务。设置 remind_at 时默认 true；到期提醒成功送达后自动完成。仅当提醒后仍需继续跟进时显式设为 false。",
+                        "description": (
+                            "是否为一次性任务。设置 remind_at 时默认 true；"
+                            "到期提醒成功送达后自动完成。"
+                            "仅当提醒后仍需继续跟进时显式设为 false。"
+                        ),
                     },
                 },
                 ["action"],
@@ -817,6 +825,51 @@ class TodoPlugin:
             raise ValueError("todo 缺少插件运行上下文")
         self._database_path: Path = context.tenant_registry.database_path
         self._timezone_name = context.timezone
+        self._notification_service = context.notification_service
+
+    @property
+    def background_jobs(self) -> List[PluginJobDefinition]:
+        return [PluginJobDefinition("due_reminders", 30)]
+
+    def start(self) -> None:
+        self.recover_inflight_reminders()
+
+    def run_background_job(
+        self, job_id: str, now: Optional[datetime] = None
+    ) -> bool:
+        if job_id != "due_reminders":
+            raise PluginError("未知待办后台任务：{}".format(job_id))
+        if self._notification_service is None:
+            return False
+        any_success = False
+        for event in self.claim_due_reminders(now):
+            tenant_id = str(event["tenant_id"])
+            number = int(event["todo_number"])
+            try:
+                enqueue = getattr(
+                    self._notification_service, "enqueue_todo_reminder", None
+                )
+                if callable(enqueue):
+                    enqueue(
+                        tenant_id,
+                        number,
+                        str(event["due_at"]),
+                        str(event["title"]),
+                    )
+                else:
+                    self._notification_service.enqueue_text_to_tenant(
+                        tenant_id,
+                        "【待办提醒】T{:04d} {}".format(number, event["title"]),
+                        source_type="todo",
+                        source_key="{}:{}".format(number, event["due_at"]),
+                        source_ref=str(number),
+                    )
+                any_success = True
+            except Exception as exc:
+                self.finish_reminder(
+                    tenant_id, number, False, str(exc), now=now
+                )
+        return any_success
 
     @property
     def tool_definitions(self) -> Mapping[str, PluginToolDefinition]:
@@ -828,7 +881,11 @@ class TodoPlugin:
     def execute(self, tool_name: str, arguments: Dict[str, Any], tenant: Any) -> Any:
         if tool_name != "todo_manage":
             raise PluginError("未知待办工具：{}".format(tool_name))
-        tenant_id = str(getattr(tenant, "tenant_id", "") or "")
+        tenant_id = str(
+            getattr(tenant, "personal_tenant_id", None)
+            or getattr(tenant, "tenant_id", "")
+            or ""
+        )
         if not tenant_id:
             raise PluginError("待办工具需要租户身份")
         action = arguments.get("action")

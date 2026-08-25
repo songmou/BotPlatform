@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.core.plugins.base import PluginContext, PluginError
-from src.core.plugins.todo import TodoPlugin, TodoError, OperationResult
+from src.core.plugins.todo import TodoPlugin, OperationResult
 from src.core.storage.tenants import TenantRegistry
 
 

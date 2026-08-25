@@ -2,65 +2,481 @@
 
 from __future__ import annotations
 
+import signal
 import sys
-from typing import Optional
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 from src.core.application.bot import (
     MessageBot,
     delete_credentials,
     display_qr_code,
-    load_credentials,
     print_login_status,
     save_credentials,
 )
-from src.core.config.loader import ConfigError, load_project_config
+from src.core.application.services import CoreServices, build_core_services
+from src.core.config.loader import (
+    ChannelConfig,
+    ConfigError,
+    ProjectConfig,
+    load_project_config,
+)
 from src.core.infrastructure.logging import (
     log_model_call,
     log_model_fallback,
     log_tool_call,
 )
-from src.core.integrations.embeddings import EmbeddingClient
-from src.core.integrations.ilink import ILinkClient, ILinkError, SessionExpired
+from src.core.integrations.ilink import ILinkClient, ILinkError
 from src.core.messaging import (
-    AuthenticationExpired,
     ChannelAddressStore,
+    ChannelCredentialError,
+    ChannelCredentialStore,
     ChannelManager,
+    ChannelStatusRegistry,
     MessageInboxStore,
     MessageRouter,
+    build_channel_adapter,
 )
-from src.core.messaging.adapters import WeChatILinkAdapter
-from src.core.modeling import ModelError, ModelRouter
-from src.core.modeling.factory import create_model_client
+from src.core.modeling import ModelError
 from src.core.paths import (
     CONFIG_DIR,
     DATA_DIR,
     PROJECT_ROOT,
+    SYSTEM_DATA_DIR,
     channel_credentials_path,
 )
-from src.core.plugins import PluginContext, build_plugins
+from src.core.plugins import PluginContext, PluginManager, build_plugin_manager
 from src.core.services.agent import AgentService
-from src.core.services.knowledge import KnowledgeService
 from src.core.services.integration import IntegrationService
 from src.core.services.memory import MemoryService, ModelMemoryExtractor
 from src.core.services.notification import (
     NotificationDispatcher,
     NotificationService,
-    TenantRecipientStore,
 )
 from src.core.services.scheduler import SchedulerService
 from src.core.services.script import ScriptService
+from src.core.services.script_registry import ExternalScriptRegistry
+from src.core.services.env_resolver import EnvResolver
+from src.core.services.organization_schedule_tool import (
+    OrganizationScheduleToolService,
+)
 from src.core.storage.tenants import (
-    ConversationStore,
-    ScheduleStore,
     SettingsStore,
     IntegrationStore,
-    TenantRegistry,
     TenantStoreError,
 )
+from src.core.storage.drive_audit import DriveAuditStore
 from src.core.tooling import ToolRuntime
 
 
+def _install_sigterm_handler() -> None:
+    """Translate SIGTERM into KeyboardInterrupt so cleanup chains run.
+
+    Service managers (systemd, launchd, docker) stop processes with SIGTERM;
+    without this handler the process dies immediately and skips the
+    scheduler/script/tool shutdown performed in the run loop's ``finally``.
+    Signal handlers can only be installed from the main thread.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _raise_interrupt(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+
+
+@dataclass
+class BotRuntime:
+    """Stable service graph shared by the channel loop and the web panel.
+
+    Every service here survives channel re-logins; only ILink clients,
+    adapters, ``MessageBot`` and ``ChannelManager`` are rebuilt per loop
+    iteration in :func:`run_channel_loop`.
+    """
+
+    project_config: ProjectConfig
+    services: CoreServices
+    settings_store: SettingsStore
+    integration_store: IntegrationStore
+    integration_service: IntegrationService
+    memory_service: MemoryService
+    address_store: ChannelAddressStore
+    message_router: MessageRouter
+    notification_service: NotificationService
+    notification_dispatcher: NotificationDispatcher
+    external_script_registry: ExternalScriptRegistry
+    script_service: ScriptService
+    plugin_context: PluginContext
+    plugin_manager: PluginManager
+    mcp_manager: Optional[Any]
+    tool_runtime: Optional[ToolRuntime]
+    agent_service: AgentService
+    scheduler: SchedulerService
+    channel_statuses: ChannelStatusRegistry
+    _started: bool = field(default=False, repr=False)
+    _closed: bool = field(default=False, repr=False)
+
+    def start(self) -> None:
+        """Start background workers (outbox dispatcher and scheduler) once."""
+        if self._started:
+            return
+        self._started = True
+        self.plugin_manager.start()
+        self.notification_dispatcher.start()
+        self.scheduler.start()
+        print(
+            "定时任务已启动：启用 {} / 共 {} 项，时区 {}。".format(
+                self.scheduler.enabled_count,
+                len(self.project_config.schedules),
+                self.project_config.app.timezone,
+            )
+        )
+
+    def shutdown(self) -> None:
+        """Stop every owned service exactly once, in reverse start order."""
+        if self._closed:
+            return
+        self._closed = True
+        self.scheduler.shutdown()
+        self.script_service.shutdown()
+        if self.tool_runtime:
+            self.tool_runtime.close()
+        self.notification_dispatcher.shutdown()
+        self.memory_service.close()
+
+
+def build_bot_runtime(
+    project_config: ProjectConfig,
+    services: CoreServices,
+    *,
+    tool_audit_store: Optional[Any] = None,
+    tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
+    drive_audit_store: Optional[Any] = None,
+) -> BotRuntime:
+    """Assemble the stable service graph on top of ``CoreServices``.
+
+    ``tool_audit_store``/``tool_states`` are only supplied by the web panel
+    entry point; the plain bot entry point leaves them unset. Raises
+    ``ModelError``/``ValueError`` on model client failures; the caller owns
+    ``services`` and must close it when this raises.
+    """
+    tenant_registry = services.tenant_registry
+    if drive_audit_store is None:
+        drive_audit_store = DriveAuditStore(tenant_registry)
+    settings_store = SettingsStore(tenant_registry)
+    integration_store = IntegrationStore(tenant_registry)
+    integration_service = IntegrationService(integration_store)
+    memory_service = MemoryService(
+        tenant_registry,
+        ModelMemoryExtractor(services.model_router),
+    )
+    try:
+        address_store = ChannelAddressStore(tenant_registry)
+        # The router is long-lived and initially empty; the channel loop
+        # swaps adapters in via ``MessageRouter.reset`` after each login.
+        message_router = MessageRouter()
+        notification_service = NotificationService(
+            credentials_loader=None,
+            recipient_store=services.recipient_store,
+            message_router=message_router,
+            address_store=address_store,
+            conversation_store=services.conversation_store,
+        )
+        notification_dispatcher = NotificationDispatcher(notification_service)
+        external_script_registry = ExternalScriptRegistry(
+            SYSTEM_DATA_DIR / "script_registry.json",
+            SYSTEM_DATA_DIR / "scripts.env",
+        )
+        # Organization values override the platform-managed global env; the
+        # global layer is supplied by the external registry's 0600-checked file.
+        env_resolver = EnvResolver(settings_store, external_script_registry.global_values)
+        script_service = ScriptService(
+            project_config.scripts,
+            None,
+            services.recipient_store,
+            PROJECT_ROOT,
+            tenant_registry,
+            integration_store,
+            notification_service=notification_service,
+            keychain_service=integration_service.keychain,
+            external_registry=external_script_registry,
+            env_resolver=env_resolver,
+            address_store=address_store,
+        )
+        # Chat tools and the scheduler share the organization-scoped schedule
+        # store used by the Web panel.
+        organization_schedule_service = OrganizationScheduleToolService(
+            services.organization_control_store,
+            services.organization_store,
+            project_config,
+        )
+        plugin_context = PluginContext(
+            project_root=PROJECT_ROOT,
+            tenant_registry=tenant_registry,
+            notification_service=notification_service,
+            timezone=project_config.app.timezone,
+            data_root=DATA_DIR / "plugins",
+            env_resolver=env_resolver,
+        )
+        plugin_manager = build_plugin_manager(
+            project_config.plugins if project_config.tools.enabled else {},
+            context=plugin_context,
+        )
+        mcp_manager = None
+        if project_config.tools.enabled and project_config.mcp_servers:
+            from src.core.tooling.mcp_client import McpClientManager
+
+            mcp_manager = McpClientManager()
+            mcp_manager.start()
+            mcp_manager.reload(project_config.mcp_servers)
+
+        datasource_service = None
+        if project_config.datasources:
+            from src.core.datasource import DataSourceService
+
+            datasource_service = DataSourceService()
+            datasource_service.reload(project_config.datasources)
+
+        tool_runtime = (
+            ToolRuntime(
+                project_config.tools,
+                project_config.app.timezone,
+                audit_logger=log_tool_call,
+                script_service=script_service,
+                tenant_registry=tenant_registry,
+                knowledge_service=services.knowledge_service,
+                plugin_manager=plugin_manager,
+                mcp_manager=mcp_manager,
+                tool_audit_store=tool_audit_store,
+                tool_states=tool_states,
+                organization_schedule_service=organization_schedule_service,
+                drive_service=services.drive_service,
+                drive_audit_store=drive_audit_store,
+                resource_store=services.resource_store,
+                datasource_service=datasource_service,
+            )
+            if project_config.tools.enabled
+            else None
+        )
+        if (
+            tool_runtime
+            and "run_command" in project_config.active_agent.tools
+            and not tool_runtime.command_runner.available
+        ):
+            print(
+                "警告：macOS 命令沙箱不可用，run_command 已禁用；文件和系统工具仍可使用。",
+                file=sys.stderr,
+            )
+        agent_service = AgentService(
+            services.model_router,
+            project_config.app,
+            project_config.agents,
+            tool_runtime=tool_runtime,
+            conversation_store=services.conversation_store,
+            settings_store=settings_store,
+            knowledge_service=services.knowledge_service,
+            memory_service=memory_service,
+            model_analytics_store=services.model_analytics_store,
+            skills=project_config.skills,
+            resource_store=services.resource_store,
+        )
+        scheduler = SchedulerService(
+            credentials=None,
+            tasks=project_config.schedules,
+            timezone_name=project_config.app.timezone,
+            agent_service=agent_service,
+            recipient_store=services.recipient_store,
+            script_service=script_service,
+            tenant_registry=tenant_registry,
+            schedule_store=services.schedule_store,
+            plugin_manager=plugin_manager,
+            memory_service=memory_service,
+            notification_service=notification_service,
+            organization_control_store=services.organization_control_store,
+        )
+    except Exception:
+        memory_service.close()
+        raise
+
+    return BotRuntime(
+        project_config=project_config,
+        services=services,
+        settings_store=settings_store,
+        integration_store=integration_store,
+        integration_service=integration_service,
+        memory_service=memory_service,
+        address_store=address_store,
+        message_router=message_router,
+        notification_service=notification_service,
+        notification_dispatcher=notification_dispatcher,
+        external_script_registry=external_script_registry,
+        script_service=script_service,
+        plugin_context=plugin_context,
+        plugin_manager=plugin_manager,
+        mcp_manager=mcp_manager,
+        tool_runtime=tool_runtime,
+        agent_service=agent_service,
+        scheduler=scheduler,
+        channel_statuses=ChannelStatusRegistry(),
+    )
+
+
+def run_channel_loop(runtime: BotRuntime, project_config: ProjectConfig) -> int:
+    """Build channel adapters and rebuild them when organization config changes."""
+    tenant_registry = runtime.services.tenant_registry
+    channel_manager: Optional[ChannelManager] = None
+    credential_store = ChannelCredentialStore()
+    applied_revisions: Dict[str, Dict[str, Any]] = {}
+
+    def configured_channels():
+        controls = runtime.services.organization_control_store
+        credentials_service = runtime.services.credential_service
+        if controls is None or credentials_service is None:
+            return list(project_config.channels.values()), {}, False
+        rows = []
+        for organization in runtime.services.organization_store.list_organizations():
+            rows.extend(controls.list_channels(str(organization["organization_id"])))
+        if not rows:
+            return list(project_config.channels.values()), {}, False
+        configs = []
+        secrets = {}
+        for row in rows:
+            config = ChannelConfig(
+                id=row["channel_instance_id"],
+                type=row["type"],
+                enabled=row["enabled"],
+                agent_id=row["agent_id"],
+                settings=dict(row["settings"]),
+            )
+            configs.append(config)
+            if row["credential_configured"]:
+                try:
+                    import json
+
+                    secrets[config.id] = json.loads(
+                        credentials_service.secret_for_resource(
+                            row["organization_id"], "channels", config.id
+                        )
+                    )
+                except Exception:
+                    secrets[config.id] = None
+        return configs, secrets, True
+
+    try:
+        while True:
+            adapters = []
+            channel_configs, organization_secrets, organization_mode = configured_channels()
+            config_map = {item.id: item for item in channel_configs}
+            for channel_config in channel_configs:
+                if not channel_config.enabled:
+                    runtime.channel_statuses.set(
+                        channel_config.id, channel_config.type, "disabled"
+                    )
+                    continue
+                try:
+                    credentials = (
+                        organization_secrets.get(channel_config.id)
+                        if organization_mode
+                        else credential_store.load(
+                            channel_config.id, channel_config.type
+                        )
+                    )
+                    if (
+                        credentials is None
+                        and not organization_mode
+                        and channel_config.type == "wechat_ilink"
+                    ):
+                        credential_path = channel_credentials_path(channel_config.id)
+                        print("正在登录消息渠道 {}。".format(channel_config.id))
+                        with ILinkClient() as ilink:
+                            ilink_credentials = ilink.login(
+                                display_qr_code, status_changed=print_login_status
+                            )
+                        save_credentials(ilink_credentials, credential_path)
+                        credentials = credential_store.load(
+                            channel_config.id, channel_config.type, required=True
+                        )
+                    if credentials is None:
+                        raise ChannelCredentialError(
+                            "渠道 {} 尚未配置凭据".format(channel_config.id)
+                        )
+                    adapter = build_channel_adapter(
+                        channel_config,
+                        credentials,
+                        token_resolver=runtime.address_store.latest_context_token,
+                    )
+                except Exception as exc:
+                    runtime.channel_statuses.set(
+                        channel_config.id,
+                        channel_config.type,
+                        "authentication_required"
+                        if isinstance(exc, ChannelCredentialError)
+                        else "failed",
+                        str(exc),
+                    )
+                    print(str(exc), file=sys.stderr)
+                    continue
+                adapters.append(adapter)
+                runtime.channel_statuses.set(
+                    channel_config.id, channel_config.type, "starting"
+                )
+
+            runtime.message_router.reset(adapters)
+            message_bot = MessageBot(
+                runtime.agent_service,
+                runtime.message_router,
+                tenant_registry=tenant_registry,
+                recipient_store=runtime.services.recipient_store,
+                conversation_store=runtime.services.conversation_store,
+                schedule_store=runtime.services.schedule_store,
+                schedule_ids=[
+                    task.id for task in project_config.schedules if task.enabled
+                ],
+                script_service=runtime.script_service,
+                knowledge_service=runtime.services.knowledge_service,
+                memory_service=runtime.memory_service,
+                integration_service=runtime.integration_service,
+                notification_dispatcher=runtime.notification_dispatcher,
+                address_store=runtime.address_store,
+                channel_configs=config_map,
+            )
+            channel_manager = ChannelManager(
+                adapters,
+                MessageInboxStore(tenant_registry),
+                message_bot.handle_inbound,
+                status_registry=runtime.channel_statuses,
+            )
+            channel_manager.start()
+            active = "、".join(adapter.channel_id for adapter in adapters) or "无"
+            print("消息服务已启动：渠道={}，正在等待消息。".format(active))
+            controls = runtime.services.organization_control_store
+            applied_revisions = controls.runtime_revisions() if controls else {}
+            while True:
+                threading.Event().wait(1.0)
+                revisions = controls.runtime_revisions() if controls else {}
+                if revisions != applied_revisions:
+                    print("检测到组织渠道配置变化，正在应用。")
+                    channel_manager.shutdown()
+                    channel_manager = None
+                    break
+    except KeyboardInterrupt:
+        print("\n机器人已停止。")
+        return 0
+    except (ILinkError, ModelError, OSError, TenantStoreError) as exc:
+        print("启动失败：{}".format(exc), file=sys.stderr)
+        return 1
+    finally:
+        if channel_manager is not None:
+            channel_manager.shutdown()
+        else:
+            runtime.message_router.close()
+    return 0
+
+
 def run_bot(args, project_config=None) -> int:
+    _install_sigterm_handler()
     if project_config is None:
         try:
             project_config = load_project_config(CONFIG_DIR)
@@ -68,58 +484,31 @@ def run_bot(args, project_config=None) -> int:
             print("配置加载失败：{}".format(exc), file=sys.stderr)
             return 1
 
-    try:
-        tenant_registry = TenantRegistry(DATA_DIR)
-    except TenantStoreError as exc:
-        print("租户数据加载失败：{}".format(exc), file=sys.stderr)
-        return 1
-    recipient_store = TenantRecipientStore(tenant_registry)
-    address_store = ChannelAddressStore(tenant_registry)
-    conversation_store = ConversationStore(
-        tenant_registry, project_config.app.history_rounds * 2
-    )
-    settings_store = SettingsStore(tenant_registry)
-    schedule_store = ScheduleStore(tenant_registry)
-    integration_store = IntegrationStore(tenant_registry)
-    integration_service = IntegrationService(integration_store)
-    embedding_client = (
-        EmbeddingClient(project_config.embedding)
-        if project_config.embedding.enabled
-        else None
-    )
-    knowledge_service = KnowledgeService(tenant_registry, embedding_client)
     if args.logout:
         delete_credentials()
         print("已清除微信登录凭证。")
 
-    clients = {}
     try:
-        for profile_id, profile in project_config.models.items():
-            if not profile.enabled:
-                continue
-            clients[profile_id] = create_model_client(profile, logger=log_model_call)
-        model = ModelRouter(
-            clients,
-            primary_profile_id=project_config.app.active_model,
-            fallback_profile_id=project_config.app.fallback_model,
-            local_profile_id=project_config.app.local_model,
-            flash_profile_id=project_config.app.flash_model,
-            pro_profile_id=project_config.app.pro_model,
-            vision_profile_id=project_config.app.vision_model,
-            cooldown_seconds=project_config.app.fallback_cooldown_seconds,
+        services = build_core_services(
+            project_config,
+            DATA_DIR,
+            model_call_logger=log_model_call,
             fallback_logger=log_model_fallback,
         )
-        memory_service = MemoryService(
-            tenant_registry,
-            ModelMemoryExtractor(model),
-        )
+    except TenantStoreError as exc:
+        print("租户数据加载失败：{}".format(exc), file=sys.stderr)
+        return 1
     except (ModelError, ValueError) as exc:
-        for client in clients.values():
-            client.close()
-        if embedding_client:
-            embedding_client.close()
         print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
         return 1
+    try:
+        project_config = services.project_config
+        runtime = build_bot_runtime(project_config, services)
+    except (ModelError, ValueError) as exc:
+        services.close()
+        print("模型客户端创建失败：{}".format(exc), file=sys.stderr)
+        return 1
+    model = services.model_router
     try:
         identity = model.identity
         print(
@@ -144,197 +533,8 @@ def run_bot(args, project_config=None) -> int:
                 project_config.active_agent.name, project_config.active_agent.id
             )
         )
-        while True:
-            adapters = []
-            ilink_clients = []
-            scheduler: Optional[SchedulerService] = None
-            script_service: Optional[ScriptService] = None
-            tool_runtime: Optional[ToolRuntime] = None
-            notification_dispatcher: Optional[NotificationDispatcher] = None
-            channel_manager: Optional[ChannelManager] = None
-            try:
-                for channel_config in project_config.channels.values():
-                    if not channel_config.enabled:
-                        continue
-                    credential_path = channel_credentials_path(channel_config.id)
-                    try:
-                        credentials = load_credentials(credential_path)
-                    except ILinkError as exc:
-                        print(str(exc), file=sys.stderr)
-                        print(
-                            "将清除渠道 {} 的无效凭证并重新登录。".format(
-                                channel_config.id
-                            )
-                        )
-                        delete_credentials(credential_path)
-                        credentials = None
-                    ilink = ILinkClient(credentials=credentials)
-                    ilink_clients.append(ilink)
-                    if credentials is None:
-                        print("正在登录消息渠道 {}。".format(channel_config.id))
-                        credentials = ilink.login(
-                            display_qr_code,
-                            status_changed=print_login_status,
-                        )
-                        save_credentials(credentials, credential_path)
-                        print(
-                            "渠道 {} 的凭证已保存到 {}。".format(
-                                channel_config.id,
-                                credential_path,
-                            )
-                        )
-                    else:
-                        print(
-                            "已加载渠道 {} 的凭证，bot_id={}。".format(
-                                channel_config.id,
-                                credentials.bot_id,
-                            )
-                        )
-                    adapters.append(
-                        WeChatILinkAdapter(
-                            ilink,
-                            channel_id=channel_config.id,
-                        )
-                    )
-
-                message_router = MessageRouter(adapters)
-                notification_service = NotificationService(
-                    credentials_loader=None,
-                    recipient_store=recipient_store,
-                    message_router=message_router,
-                    address_store=address_store,
-                )
-                notification_dispatcher = NotificationDispatcher(notification_service)
-                notification_dispatcher.start()
-                script_service = ScriptService(
-                    project_config.scripts,
-                    None,
-                    recipient_store,
-                    PROJECT_ROOT,
-                    tenant_registry,
-                    integration_store,
-                    notification_service=notification_service,
-                    keychain_service=integration_service.keychain,
-                )
-                platform_plugins = build_plugins(
-                    project_config.plugins,
-                    context=PluginContext(
-                        project_root=PROJECT_ROOT,
-                        tenant_registry=tenant_registry,
-                        notification_service=notification_service,
-                        timezone=project_config.app.timezone,
-                    ),
-                ) if project_config.tools.enabled else []
-                codex_tasks_plugin = next(
-                    (plugin for plugin in platform_plugins if plugin.id == "codex_tasks"),
-                    None,
-                )
-                tool_runtime = (
-                    ToolRuntime(
-                        project_config.tools,
-                        project_config.app.timezone,
-                        audit_logger=log_tool_call,
-                        script_service=script_service,
-                        tenant_registry=tenant_registry,
-                        knowledge_service=knowledge_service,
-                        plugins=platform_plugins,
-                    )
-                    if project_config.tools.enabled
-                    else None
-                )
-                if (
-                    tool_runtime
-                    and "run_command" in project_config.active_agent.tools
-                    and not tool_runtime.command_runner.available
-                ):
-                    print(
-                        "警告：macOS 命令沙箱不可用，run_command 已禁用；文件和系统工具仍可使用。",
-                        file=sys.stderr,
-                    )
-                agent_service = AgentService(
-                    model,
-                    project_config.app,
-                    project_config.agents,
-                    tool_runtime=tool_runtime,
-                    conversation_store=conversation_store,
-                    settings_store=settings_store,
-                    knowledge_service=knowledge_service,
-                    memory_service=memory_service,
-                )
-                scheduler = SchedulerService(
-                    credentials=None,
-                    tasks=project_config.schedules,
-                    timezone_name=project_config.app.timezone,
-                    agent_service=agent_service,
-                    recipient_store=recipient_store,
-                    script_service=script_service,
-                    tenant_registry=tenant_registry,
-                    schedule_store=schedule_store,
-                    plugins=platform_plugins,
-                    memory_service=memory_service,
-                    notification_service=notification_service,
-                )
-                scheduler.start()
-                print(
-                    "定时任务已启动：启用 {} / 共 {} 项，时区 {}。".format(
-                        scheduler.enabled_count,
-                        len(project_config.schedules),
-                        project_config.app.timezone,
-                    )
-                )
-                message_bot = MessageBot(
-                    None,
-                    agent_service,
-                    tenant_registry=tenant_registry,
-                    recipient_store=recipient_store,
-                    conversation_store=conversation_store,
-                    schedule_store=schedule_store,
-                    schedule_ids=[
-                        task.id for task in project_config.schedules if task.enabled
-                    ],
-                    script_service=script_service,
-                    knowledge_service=knowledge_service,
-                    memory_service=memory_service,
-                    codex_tasks_plugin=codex_tasks_plugin,
-                    integration_service=integration_service,
-                    notification_dispatcher=notification_dispatcher,
-                    message_router=message_router,
-                    address_store=address_store,
-                )
-                channel_manager = ChannelManager(
-                    adapters,
-                    MessageInboxStore(tenant_registry),
-                    message_bot.handle_inbound,
-                )
-                print(
-                    "消息服务已启动：渠道={}，正在等待私聊消息。按 Ctrl+C 退出。".format(
-                        "、".join(adapter.channel_id for adapter in adapters)
-                    )
-                )
-                channel_manager.run()
-            except (SessionExpired, AuthenticationExpired):
-                print("消息渠道登录已失效，将重新登录。", file=sys.stderr)
-                if channel_manager is not None:
-                    for status in channel_manager.statuses():
-                        if status.state == "authentication_required":
-                            delete_credentials(
-                                channel_credentials_path(status.channel_id)
-                            )
-                continue
-            finally:
-                if channel_manager:
-                    channel_manager.shutdown()
-                if scheduler:
-                    scheduler.shutdown()
-                if script_service:
-                    script_service.shutdown()
-                if tool_runtime:
-                    tool_runtime.close()
-                if notification_dispatcher:
-                    notification_dispatcher.shutdown()
-                if channel_manager is None:
-                    for client in ilink_clients:
-                        client.close()
+        runtime.start()
+        return run_channel_loop(runtime, project_config)
     except KeyboardInterrupt:
         print("\n机器人已停止。")
         return 0
@@ -342,7 +542,5 @@ def run_bot(args, project_config=None) -> int:
         print("启动失败：{}".format(exc), file=sys.stderr)
         return 1
     finally:
-        model.close()
-        memory_service.close()
-        if embedding_client:
-            embedding_client.close()
+        runtime.shutdown()
+        services.close()

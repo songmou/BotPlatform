@@ -45,9 +45,13 @@ class ToolResult:
 @dataclass(frozen=True)
 class ToolAuditContext:
     user_id: str = ""
+    member_user_id: Optional[int] = None
+    organization_id: str = ""
     provider: str = "-"
     profile_id: str = "-"
     model: str = "-"
+    session_id: str = ""
+    agent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,3 +82,8 @@ class PendingApproval:
     thinking_parts: List[str] = field(default_factory=list)
     model_mode: str = "auto"
     model_profile_id: Optional[str] = None
+    session_key: str = "direct"
+    #: Datasource ids the paused agent was allowed to touch.  Needed so the
+    #: db_* grant can be restored when the approval is resolved on another
+    #: request (and possibly another thread).
+    datasource_ids: List[str] = field(default_factory=list)

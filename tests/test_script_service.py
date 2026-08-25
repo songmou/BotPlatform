@@ -161,6 +161,7 @@ class ScriptServiceTests(unittest.TestCase):
         self.assertIn("固定脚本结果", self.notifications.texts[0][1])
         self.assertEqual(self.notifications.images[0][0], self.tenant.tenant_id)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group SIGTERM cancellation semantics")
     def test_duplicate_is_skipped_without_queueing(self) -> None:
         service = self.service()
         first = service.submit(self.tenant, "fake", {"mode": "slow"}, trigger="schedule")
@@ -170,6 +171,7 @@ class ScriptServiceTests(unittest.TestCase):
         service.shutdown()
         self.assertEqual(service.get_run(self.tenant, first["run_id"])["status"], "cancelled")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX signal exit codes (-SIGTERM) on timeout")
     def test_timeout_and_parameter_validation(self) -> None:
         service = self.service(timeout=1)
         with self.assertRaisesRegex(ValueError, "仅允许"):
@@ -273,12 +275,12 @@ class ScriptServiceTests(unittest.TestCase):
         )
         with patch.dict(
             os.environ,
-            {"DEEPSEEK_API_KEY": "cloud-key", "MODEL_PROFILE": "deepseek_cloud"},
+            {"DASHSCOPE_API_KEY": "cloud-key", "MODEL_PROFILE": "qwen_cloud"},
             clear=False,
         ):
             environment = service._environment(run, self.root / "result.json")
-        self.assertEqual(environment["AUTOGEN_MODEL_PROFILE"], "deepseek_cloud")
-        self.assertEqual(environment["DEEPSEEK_API_KEY"], "cloud-key")
+        self.assertEqual(environment["AUTOGEN_MODEL_PROFILE"], "qwen_cloud")
+        self.assertEqual(environment["DASHSCOPE_API_KEY"], "cloud-key")
         self.assertIn("ILINKBOT_PROJECT_CONFIG", environment)
 
     def test_integration_script_is_rejected_before_queue_when_credentials_are_missing(self) -> None:
@@ -302,6 +304,28 @@ class ScriptServiceTests(unittest.TestCase):
         self.addCleanup(service.shutdown)
         with self.assertRaisesRegex(ValueError, "/integration setup ctsehr"):
             service.submit(self.tenant, "ctsehr_check", {}, trigger="schedule")
+
+    def test_ctsoa_script_requires_its_own_integration(self) -> None:
+        definition = ScriptDefinition(
+            id="ctsoa_check",
+            name="CTS OA",
+            description="test",
+            entrypoint=str(self.entrypoint),
+            timeout_seconds=5,
+            requires_approval=False,
+        )
+        service = ScriptService(
+            {"ctsoa_check": definition},
+            Credentials("token", "https://gateway", "bot", "owner"),
+            self.store,
+            self.root,
+            self.registry,
+            notification_service=self.notifications,
+            keychain_service=KeychainService(storage_path=self.root / "credentials.json"),
+        )
+        self.addCleanup(service.shutdown)
+        with self.assertRaisesRegex(ValueError, "/integration setup ctsoa"):
+            service.submit(self.tenant, "ctsoa_check", {}, trigger="manual")
 
 
 if __name__ == "__main__":

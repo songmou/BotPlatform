@@ -1,0 +1,64 @@
+.schedule-tabs {
+    margin: -4px 0 18px;
+}
+
+.schedule-pane[hidden] {
+    display: none;
+}
+
+.schedule-pane-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+}
+
+.schedule-pane-header h3 {
+    margin-bottom: 4px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.schedule-pane-actions {
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.tenant-picker {
+    display: grid;
+    gap: 5px;
+    min-width: min(320px, 100%);
+}
+
+.tenant-picker > span {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.schedule-pane-actions .tenant-select {
+    width: 320px;
+    max-width: 100%;
+}
+
+@media (max-width: 720px) {
+    .schedule-pane-header,
+    .schedule-pane-actions {
+        align-items: stretch;
+        width: 100%;
+    }
+
+    .schedule-pane-actions {
+        flex-direction: column;
+    }
+
+    .tenant-picker,
+    .schedule-pane-actions .tenant-select,
+    .schedule-pane-actions .btn-primary {
+        width: 100%;
+    }
+}

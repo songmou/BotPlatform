@@ -6,12 +6,14 @@ import difflib
 import copy
 import fnmatch
 import json
+import logging
 import os
 import platform
 import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -21,235 +23,69 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
 from src.core.config.loader import ToolConfig
-from src.core.plugins.base import PlatformPlugin, PluginError, PluginToolDefinition
+from src.core.paths import PROJECT_ROOT
+from src.core.plugins.base import PlatformPlugin, PluginError
 from .commands import CommandRunner
+from .git_manager import GitManager
+from .git_runner import (
+    FETCH_ONLY_COMMANDS,
+    GitRunner,
+    is_write_operation,
+    requires_manual_approval,
+)
+# APPROVAL_TOOLS/TOOL_DEFINITIONS are re-exported here for backward
+# compatibility: existing callers import them from ``runtime``.
+from .definitions import (  # noqa: F401
+    APPROVAL_TOOLS,
+    DATASOURCE_READONLY_TOOLS,
+    DATASOURCE_TOOLS,
+    TOOL_DEFINITIONS,
+    _object_schema,
+)
 from .models import ToolAuditContext, ToolError, ToolResult
 from src.core.storage.tenants import TenantContext, TenantRegistry
 
+logger = logging.getLogger(__name__)
+
+_RIPGREP_PATH: Optional[str] = None
+_RIPGREP_PROBE_DONE = False
+
+
+def _find_ripgrep() -> Optional[str]:
+    """Locate the ripgrep binary once per process; None when unavailable."""
+    global _RIPGREP_PATH, _RIPGREP_PROBE_DONE
+    if not _RIPGREP_PROBE_DONE:
+        _RIPGREP_PATH = shutil.which("rg")
+        _RIPGREP_PROBE_DONE = True
+    return _RIPGREP_PATH
+
+
+def _ripgrep_json_text(value: Any) -> str:
+    """Extract text from an rg --json field (text or base64 bytes)."""
+    if not isinstance(value, dict):
+        return ""
+    if isinstance(value.get("text"), str):
+        return value["text"]
+    if isinstance(value.get("bytes"), str):
+        import base64
+
+        try:
+            return base64.b64decode(value["bytes"]).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            return ""
+    return ""
+
+
 if TYPE_CHECKING:
     from src.core.services.script import ScriptService
+    from src.core.services.organization_schedule_tool import (
+        OrganizationScheduleToolService,
+    )
     from src.core.services.knowledge import KnowledgeService
-
-
-APPROVAL_TOOLS = {
-    "create_directory",
-    "write_text_file",
-    "replace_text",
-    "copy_path",
-    "move_path",
-    "move_to_trash",
-    "run_command",
-    "run_script",
-    "knowledge_add_text",
-    "knowledge_index_file",
-    "knowledge_delete",
-}
-
-
-def _object_schema(
-    properties: Optional[Dict[str, Any]] = None,
-    required: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": properties or {},
-        "required": required or [],
-        "additionalProperties": False,
-    }
-
-
-TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
-    "knowledge_add_text": {
-        "description": "把用户明确提供的纯文本保存到当前用户的私人知识库。",
-        "parameters": _object_schema(
-            {"name": {"type": "string"}, "content": {"type": "string"}},
-            ["name", "content"],
-        ),
-    },
-    "knowledge_index_file": {
-        "description": "索引当前用户 workspace 内的 UTF-8 TXT 或 Markdown 文件。",
-        "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
-    },
-    "knowledge_search": {
-        "description": "检索当前用户的私人知识库。",
-        "parameters": _object_schema(
-            {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}},
-            ["query"],
-        ),
-    },
-    "knowledge_list": {
-        "description": "列出当前用户的知识来源及索引状态。",
-        "parameters": _object_schema(),
-    },
-    "knowledge_delete": {
-        "description": "按来源编号删除当前用户的一项知识及其索引。",
-        "parameters": _object_schema({"source_id": {"type": "string"}}, ["source_id"]),
-    },
-    "list_allowed_roots": {
-        "description": "显示本机工具允许访问的根目录和当前默认工作目录。",
-        "parameters": _object_schema(),
-    },
-    "list_directory": {
-        "description": "列出目录中的文件和子目录；相对路径基于默认工作目录。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string", "description": "目录路径，默认 ."},
-                "depth": {"type": "integer", "minimum": 1, "maximum": 3},
-                "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1},
-            }
-        ),
-    },
-    "find_files": {
-        "description": "在目录中递归按文件名查找文件或目录，支持 * 和 ? 通配符。",
-        "parameters": _object_schema(
-            {
-                "query": {"type": "string"},
-                "path": {"type": "string", "description": "默认 ."},
-                "max_results": {"type": "integer", "minimum": 1},
-            },
-            ["query"],
-        ),
-    },
-    "search_text": {
-        "description": "在开放目录的 UTF-8 文本文件中搜索文字。",
-        "parameters": _object_schema(
-            {
-                "query": {"type": "string"},
-                "path": {"type": "string", "description": "默认 ."},
-                "glob": {"type": "string", "description": "可选文件名模式，如 *.py"},
-                "case_sensitive": {"type": "boolean"},
-                "max_results": {"type": "integer", "minimum": 1},
-            },
-            ["query"],
-        ),
-    },
-    "read_text_file": {
-        "description": "按行读取开放目录中的 UTF-8 文本文件。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string"},
-                "start_line": {"type": "integer", "minimum": 1},
-                "max_lines": {"type": "integer", "minimum": 1, "maximum": 400},
-            },
-            ["path"],
-        ),
-    },
-    "get_path_info": {
-        "description": "获取文件或目录的类型、大小和修改时间。",
-        "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
-    },
-    "get_current_time": {
-        "description": "获取机器人配置时区中的当前日期和时间。",
-        "parameters": _object_schema(),
-    },
-    "get_system_info": {
-        "description": "获取本机操作系统、架构和主机名，不返回环境变量。",
-        "parameters": _object_schema(),
-    },
-    "get_disk_usage": {
-        "description": "获取开放目录所在磁盘的容量和可用空间。",
-        "parameters": _object_schema({"path": {"type": "string"}}),
-    },
-    "list_processes": {
-        "description": "列出本机进程的 PID 和程序名，不包含完整命令参数。",
-        "parameters": _object_schema(
-            {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-            }
-        ),
-    },
-    "create_directory": {
-        "description": "新建目录，需要用户确认。",
-        "parameters": _object_schema(
-            {"path": {"type": "string"}, "parents": {"type": "boolean"}}, ["path"]
-        ),
-    },
-    "write_text_file": {
-        "description": "新建或覆盖 UTF-8 文本文件，需要用户确认。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-                "mode": {"type": "string", "enum": ["create", "overwrite"]},
-            },
-            ["path", "content", "mode"],
-        ),
-    },
-    "replace_text": {
-        "description": "在文本文件中精确替换内容，需要用户确认。",
-        "parameters": _object_schema(
-            {
-                "path": {"type": "string"},
-                "old_text": {"type": "string"},
-                "new_text": {"type": "string"},
-                "expected_count": {"type": "integer", "minimum": 1},
-            },
-            ["path", "old_text", "new_text"],
-        ),
-    },
-    "copy_path": {
-        "description": "复制文件或目录到一个不存在的目标路径，需要用户确认。",
-        "parameters": _object_schema(
-            {"source": {"type": "string"}, "destination": {"type": "string"}},
-            ["source", "destination"],
-        ),
-    },
-    "move_path": {
-        "description": "移动文件或目录到一个不存在的目标路径，需要用户确认。",
-        "parameters": _object_schema(
-            {"source": {"type": "string"}, "destination": {"type": "string"}},
-            ["source", "destination"],
-        ),
-    },
-    "move_to_trash": {
-        "description": "把文件或目录移到 iLinkBot 专用废纸篓，不会永久删除，需要用户确认。",
-        "parameters": _object_schema({"path": {"type": "string"}}, ["path"]),
-    },
-    "run_command": {
-        "description": "使用白名单档案在 macOS 沙箱中运行命令，需要用户确认；不支持 shell 字符串。",
-        "parameters": _object_schema(
-            {
-                "profile": {
-                    "type": "string",
-                    "enum": [
-                        "python", "git_readonly", "node", "npm_script",
-                        "ollama_readonly", "workspace_script"
-                    ],
-                },
-                "args": {"type": "array", "items": {"type": "string"}},
-                "cwd": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
-            },
-            ["profile", "args"],
-        ),
-    },
-    "list_scripts": {
-        "description": "列出 iLinkBot 已注册、可由模型请求运行的固定脚本及其参数。",
-        "parameters": _object_schema(),
-    },
-    "run_script": {
-        "description": "按已注册脚本的审批配置提交固定脚本到后台运行，并返回任务编号。",
-        "parameters": _object_schema(
-            {
-                "script_id": {"type": "string"},
-                "parameters": {
-                    "type": "object",
-                    "description": "脚本的具名参数；先用 list_scripts 查看允许值。",
-                    "additionalProperties": True,
-                },
-            },
-            ["script_id"],
-        ),
-    },
-    "get_script_run": {
-        "description": "按任务编号查询固定脚本的运行状态和结果。",
-        "parameters": _object_schema(
-            {"run_id": {"type": "string"}}, ["run_id"]
-        ),
-    },
-}
+    from src.core.services.drive import DriveService
+    from src.core.tooling.mcp_client import McpClientManager
+    from src.core.plugins.manager import PluginManager
+    from src.core.services.resources import ScopedResourceStore
 
 
 class ToolRuntime:
@@ -266,32 +102,187 @@ class ToolRuntime:
         tenant_registry: Optional[TenantRegistry] = None,
         knowledge_service: Optional["KnowledgeService"] = None,
         plugins: Optional[Iterable[PlatformPlugin]] = None,
+        plugin_manager: Optional["PluginManager"] = None,
+        tool_audit_store: Optional[Any] = None,
+        tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
+        mcp_manager: Optional["McpClientManager"] = None,
+        organization_schedule_service: Optional[
+            "OrganizationScheduleToolService"
+        ] = None,
+        drive_service: Optional["DriveService"] = None,
+        drive_audit_store: Optional[Any] = None,
+        resource_store: Optional["ScopedResourceStore"] = None,
+        datasource_service: Any = None,
     ) -> None:
         self.base_config = config
-        self.config = config
         self.timezone = ZoneInfo(timezone_name)
-        self.roots = [Path(item).resolve() for item in config.allowed_roots]
-        self.default_directory = Path(config.default_working_directory).resolve()
-        self.trash_directory = trash_directory or (Path.home() / ".Trash" / "iLinkBot")
+        self._default_roots = [
+            Path(item).resolve() for item in config.allowed_roots
+        ]
+        self._default_directory = Path(
+            config.default_working_directory
+        ).resolve()
+        self._default_trash_directory = trash_directory or (
+            Path.home() / ".Trash" / "iLinkBot"
+        )
+        self._binding = threading.local()
         self.audit_logger = audit_logger
         self.script_service = script_service
+        self.organization_schedule_service = organization_schedule_service
         self.tenant_registry = tenant_registry
         self.knowledge_service = knowledge_service
-        self.tenant: Optional[TenantContext] = None
-        self.plugins = list(plugins or [])
+        self.plugin_manager = plugin_manager
+        self.plugins = list(plugins or []) if plugin_manager is None else []
         self._plugin_tools: Dict[str, PlatformPlugin] = {}
-        for plugin in self.plugins:
-            for tool_name in plugin.tool_definitions:
-                if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+        if plugin_manager is not None:
+            for tool_name in plugin_manager.tool_names:
+                if tool_name in TOOL_DEFINITIONS:
                     raise ValueError("平台插件工具名称重复：{}".format(tool_name))
-                self._plugin_tools[tool_name] = plugin
+        else:
+            for plugin in self.plugins:
+                for tool_name in plugin.tool_definitions:
+                    if tool_name in TOOL_DEFINITIONS or tool_name in self._plugin_tools:
+                        raise ValueError("平台插件工具名称重复：{}".format(tool_name))
+                    self._plugin_tools[tool_name] = plugin
         self._sandbox_available = sandbox_available
-        self.command_runner = CommandRunner(
+        self._default_command_runner = CommandRunner(
             config, self.resolve_path, sandbox_available=sandbox_available
         )
+        self.tool_audit_store = tool_audit_store
+        self._tool_states: Dict[str, Dict[str, Any]] = tool_states or {}
+        self.mcp_manager = mcp_manager
+        self.drive_service = drive_service
+        self.drive_audit_store = drive_audit_store
+        self.resource_store = resource_store
+        self.datasource_service = datasource_service
+    @property
+    def tenant(self) -> Optional[TenantContext]:
+        return getattr(self._binding, "tenant", None)
+
+    @property
+    def config(self) -> ToolConfig:
+        return getattr(self._binding, "config", self.base_config)
+
+    @property
+    def roots(self) -> List[Path]:
+        return getattr(self._binding, "roots", self._default_roots)
+
+    @property
+    def default_directory(self) -> Path:
+        return getattr(
+            self._binding, "default_directory", self._default_directory
+        )
+
+    @property
+    def trash_directory(self) -> Path:
+        return getattr(
+            self._binding,
+            "trash_directory",
+            self._default_trash_directory,
+        )
+
+    @property
+    def command_runner(self) -> CommandRunner:
+        return getattr(
+            self._binding, "command_runner", self._default_command_runner
+        )
+
+    @property
+    def _audit_context(self) -> ToolAuditContext:
+        return getattr(self._binding, "audit_context", ToolAuditContext())
+
+    @_audit_context.setter
+    def _audit_context(self, value: ToolAuditContext) -> None:
+        self._binding.audit_context = value
+
+    @property
+    def bound_datasources(self) -> Optional[List[str]]:
+        """Datasource ids the current thread's agent may touch.
+
+        ``None`` means "no agent has declared a binding on this thread" and is
+        treated as deny-all by :meth:`_require_datasource` (fail-closed).
+        """
+        return getattr(self._binding, "datasources", None)
+
+    def bind_agent_datasources(self, datasource_ids: Optional[Iterable[str]]) -> None:
+        """Restrict db_* tools to the datasources bound to the running agent.
+
+        Must be called on the same thread that will later invoke
+        :meth:`schemas` / :meth:`execute`.  Web requests hand tool execution to
+        an anyio worker thread, so the binding is re-applied inside the
+        streaming generator.
+        """
+        if datasource_ids is None:
+            self._binding.datasources = None
+            return
+        self._binding.datasources = [
+            str(value).strip() for value in datasource_ids if str(value).strip()
+        ]
+
+    def _require_datasource(self, datasource_id: str) -> str:
+        """Fail-closed check that the running agent may use this datasource."""
+        bound = self.bound_datasources
+        if not bound:
+            raise ToolError("当前智能体未绑定任何数据源，无法访问数据库")
+        if datasource_id not in bound:
+            raise ToolError("当前智能体无权访问数据源：{}".format(datasource_id))
+        return datasource_id
+
+    def is_tool_enabled(self, name: str) -> bool:
+        state = self._tool_states.get(name)
+        if state is not None and not state.get("enabled", True):
+            return False
+        policy = self._organization_tool_policy()
+        if name in set(policy.get("disabled_tools") or []):
+            return False
+        allowed = policy.get("allowed_tools")
+        if isinstance(allowed, list) and allowed and name not in allowed:
+            return False
+        return True
+
+    def _organization_tool_policy(self) -> Dict[str, Any]:
+        if self.resource_store is None or self.tenant is None:
+            return {}
+        try:
+            item = self.resource_store.get_effective(
+                self.tenant.tenant_id, "tools", "platform"
+            )
+            payload = item.get("payload")
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def get_tool_state(self, name: str) -> Dict[str, Any]:
+        state = self._tool_states.get(name, {})
+        return {
+            "enabled": state.get("enabled", True),
+            "require_approval": state.get(
+                "require_approval", name in APPROVAL_TOOLS
+            ),
+        }
+
+    def reload_tool_states(self, states: Dict[str, Dict[str, Any]]) -> None:
+        self._tool_states = states
+
+    def reload_config(self, config: ToolConfig) -> None:
+        """Atomically replace the platform tool policy for new bindings."""
+        roots = [Path(item).resolve() for item in config.allowed_roots]
+        default_directory = Path(config.default_working_directory).resolve()
+        runner = CommandRunner(
+            config,
+            self.resolve_path,
+            sandbox_available=self._sandbox_available,
+        )
+        self.base_config = config
+        self._default_roots = roots
+        self._default_directory = default_directory
+        self._default_command_runner = runner
 
     def bind_tenant(self, tenant: TenantContext) -> None:
         """Fail-closed binding of all filesystem and script tools to one tenant."""
+        # Switching tenant invalidates any datasource grant left behind by a
+        # previous agent on this pooled thread.
+        self._binding.datasources = None
         if self.tenant_registry is None:
             return
         registered = self.tenant_registry.get(tenant.tenant_id)
@@ -299,18 +290,25 @@ class ToolRuntime:
             raise ToolError("租户身份不匹配")
         workspace = self.tenant_registry.tenant_root(tenant.tenant_id) / "workspace"
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(str(workspace), 0o700)
-        self.tenant = tenant
-        self.roots = [workspace.resolve()]
-        self.default_directory = workspace.resolve()
-        self.trash_directory = self.tenant_registry.tenant_root(tenant.tenant_id) / ".trash"
-        self.config = replace(
+        # POSIX permission bits are meaningless on Windows (it uses ACLs) and
+        # chmod there can even raise WinError 5; only enforce on POSIX.
+        if os.name != "nt":
+            os.chmod(str(workspace), 0o700)
+        default_directory = workspace.resolve()
+        config = replace(
             self.base_config,
-            allowed_roots=[str(self.default_directory)],
-            default_working_directory=str(self.default_directory),
+            allowed_roots=[str(default_directory)],
+            default_working_directory=str(default_directory),
         )
-        self.command_runner = CommandRunner(
-            self.config,
+        self._binding.tenant = tenant
+        self._binding.roots = [default_directory]
+        self._binding.default_directory = default_directory
+        self._binding.trash_directory = (
+            self.tenant_registry.tenant_root(tenant.tenant_id) / ".trash"
+        )
+        self._binding.config = config
+        self._binding.command_runner = CommandRunner(
+            config,
             self.resolve_path,
             sandbox_available=self._sandbox_available,
         )
@@ -321,15 +319,37 @@ class ToolRuntime:
         return self.tenant
 
     def is_available(self, name: str) -> bool:
+        if not self.is_tool_enabled(name):
+            return False
+        if (
+            self.plugin_manager is not None
+            and self.plugin_manager.manifest_for_tool(name) is not None
+        ):
+            return self.plugin_manager.is_available(name, self.tenant)
         plugin = self._plugin_tools.get(name)
         if plugin is not None:
             return plugin.is_available(name)
+        if self.mcp_manager is not None and self.mcp_manager.has_tool(name):
+            return self.mcp_manager.is_available(name)
         if name not in TOOL_DEFINITIONS:
             return False
         if name == "run_command":
             return self.command_runner.available
-        if name in {"list_scripts", "run_script", "get_script_run"}:
+        if name == "git":
+            if not self.config.git_enabled:
+                return False
+            configured = self.config.git_binary_path or None
+            if GitManager.find_git(configured) is not None:
+                return True
+            # Probing must never block the caller on a multi-megabyte download.
+            GitManager.prefetch_async(configured)
+            return False
+        if name in {
+            "list_scripts", "run_script", "get_script_run", "cancel_script_run"
+        }:
             return self.script_service is not None
+        if name in {"list_script_schedules", "manage_script_schedule"}:
+            return self.organization_schedule_service is not None
         if name.startswith("knowledge_"):
             return self.knowledge_service is not None
         return True
@@ -338,8 +358,19 @@ class ToolRuntime:
         definition = TOOL_DEFINITIONS.get(name)
         if definition is not None:
             return definition
+        if self.plugin_manager is not None:
+            managed_definition = self.plugin_manager.definition(name)
+            if managed_definition is not None:
+                return {
+                    "description": managed_definition.description,
+                    "parameters": managed_definition.parameters,
+                }
         plugin = self._plugin_tools.get(name)
         if plugin is None:
+            if self.mcp_manager is not None:
+                mcp_definition = self.mcp_manager.tool_schema(name)
+                if mcp_definition is not None:
+                    return mcp_definition
             return None
         plugin_definition = plugin.tool_definitions.get(name)
         if plugin_definition is None:
@@ -356,20 +387,54 @@ class ToolRuntime:
             if not definition or not self.is_available(name):
                 continue
             parameters = copy.deepcopy(definition["parameters"])
+            description = definition["description"]
             if name == "run_command":
                 parameters["properties"]["profile"]["enum"] = list(
                     self.config.enabled_command_profiles
                 )
-            if name == "run_script" and self.script_service:
+            if name in {"run_script", "manage_script_schedule"} and self.script_service:
                 parameters["properties"]["script_id"]["enum"] = list(
                     self.script_service.script_ids
                 )
+            if name == "run_script" and self.script_service:
+                catalog = "；".join(
+                    "{}＝{}（{}）".format(item.id, item.name, item.description)
+                    if item.description
+                    else "{}＝{}".format(item.id, item.name)
+                    for item in sorted(
+                        self.script_service.definitions.values(),
+                        key=lambda entry: entry.id,
+                    )
+                )
+                if catalog:
+                    description = "{}可用脚本：{}。".format(description, catalog)
+            if name == "git":
+                # 上限与默认值来自 tools.json，不能在 schema 里写死。
+                timeout = parameters["properties"]["timeout_seconds"]
+                timeout["maximum"] = self.config.git_max_timeout_seconds
+                timeout["description"] = (
+                    "命令超时秒数，默认 {}；clone/pull/fetch 默认 {}"
+                ).format(
+                    self.config.git_default_timeout_seconds,
+                    self._git_network_timeout(),
+                )
+            if name in DATASOURCE_TOOLS and self.datasource_service is not None:
+                configs = self.datasource_service.list_configs()
+                ds_ids = [c["id"] for c in configs if c.get("enabled", True)]
+                # Only advertise the datasources bound to the running agent.
+                bound = self.bound_datasources
+                allowed = [ds_id for ds_id in ds_ids if ds_id in (bound or [])]
+                if not allowed:
+                    # Fail-closed: an unbound agent gets no db_* tool at all.
+                    continue
+                if "datasource_id" in parameters.get("properties", {}):
+                    parameters["properties"]["datasource_id"]["enum"] = allowed
             schemas.append(
                 {
                     "type": "function",
                     "function": {
                         "name": name,
-                        "description": definition["description"],
+                        "description": description,
                         "parameters": parameters,
                     },
                 }
@@ -379,9 +444,24 @@ class ToolRuntime:
     def requires_approval(
         self, name: str, arguments: Optional[Dict[str, Any]] = None
     ) -> bool:
+        if name in set(
+            self._organization_tool_policy().get("require_approval_tools") or []
+        ):
+            return True
+        definition = (
+            self.plugin_manager.definition(name)
+            if self.plugin_manager is not None
+            else None
+        )
         plugin = self._plugin_tools.get(name)
-        if plugin is not None:
-            definition = plugin.tool_definitions.get(name)
+        if definition is not None or plugin is not None:
+            if definition is None and plugin is not None:
+                definition = plugin.tool_definitions.get(name)
+            if definition and definition.approval_policy == "required":
+                return True
+            state = self._tool_states.get(name)
+            if state is not None and "require_approval" in state:
+                return bool(state["require_approval"])
             return bool(definition and definition.requires_approval)
         if name == "run_script" and self.script_service is not None:
             if arguments is None:
@@ -389,6 +469,19 @@ class ToolRuntime:
             if not isinstance(arguments, dict):
                 return True
             return self.script_service.requires_approval(arguments.get("script_id"))
+        if name in {"cancel_script_run", "manage_script_schedule"}:
+            return True
+        if name == "git":
+            if not isinstance(arguments, dict):
+                return True
+            args = arguments.get("args", [])
+            return requires_manual_approval(
+                str(arguments.get("command", "")),
+                [a for a in args if isinstance(a, str)] if isinstance(args, list) else [],
+            )
+        state = self._tool_states.get(name)
+        if state is not None and "require_approval" in state:
+            return state["require_approval"]
         return name in APPROVAL_TOOLS
 
     def direct_response_text(
@@ -396,8 +489,14 @@ class ToolRuntime:
     ) -> Optional[str]:
         """Return a trusted plugin summary that should bypass model rewriting."""
 
+        definition = (
+            self.plugin_manager.definition(name)
+            if self.plugin_manager is not None
+            else None
+        )
         plugin = self._plugin_tools.get(name)
-        definition = plugin.tool_definitions.get(name) if plugin is not None else None
+        if definition is None and plugin is not None:
+            definition = plugin.tool_definitions.get(name)
         if not definition or not definition.direct_response or not result or not result.ok:
             return None
         if not isinstance(result.data, dict):
@@ -518,11 +617,19 @@ class ToolRuntime:
         self._require_tenant()
         self._validate_arguments(name, arguments)
         if name not in APPROVAL_TOOLS:
+            plugin_definition = (
+                self.plugin_manager.definition(name)
+                if self.plugin_manager is not None
+                else None
+            )
             plugin = self._plugin_tools.get(name)
-            plugin_definition = plugin.tool_definitions.get(name) if plugin else None
+            if plugin_definition is None and plugin is not None:
+                plugin_definition = plugin.tool_definitions.get(name)
             if not plugin_definition or not plugin_definition.requires_approval:
                 raise ToolError("该工具不需要审批：{}".format(name))
             try:
+                if self.plugin_manager is not None:
+                    return self.plugin_manager.preview(name, arguments, self.tenant)
                 return plugin.preview(name, arguments, self.tenant)
             except PluginError as exc:
                 raise ToolError(str(exc)) from exc
@@ -559,6 +666,25 @@ class ToolRuntime:
                 )
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
+        if name == "cancel_script_run":
+            if not self.script_service:
+                raise ToolError("固定脚本服务不可用")
+            tenant = self._require_tenant()
+            if tenant is None:
+                raise ToolError("脚本工具需要租户身份")
+            run_id = self._string(arguments, "run_id")
+            current = self.script_service.get_run(tenant, run_id)
+            return "取消脚本任务：{}\n脚本：{}\n当前状态：{}".format(
+                run_id, current["script_name"], current["status"]
+            )
+        if name == "manage_script_schedule":
+            tenant = self._require_tenant()
+            if tenant is None or self.organization_schedule_service is None:
+                raise ToolError("组织定时任务服务不可用")
+            try:
+                return self.organization_schedule_service.preview(tenant, arguments)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
         if name == "knowledge_add_text":
             return "保存私人知识：{}\n内容长度：{} 字符".format(
                 self._string(arguments, "name"), len(self._string(arguments, "content"))
@@ -568,6 +694,47 @@ class ToolRuntime:
             return "索引私人知识文件：{}".format(path)
         if name == "knowledge_delete":
             return "删除私人知识来源：{}".format(self._string(arguments, "source_id"))
+        if name == "drive_delete_file":
+            return "删除个人网盘文件：{}".format(self._string(arguments, "path"))
+        if name == "db_execute":
+            if self.datasource_service is None:
+                raise ToolError("数据源服务不可用")
+            ds_id = self._string(arguments, "datasource_id")
+            sql = self._string(arguments, "sql")
+            reason = self._string(arguments, "reason")
+            plan = self.datasource_service.plan_write(ds_id, sql)
+            return (
+                "数据源：{}（{}）\n"
+                "操作类型：{}\n"
+                "涉及表：{}\n"
+                "预计影响行数：{}\n"
+                "执行原因：{}\n"
+                "即将执行的 SQL：\n{}"
+            ).format(
+                plan.get("name", ds_id),
+                plan.get("engine_label", ""),
+                plan.get("kind_label", plan.get("kind", "")),
+                "、".join(plan.get("tables", [])),
+                plan.get("estimated_rows", 0),
+                reason,
+                plan.get("sql", sql),
+            )
+        if name == "git":
+            command = self._string(arguments, "command")
+            args = arguments.get("args", [])
+            if not isinstance(args, list):
+                args = []
+            args = [a for a in args if isinstance(a, str)]
+            repo = self._string(arguments, "repo_path")
+            timeout = arguments.get("timeout_seconds", self.config.git_default_timeout_seconds)
+            rendered = " ".join(args) if args else "（无）"
+            action = "写入" if is_write_operation(command, args) else "读取"
+            return (
+                "Git {}操作：git {}\n"
+                "参数：{}\n"
+                "仓库：{}\n"
+                "超时：{} 秒"
+            ).format(action, command, rendered, repo, timeout)
         raise ToolError("工具缺少审批预览：{}".format(name))
 
     def execute(
@@ -575,7 +742,10 @@ class ToolRuntime:
         name: str,
         arguments: Dict[str, Any],
         audit_context: Optional[ToolAuditContext] = None,
+        progress_callback=None,
     ) -> ToolResult:
+        if not self.is_tool_enabled(name):
+            return ToolResult(False, error="工具已被禁用")
         try:
             self._require_tenant()
         except ToolError as exc:
@@ -583,41 +753,94 @@ class ToolRuntime:
         started = time.monotonic()
         status = "失败"
         output_size = 0
+        error_msg = ""
+        self._audit_context = audit_context or ToolAuditContext()
         try:
             self._validate_arguments(name, arguments)
-            plugin = self._plugin_tools.get(name)
-            if plugin is not None:
+            if (
+                self.plugin_manager is not None
+                and self.plugin_manager.manifest_for_tool(name) is not None
+            ):
+                data = self.plugin_manager.execute(name, arguments, self.tenant)
+            elif (plugin := self._plugin_tools.get(name)) is not None:
                 data = plugin.execute(name, arguments, self.tenant)
+            elif self.mcp_manager is not None and self.mcp_manager.has_tool(name):
+                data = self.mcp_manager.call_tool(name, arguments)
             else:
                 handler = getattr(self, "_tool_{}".format(name), None)
                 if name not in TOOL_DEFINITIONS or not handler:
                     raise ToolError("未知工具：{}".format(name))
-                data = handler(arguments)
+                if name == "git" and progress_callback is not None:
+                    data = handler(arguments, progress_callback=progress_callback)
+                else:
+                    data = handler(arguments)
             status = "成功"
             output_size = len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             return ToolResult(True, data=data)
         except (ToolError, PluginError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            return ToolResult(False, error=str(exc))
+            error_msg = str(exc)
+            return ToolResult(False, error=error_msg)
         finally:
+            duration = time.monotonic() - started
             if self.audit_logger:
                 self.audit_logger(
                     audit_context or ToolAuditContext(),
                     name,
                     status,
-                    time.monotonic() - started,
+                    duration,
                     output_size,
                 )
+            if self.tool_audit_store is not None:
+                try:
+                    import hashlib
+                    args_hash = hashlib.sha256(
+                        json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()
+                    ).hexdigest()[:16]
+                    ctx = audit_context or ToolAuditContext()
+                    self.tool_audit_store.record(
+                        tenant_id=self.tenant.tenant_id if self.tenant else None,
+                        session_id=ctx.session_id,
+                        agent_id=ctx.agent_id,
+                        tool_name=name,
+                        status=status,
+                        duration_ms=int(duration * 1000),
+                        output_bytes=output_size,
+                        args_hash=args_hash,
+                        error=error_msg or None,
+                        user_id=(
+                            ctx.member_user_id
+                            if ctx.member_user_id is not None
+                            else (
+                                self.tenant.member_user_id
+                                if self.tenant is not None
+                                else None
+                            )
+                        ),
+                    )
+                except Exception:  # noqa: BLE001 - audit must never break tool calls
+                    logger.warning("写入工具审计记录失败：工具=%s", name, exc_info=True)
 
     def close_tenant(self, tenant_id: str) -> None:
+        if self.plugin_manager is not None:
+            self.plugin_manager.close_tenant(tenant_id)
+            return
         for plugin in self.plugins:
             plugin.close_tenant(tenant_id)
 
     def close(self) -> None:
-        for plugin in reversed(self.plugins):
+        if self.plugin_manager is not None:
+            self.plugin_manager.close()
+        else:
+            for plugin in reversed(self.plugins):
+                try:
+                    plugin.close()
+                except Exception:  # noqa: BLE001 - best effort on shutdown
+                    logger.warning("关闭插件 %s 失败", plugin.id, exc_info=True)
+        if self.mcp_manager is not None:
             try:
-                plugin.close()
-            except Exception:
-                pass
+                self.mcp_manager.close()
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("关闭 MCP 管理器失败", exc_info=True)
 
     def _tool_list_allowed_roots(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -658,11 +881,160 @@ class ToolRuntime:
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
+    def _tool_cancel_script_run(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.script_service:
+            raise ToolError("固定脚本服务不可用")
+        tenant = self._require_tenant()
+        if tenant is None:
+            raise ToolError("脚本工具需要租户身份")
+        try:
+            return self.script_service.cancel_run(
+                tenant, self._string(arguments, "run_id")
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def _tool_list_script_schedules(
+        self, _arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tenant = self._require_tenant()
+        if tenant is None or self.organization_schedule_service is None:
+            raise ToolError("组织定时任务服务不可用")
+        return {
+            "schedules": self.organization_schedule_service.list_for_tenant(tenant)
+        }
+
+    def _tool_manage_script_schedule(
+        self, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        tenant = self._require_tenant()
+        if tenant is None or self.organization_schedule_service is None:
+            raise ToolError("组织定时任务服务不可用")
+        try:
+            return self.organization_schedule_service.manage(
+                tenant, arguments, authorized_by="chat"
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
     def _knowledge_tenant(self) -> TenantContext:
         tenant = self._require_tenant()
         if tenant is None or self.knowledge_service is None:
             raise ToolError("知识库服务需要租户身份")
         return tenant
+
+    # ---- drive tools ----
+
+    def _drive_tenant(self) -> TenantContext:
+        tenant = self._require_tenant()
+        if tenant is None or self.drive_service is None:
+            raise ToolError("网盘服务需要租户身份")
+        return tenant
+
+    def _drive_scope(self, arguments: Dict[str, Any]) -> str:
+        scope = self._string(arguments, "scope", "tenant")
+        if scope not in ("tenant", "public"):
+            raise ToolError("scope 仅支持 tenant 或 public")
+        return scope
+
+    def _drive_record(
+        self,
+        scope: str,
+        tenant_id: Optional[str],
+        action: str,
+        path: str,
+        size_bytes: int = 0,
+        status: str = "成功",
+        error: Optional[str] = None,
+    ) -> None:
+        if self.drive_audit_store is None:
+            return
+        try:
+            self.drive_audit_store.record(
+                operator="agent:{}".format(self._audit_context.agent_id or "unknown"),
+                source="agent",
+                scope=scope,
+                tenant_id=tenant_id,
+                action=action,
+                path=path,
+                size_bytes=size_bytes,
+                status=status,
+                error=error,
+            )
+        except Exception:  # noqa: BLE001 - audit must never break tool calls
+            logger.warning("写入网盘审计记录失败", exc_info=True)
+
+    def _tool_drive_list_files(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        scope = self._drive_scope(arguments)
+        tenant_id = tenant.tenant_id if scope == "tenant" else None
+        path = self._string(arguments, "path", "")
+        try:
+            result = self.drive_service.list_entries(scope, tenant_id, path)
+        except ValueError as exc:
+            self._drive_record(scope, tenant_id, "list", path, status="失败", error=str(exc))
+            raise ToolError(str(exc)) from exc
+        self._drive_record(scope, tenant_id, "list", path)
+        return result
+
+    def _tool_drive_read_file(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        scope = self._drive_scope(arguments)
+        tenant_id = tenant.tenant_id if scope == "tenant" else None
+        path = self._string(arguments, "path")
+        max_lines = self._integer(arguments, "max_lines", 200, 1, 400)
+        try:
+            preview = self.drive_service.read_text(scope, tenant_id, path)
+        except ValueError as exc:
+            self._drive_record(scope, tenant_id, "preview", path, status="失败", error=str(exc))
+            raise ToolError(str(exc)) from exc
+        lines = preview["content"].splitlines()
+        truncated = preview["truncated"] or len(lines) > max_lines
+        self._drive_record(scope, tenant_id, "preview", path, size_bytes=preview["size"])
+        return {
+            "path": path,
+            "size": preview["size"],
+            "truncated": truncated,
+            "content": "\n".join(lines[:max_lines]),
+        }
+
+    def _tool_drive_save_file(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        path = self._string(arguments, "path")
+        content = self._string(arguments, "content")
+        overwrite = bool(arguments.get("overwrite", False))
+        directory, _, filename = path.replace("\\", "/").strip("/").rpartition("/")
+        try:
+            result = self.drive_service.save_file(
+                "tenant",
+                tenant.tenant_id,
+                directory,
+                filename,
+                content.encode("utf-8"),
+                overwrite=overwrite,
+            )
+        except ValueError as exc:
+            self._drive_record(
+                "tenant", tenant.tenant_id, "upload", path, status="失败", error=str(exc)
+            )
+            raise ToolError(str(exc)) from exc
+        self._drive_record(
+            "tenant", tenant.tenant_id, "upload", result["path"], size_bytes=result["size"]
+        )
+        return result
+
+    def _tool_drive_delete_file(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        tenant = self._drive_tenant()
+        path = self._string(arguments, "path")
+        try:
+            result = self.drive_service.delete("tenant", tenant.tenant_id, path)
+        except ValueError as exc:
+            self._drive_record(
+                "tenant", tenant.tenant_id, "delete", path, status="失败", error=str(exc)
+            )
+            raise ToolError(str(exc)) from exc
+        self._drive_record("tenant", tenant.tenant_id, "delete", path)
+        return result
 
     def _tool_knowledge_add_text(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         tenant = self._knowledge_tenant()
@@ -680,8 +1052,18 @@ class ToolRuntime:
     def _tool_knowledge_search(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         tenant = self._knowledge_tenant()
         limit = self._integer(arguments, "limit", 6, 1, 20)
+        category_ids = arguments.get("category_ids")
+        if category_ids is not None and (
+            not isinstance(category_ids, list)
+            or any(not isinstance(value, str) for value in category_ids)
+        ):
+            raise ToolError("category_ids 必须是字符串数组")
         return {"results": self.knowledge_service.search(
-            tenant.tenant_id, self._string(arguments, "query"), limit
+            tenant.tenant_id,
+            self._string(arguments, "query"),
+            limit,
+            agent_id=self._audit_context.agent_id or None,
+            category_ids=category_ids,
         )}
 
     def _tool_knowledge_list(self, _arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -805,6 +1187,111 @@ class ToolRuntime:
             arguments, "max_results", min(100, self.config.max_search_results), 1,
             self.config.max_search_results,
         )
+        if _find_ripgrep() is not None:
+            outcome = self._search_text_ripgrep(
+                root, query, file_glob, case_sensitive, limit
+            )
+            if outcome is not None:
+                return outcome
+        return self._search_text_python(root, query, file_glob, case_sensitive, limit)
+
+    def _search_text_ripgrep(
+        self,
+        root: Path,
+        query: str,
+        file_glob: str,
+        case_sensitive: bool,
+        limit: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Search with ripgrep; return None so the caller falls back on failure."""
+        argv = [
+            _find_ripgrep() or "rg",
+            "--json",
+            "--fixed-strings",
+            "--line-number",
+            "--no-ignore",
+            "--hidden",
+            "--color=never",
+            "--max-filesize",
+            str(self.config.max_read_bytes),
+            "-i" if not case_sensitive else "--case-sensitive",
+        ]
+        if file_glob != "*":
+            argv += ["--glob", file_glob]
+        argv += ["--", query, str(root)]
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            return None
+        results: List[Dict[str, Any]] = []
+        truncated = False
+        deadline = time.monotonic() + 60
+        try:
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                try:
+                    event = json.loads(raw_line)
+                except ValueError:
+                    continue
+                if event.get("type") != "match":
+                    continue
+                data = event.get("data") or {}
+                path_text = _ripgrep_json_text(data.get("path"))
+                if not path_text:
+                    continue
+                try:
+                    candidate = Path(path_text).resolve()
+                except OSError:
+                    continue
+                # rg honors no ignore rules, so denied paths (.env/.git/…) must
+                # still be filtered against the platform security policy.
+                if not self._is_within_roots(candidate) or self._is_denied(candidate):
+                    continue
+                results.append(
+                    {
+                        "path": str(candidate),
+                        "line": int(data.get("line_number") or 0),
+                        "text": _ripgrep_json_text(data.get("lines")).rstrip("\r\n")[:500],
+                    }
+                )
+                if len(results) >= limit:
+                    truncated = True
+                    break
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        # Exit codes: 0 = matches, 1 = no matches, 2 = error (possibly with
+        # partial matches).  Only trust a clean run or an empty no-match run.
+        if process.returncode not in (0, 1) and not results:
+            return None
+        return {
+            "root": str(root),
+            "query": query,
+            "results": results,
+            "truncated": truncated,
+        }
+
+    def _search_text_python(
+        self,
+        root: Path,
+        query: str,
+        file_glob: str,
+        case_sensitive: bool,
+        limit: int,
+    ) -> Dict[str, Any]:
         needle = query if case_sensitive else query.lower()
         results: List[Dict[str, Any]] = []
         for candidate in self._walk(root):
@@ -940,7 +1427,8 @@ class ToolRuntime:
         existing_mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
         descriptor, temp_name = tempfile.mkstemp(prefix=".ilinkbot-", dir=str(path.parent))
         try:
-            os.fchmod(descriptor, existing_mode)
+            if os.name != "nt":
+                os.fchmod(descriptor, existing_mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(content)
                 handle.flush()
@@ -1025,9 +1513,118 @@ class ToolRuntime:
         shutil.move(str(source), str(destination))
         return {"source": str(source), "trash_path": str(destination)}
 
+    def _tool_db_list_tables(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if self.datasource_service is None:
+            raise ToolError("数据源服务未配置")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
+        tables = self.datasource_service.schema_snapshot(ds_id)
+        return {"tables": [{"schema": t["schema"], "name": t["name"],
+                            "description": t.get("description", ""),
+                            "column_count": len(t.get("columns", []))}
+                           for t in tables]}
+
+    def _tool_db_describe_table(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if self.datasource_service is None:
+            raise ToolError("数据源服务未配置")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
+        table_name = self._string(arguments, "table")
+        tables = self.datasource_service.schema_snapshot(ds_id)
+        matched = [t for t in tables if t["name"] == table_name]
+        if not matched:
+            raise ToolError("数据源 {} 中未找到表：{}".format(ds_id, table_name))
+        return {"schema": matched[0]["schema"], "name": matched[0]["name"],
+                "description": matched[0].get("description", ""),
+                "columns": matched[0]["columns"]}
+
+    def _tool_db_query(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if self.datasource_service is None:
+            raise ToolError("数据源服务未配置")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
+        sql = self._string(arguments, "sql")
+        limit = self._integer(arguments, "limit", 0, 0, 500) or None
+        return self.datasource_service.query(ds_id, sql, limit=limit)
+
+    def _tool_db_execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if self.datasource_service is None:
+            raise ToolError("数据源服务未配置")
+        ds_id = self._require_datasource(self._string(arguments, "datasource_id"))
+        sql = self._string(arguments, "sql")
+        return self.datasource_service.execute_write(ds_id, sql)
+
     def _tool_run_command(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         prepared = self.command_runner.prepare(arguments)
         return self.command_runner.execute(prepared)
+
+    def _git_network_timeout(self) -> int:
+        """Timeout for clone/pull/fetch: the configured ceiling, never lower
+        than the ordinary default."""
+        return max(
+            self.config.git_default_timeout_seconds,
+            self.config.git_max_timeout_seconds,
+        )
+
+    def _tool_git(self, arguments: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        if not self.config.git_enabled:
+            raise ToolError("Git 工具未启用")
+        command = self._string(arguments, "command")
+        if command not in self.config.git_allowed_commands:
+            raise ToolError("git {} 不在启用的命令白名单中".format(command))
+        args = arguments.get("args", [])
+        if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
+            raise ToolError("args 必须是字符串数组")
+        repo_path = self._string(arguments, "repo_path")
+        default_timeout = (
+            self._git_network_timeout()
+            if command in FETCH_ONLY_COMMANDS
+            else self.config.git_default_timeout_seconds
+        )
+        timeout = arguments.get("timeout_seconds", default_timeout)
+        if not isinstance(timeout, int) or isinstance(timeout, bool):
+            raise ToolError("timeout_seconds 必须是整数")
+        if timeout < 1 or timeout > self.config.git_max_timeout_seconds:
+            raise ToolError("timeout_seconds 超出范围（1-{}）".format(
+                self.config.git_max_timeout_seconds
+            ))
+        git_binary = GitManager.ensure_git(self.config.git_binary_path or None)
+        # git_root 支持 $TENANT_WORKSPACE 占位符：解析为当前租户的
+        # workspace（租户文件库），使各租户的 git 仓库天然隔离。
+        raw_root = self.config.git_root
+        if "$TENANT_WORKSPACE" in raw_root:
+            if self.tenant is None or self.tenant_registry is None:
+                # 不能回退到跨租户共享目录：那既不在任何租户的文件库里，
+                # 也会让不同租户的代码混在一起。
+                raise ToolError(
+                    "git_root 配置为租户工作区，但当前未绑定租户工作区，无法执行 git 操作"
+                )
+            workspace = (
+                self.tenant_registry.tenant_root(self.tenant.tenant_id) / "workspace"
+            )
+            workspace.mkdir(parents=True, exist_ok=True)
+            git_root = Path(raw_root.replace("$TENANT_WORKSPACE", str(workspace)))
+        else:
+            git_root = Path(raw_root).expanduser()
+            if not git_root.is_absolute():
+                git_root = PROJECT_ROOT / git_root
+        git_root = git_root.resolve()
+        git_root.mkdir(parents=True, exist_ok=True)
+        display_root = git_root
+        if self.tenant is not None and self.tenant_registry is not None:
+            # 展示给用户的仓库位置以文件库（租户目录）为基准。
+            display_root = self.tenant_registry.tenant_root(
+                self.tenant.tenant_id
+            ).resolve()
+        runner = GitRunner(
+            git_binary=git_binary,
+            git_root=git_root,
+            author_name=self.config.git_author_name,
+            author_email=self.config.git_author_email,
+            max_output_bytes=self.config.git_max_output_bytes,
+            tenant_id=self.tenant.tenant_id if self.tenant is not None else None,
+            display_root=display_root,
+        )
+        return runner.execute(
+            command, args, repo_path, timeout, progress_callback=progress_callback
+        )
 
 
 def _limited_diff(old: str, new: str, label: str, limit: int = 8192) -> str:

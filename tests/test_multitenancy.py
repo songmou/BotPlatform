@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import itertools
 import os
 import re
 import tempfile
 import time
 import unittest
 from argparse import Namespace
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.core.config.loader import ScriptDefinition, ToolConfig
 from src.core.integrations.ilink import Credentials
 from src.core.integrations.keychain import KeychainReference, KeychainService
-from src.core.application import WeChatBot, run_notify_command
+from src.core.application import MessageBot, run_notify_command
+from src.core.messaging import (
+    DIRECT,
+    ChannelCapabilities,
+    InboundMessage,
+    MessageRouter,
+)
 from src.core.services.integration import IntegrationService
 from src.core.services.notification import TenantRecipientStore
 from src.core.services.script import ScriptService
@@ -46,6 +55,55 @@ class FakeKeychain:
         return (reference.service, reference.account) in self.values
 
 
+_EVENT_IDS = itertools.count(1)
+
+
+def direct_message(user, text):
+    return InboundMessage(
+        event_id="event-{}".format(next(_EVENT_IDS)),
+        channel_id="wechat-main",
+        platform="wechat_ilink",
+        account_id="bot",
+        sender_id=user,
+        conversation_type=DIRECT,
+        conversation_id=user,
+        text=text,
+        reply_context={"context_token": "context"},
+    )
+
+
+class FakeChannel:
+    channel_id = "wechat-main"
+    platform = "wechat_ilink"
+    account_id = "bot"
+    capabilities = ChannelCapabilities(typing=True)
+
+    def __init__(self):
+        self.sent = []
+
+    def start(self, emit, stop_event):
+        raise AssertionError("tests call handle_inbound directly")
+
+    def send(self, endpoint, message):
+        self.sent.append(
+            (
+                endpoint.recipient_id,
+                str(endpoint.route_context.get("context_token") or ""),
+                message.text,
+            )
+        )
+
+    @contextmanager
+    def typing(self, endpoint):
+        yield
+
+    def load_attachment(self, attachment):
+        raise AssertionError("attachments are not used in these tests")
+
+    def close(self):
+        pass
+
+
 class MultiTenantStorageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -55,6 +113,7 @@ class MultiTenantStorageTests(unittest.TestCase):
         self.a = self.registry.resolve("bot", "wechat-a")
         self.b = self.registry.resolve("bot", "wechat-b")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o700/0o600) are asserted")
     def test_identity_state_history_and_deletion_are_isolated(self):
         self.assertNotEqual(self.a.tenant_id, self.b.tenant_id)
         self.assertNotIn("wechat-a", str(self.registry.tenant_root(self.a.tenant_id)))
@@ -94,6 +153,7 @@ class MultiTenantStorageTests(unittest.TestCase):
         recreated = self.registry.resolve("bot", "wechat-a")
         self.assertNotEqual(recreated.tenant_id, old_id)
 
+    @unittest.skipUnless(os.name == "posix", "symlink creation needs privileges on Windows")
     def test_recipient_schedule_and_tool_roots_are_tenant_scoped(self):
         recipients = TenantRecipientStore(self.registry)
         recipients.update(self.a, "context-a")
@@ -209,6 +269,7 @@ Path(os.environ['ILINKBOT_SCRIPT_RESULT_FILE']).write_text(
         handled, reply = service.consume(self.a, secret)
         self.assertTrue(handled)
         self.assertIn("安全保存", reply)
+        self.assertIn("查看打卡", reply)
         self.assertIn("已配置", service.status(self.a, "ctsehr"))
 
         migrated = KeychainReference("legacy.service", "credential")
@@ -229,16 +290,6 @@ Path(os.environ['ILINKBOT_SCRIPT_RESULT_FILE']).write_text(
 
 class TenantCommandTests(unittest.TestCase):
     def test_soul_commands_show_and_rebuild_tenant_profile(self):
-        class FakeILink:
-            def __init__(self):
-                self.credentials = Credentials(
-                    "token", "https://gateway", "bot", "owner"
-                )
-                self.sent = []
-
-            def send_text(self, user_id, context_token, text):
-                self.sent.append((user_id, context_token, text))
-
         class FakeAgent:
             image_prompt = "看图"
 
@@ -260,33 +311,28 @@ class TenantCommandTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             registry = TenantRegistry(Path(directory) / "data")
-            ilink = FakeILink()
+            channel = FakeChannel()
             memory = FakeMemory()
-            bot = WeChatBot(
-                ilink,
+            bot = MessageBot(
                 FakeAgent(),
+                MessageRouter([channel]),
                 tenant_registry=registry,
                 conversation_store=ConversationStore(registry, 12),
                 memory_service=memory,
             )
 
             def message(text):
-                return {
-                    "message_type": 1,
-                    "from_user_id": "wechat-user",
-                    "context_token": "context",
-                    "item_list": [{"type": 1, "text_item": {"text": text}}],
-                }
+                return direct_message("wechat-user", text)
 
-            bot.handle_message(message("/soul"))
-            bot.handle_message(message("/soul rebuild"))
+            bot.handle_inbound(message("/soul"))
+            bot.handle_inbound(message("/soul rebuild"))
             tenant = registry.resolve("bot", "wechat-user")
             self.assertEqual(
                 memory.calls,
                 [(tenant.tenant_id, False), (tenant.tenant_id, True)],
             )
-            self.assertIn("修订 2", ilink.sent[-1][2])
-            self.assertIn("简洁回答", ilink.sent[-1][2])
+            self.assertIn("修订 2", channel.sent[-1][2])
+            self.assertIn("简洁回答", channel.sent[-1][2])
 
     def test_file_credentials_are_private_and_isolated(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -306,16 +352,6 @@ class TenantCommandTests(unittest.TestCase):
                 self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
     def test_integration_password_bypasses_transcript(self):
-        class FakeILink:
-            def __init__(self):
-                self.credentials = Credentials(
-                    "token", "https://gateway", "bot", "owner"
-                )
-                self.sent = []
-
-            def send_text(self, user_id, context_token, text):
-                self.sent.append((user_id, context_token, text))
-
         class FakeAgent:
             image_prompt = "看图"
 
@@ -329,25 +365,20 @@ class TenantCommandTests(unittest.TestCase):
             integrations = IntegrationService(
                 IntegrationStore(registry), keychain=keychain
             )
-            bot = WeChatBot(
-                FakeILink(),
+            bot = MessageBot(
                 FakeAgent(),
+                MessageRouter([FakeChannel()]),
                 tenant_registry=registry,
                 conversation_store=conversations,
                 integration_service=integrations,
             )
 
             def message(text):
-                return {
-                    "message_type": 1,
-                    "from_user_id": "wechat-user",
-                    "context_token": "context",
-                    "item_list": [{"type": 1, "text_item": {"text": text}}],
-                }
+                return direct_message("wechat-user", text)
 
-            bot.handle_message(message("/integration setup ctsehr"))
-            bot.handle_message(message("account-value"))
-            bot.handle_message(message("secret-value"))
+            bot.handle_inbound(message("/integration setup ctsehr"))
+            bot.handle_inbound(message("account-value"))
+            bot.handle_inbound(message("secret-value"))
             tenant = registry.resolve("bot", "wechat-user")
             with registry.database.read() as connection:
                 transcript = "\n".join(
@@ -361,16 +392,6 @@ class TenantCommandTests(unittest.TestCase):
             self.assertNotIn("secret-value", transcript)
 
     def test_commands_subscription_delete_and_explicit_notify_target(self):
-        class FakeILink:
-            def __init__(self):
-                self.credentials = Credentials(
-                    "token", "https://gateway", "bot", "owner"
-                )
-                self.sent = []
-
-            def send_text(self, user_id, context_token, text):
-                self.sent.append((user_id, context_token, text))
-
         class FakeAgent:
             image_prompt = "看图"
 
@@ -382,10 +403,10 @@ class TenantCommandTests(unittest.TestCase):
             conversations = ConversationStore(registry, 12)
             recipients = TenantRecipientStore(registry)
             schedules = ScheduleStore(registry)
-            ilink = FakeILink()
-            bot = WeChatBot(
-                ilink,
+            channel = FakeChannel()
+            bot = MessageBot(
                 FakeAgent(),
+                MessageRouter([channel]),
                 tenant_registry=registry,
                 recipient_store=recipients,
                 conversation_store=conversations,
@@ -394,14 +415,9 @@ class TenantCommandTests(unittest.TestCase):
             )
 
             def message(text):
-                return {
-                    "message_type": 1,
-                    "from_user_id": "wechat-user",
-                    "context_token": "context",
-                    "item_list": [{"type": 1, "text_item": {"text": text}}],
-                }
+                return direct_message("wechat-user", text)
 
-            bot.handle_message(message("/schedule on daily"))
+            bot.handle_inbound(message("/schedule on daily"))
             tenant = registry.resolve("bot", "wechat-user")
             self.assertTrue(schedules.is_enabled(tenant.tenant_id, "daily"))
             self.assertEqual(
@@ -422,100 +438,83 @@ class TenantCommandTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertIn("--user", error.getvalue())
 
-            bot.handle_message(message("/delete-data"))
-            confirmation = ilink.sent[-1][2]
+            bot.handle_inbound(message("/delete-data"))
+            confirmation = channel.sent[-1][2]
             code = re.search(r"/confirm-delete (\d{6})", confirmation).group(1)
             wrong = "{:06d}".format((int(code) + 1) % 1_000_000)
-            bot.handle_message(message("/confirm-delete {}".format(wrong)))
+            bot.handle_inbound(message("/confirm-delete {}".format(wrong)))
             self.assertTrue(registry.tenant_root(tenant.tenant_id).exists())
-            bot.handle_message(message("/confirm-delete {}".format(code)))
+            bot.handle_inbound(message("/confirm-delete {}".format(code)))
             self.assertFalse(registry.tenant_root(tenant.tenant_id).exists())
             with self.assertRaises(TenantStoreError):
                 registry.get(tenant.tenant_id)
 
-    def test_codex_command_is_routed_directly_to_plugin(self):
-        class FakeILink:
-            def __init__(self):
-                self.credentials = Credentials(
-                    "token", "https://gateway", "bot", "owner"
-                )
-                self.sent = []
-
-            def send_text(self, user_id, context_token, text):
-                self.sent.append((user_id, context_token, text))
+    def test_direct_message_requeues_waiting_notifications_with_address_store(self):
+        from src.core.messaging.store import ChannelAddressStore
 
         class FakeAgent:
             image_prompt = "看图"
 
-        class FakeCodexPlugin:
-            def __init__(self):
-                self.calls = []
+            def has_pending_approval(self, _subject):
+                return False
 
-            def resolve_wechat_command(self, tenant, text):
-                self.calls.append((tenant.tenant_id, text))
-                return "已处理 Codex 确认"
+        class FakeDispatcher:
+            def __init__(self):
+                self.refreshed = []
+
+            def on_recipient_refreshed(self, tenant_id):
+                self.refreshed.append(tenant_id)
+                return 1
 
         with tempfile.TemporaryDirectory() as directory:
             registry = TenantRegistry(Path(directory) / "data")
-            codex = FakeCodexPlugin()
-            ilink = FakeILink()
-            logs = []
-            conversations = ConversationStore(registry, 12)
-            bot = WeChatBot(
-                ilink,
+            dispatcher = FakeDispatcher()
+            channel = FakeChannel()
+            bot = MessageBot(
                 FakeAgent(),
-                interaction_logger=lambda *entry: logs.append(entry),
+                MessageRouter([channel]),
+                interaction_logger=lambda *_entry: None,
+                tenant_registry=registry,
+                notification_dispatcher=dispatcher,
+                address_store=ChannelAddressStore(registry),
+            )
+            bot.handle_inbound(direct_message("wechat-user", "/id"))
+            tenant = registry.resolve("bot", "wechat-user")
+            self.assertEqual(dispatcher.refreshed, [tenant.tenant_id])
+            self.assertIn(tenant.tenant_id, channel.sent[-1][2])
+
+    def test_plugin_like_command_is_handled_as_an_ordinary_message(self):
+        class FakeAgent:
+            image_prompt = "看图"
+            def __init__(self):
+                self.calls = []
+
+            def has_pending_approval(self, _subject):
+                return False
+
+            def chat(self, tenant, text, image_bytes=None, **_kwargs):
+                self.calls.append((tenant.tenant_id, text, image_bytes))
+                return SimpleNamespace(text="普通消息已处理", thinking="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            registry = TenantRegistry(Path(directory) / "data")
+            agent = FakeAgent()
+            channel = FakeChannel()
+            bot = MessageBot(
+                agent,
+                MessageRouter([channel]),
                 tenant_registry=registry,
                 recipient_store=TenantRecipientStore(registry),
-                conversation_store=conversations,
-                codex_tasks_plugin=codex,
             )
-            bot.handle_message(
-                {
-                    "message_type": 1,
-                    "from_user_id": "wechat-user",
-                    "context_token": "context",
-                    "item_list": [
-                        {
-                            "type": 1,
-                            "text_item": {"text": "/codex approve ABCD1234"},
-                        }
-                    ],
-                }
+            bot.handle_inbound(
+                direct_message("wechat-user", "/plugin action ABCD1234")
             )
             tenant = registry.resolve("bot", "wechat-user")
             self.assertEqual(
-                codex.calls, [(tenant.tenant_id, "/codex approve ABCD1234")]
+                agent.calls,
+                [(tenant.tenant_id, "/plugin action ABCD1234", None)],
             )
-            self.assertEqual(ilink.sent[-1][2], "已处理 Codex 确认")
-
-            bot.handle_message(
-                {
-                    "message_type": 1,
-                    "from_user_id": "wechat-user",
-                    "context_token": "context",
-                    "item_list": [
-                        {
-                            "type": 1,
-                            "text_item": {
-                                "text": "/codex answer ABCD1234 highly-secret"
-                            },
-                        }
-                    ],
-                }
-            )
-            self.assertNotIn("highly-secret", repr(logs))
-            transcript_path = (
-                registry.tenant_root(tenant.tenant_id)
-                / "conversation"
-                / "transcript.jsonl"
-            )
-            transcript = (
-                transcript_path.read_text(encoding="utf-8")
-                if transcript_path.exists()
-                else ""
-            )
-            self.assertNotIn("highly-secret", transcript)
+            self.assertEqual(channel.sent[-1][2], "普通消息已处理")
 
 
 if __name__ == "__main__":

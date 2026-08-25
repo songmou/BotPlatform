@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.memory import MemoryService, ModelMemoryExtractor
@@ -17,11 +17,18 @@ from src.core.modeling import (
     ModelIdentity,
     ModelResponse,
     ModelRouter,
+    RerankError,
 )
 
 
 class FakeEmbedding:
-    profile = SimpleNamespace(id="fake-embedding", dimensions=4)
+    model_id = "fake-embedding"
+    model = "fake-embedding"
+    dimensions = 4
+
+    @property
+    def fingerprint(self):
+        return "{}@{}@{}".format(self.model_id, self.model, self.dimensions)
 
     def embed(self, texts):
         vectors = []
@@ -31,6 +38,28 @@ class FakeEmbedding:
             else:
                 vectors.append([0.0, 1.0, 0.0, 0.0])
         return vectors
+
+    def close(self):
+        pass
+
+
+class FakeRerank:
+    model_id = "fake-rerank"
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls = []
+
+    def rerank(self, query, documents, top_n=None):
+        self.calls.append((query, list(documents), top_n))
+        if self.fail:
+            raise RerankError("rerank 服务不可用")
+        # Reverse the candidate order with descending scores.
+        indices = list(reversed(range(len(documents))))
+        return [(index, float(len(indices) - rank)) for rank, index in enumerate(indices)]
+
+    def close(self):
+        pass
 
 
 class FakeExtractor:
@@ -105,6 +134,7 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
         self.registry = TenantRegistry(self.data)
         self.tenant = self.registry.resolve("bot", "user")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_database_pragmas_permissions_and_no_runtime_json(self):
         self.assertEqual(os.stat(self.registry.database_path).st_mode & 0o777, 0o600)
         with self.registry.database.read() as connection:
@@ -152,11 +182,123 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
             service.index_file(self.tenant, outside)
         self.assertTrue(service.delete(self.tenant.tenant_id, indexed["source_id"]))
 
+    def test_rich_document_indexing_boundary_and_limits(self):
+        import docx
+        from openpyxl import Workbook
+
+        service = KnowledgeService(self.registry, None)
+        workspace = self.registry.tenant_root(self.tenant.tenant_id) / "workspace"
+
+        word_path = workspace / "manual.docx"
+        document = docx.Document()
+        document.add_heading("产品手册", level=1)
+        document.add_paragraph("退货政策支持七天无理由退货。")
+        document.save(str(word_path))
+        indexed = service.index_file(self.tenant, word_path)
+        self.assertEqual(indexed["status"], "pending_embedding")
+        self.assertGreater(indexed["chunks"], 0)
+        results = service.search(self.tenant.tenant_id, "退货政策")
+        self.assertTrue(any("退货" in item["content"] for item in results))
+
+        sheet_path = workspace / "price.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "价格表"
+        sheet.append(["商品", "价格"])
+        sheet.append(["苹果", 5])
+        workbook.save(str(sheet_path))
+        indexed = service.index_file(self.tenant, sheet_path)
+        self.assertGreater(indexed["chunks"], 0)
+        results = service.search(self.tenant.tenant_id, "价格表")
+        self.assertTrue(any("苹果" in item["content"] for item in results))
+
+        # Rich documents outside the tenant workspace stay rejected.
+        outside = Path(self.temp.name) / "outside.docx"
+        document.save(str(outside))
+        with self.assertRaises(ValueError):
+            service.index_file(self.tenant, outside)
+
+        # The dedicated 20 MiB budget applies to rich documents.
+        with patch("src.core.services.knowledge.MAX_DOCUMENT_BYTES", 10):
+            with self.assertRaisesRegex(ValueError, "20 MiB"):
+                service.index_file(self.tenant, word_path)
+
+        unsupported = workspace / "data.csv"
+        unsupported.write_text("a,b", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            service.index_file(self.tenant, unsupported)
+
     def test_embedding_failure_keeps_searchable_chunks(self):
         service = KnowledgeService(self.registry, None)
         result = service.add_text(self.tenant.tenant_id, "离线", "中文全文检索仍然可用。")
         self.assertEqual(result["status"], "pending_embedding")
         self.assertEqual(len(service.search(self.tenant.tenant_id, "全文检索")), 1)
+
+    def test_english_natural_language_query_uses_tolerant_fts_terms(self):
+        service = KnowledgeService(self.registry, None)
+        service.add_text(
+            self.tenant.tenant_id,
+            "Filariasis review",
+            "Regional programs substantially reduced lymphatic filariasis prevalence.",
+        )
+
+        hits = service.search(
+            self.tenant.tenant_id,
+            "Ivermectin is used to treat lymphatic filariasis.",
+        )
+
+        self.assertTrue(hits)
+        self.assertIn("lymphatic filariasis", hits[0]["content"])
+        self.assertEqual(hits[0]["retrieval_sources"], ["lexical"])
+
+    def test_rerank_reorders_candidates_and_degrades_silently(self):
+        docs = [
+            ("苹果", "苹果是一种常见水果，可以直接食用。"),
+            ("香蕉", "香蕉也是常见水果，富含钾元素。"),
+            ("橙子", "橙子是水果，含有丰富维生素 C。"),
+        ]
+        plain = KnowledgeService(self.registry, FakeEmbedding())
+        for name, text in docs:
+            plain.add_text(self.tenant.tenant_id, name, text)
+        baseline = [
+            hit["content"]
+            for hit in plain.search(self.tenant.tenant_id, "水果", limit=3)
+        ]
+        self.assertEqual(len(baseline), 3)
+
+        reranker = FakeRerank()
+        reranked_service = KnowledgeService(self.registry, FakeEmbedding(), reranker)
+        reranked = [
+            hit["content"]
+            for hit in reranked_service.search(self.tenant.tenant_id, "水果", limit=3)
+        ]
+        self.assertEqual(reranked, list(reversed(baseline)))
+        self.assertTrue(reranker.calls)
+        self.assertEqual(reranker.calls[0][2], 3)
+
+        degraded_service = KnowledgeService(
+            self.registry, FakeEmbedding(), FakeRerank(fail=True)
+        )
+        degraded = [
+            hit["content"]
+            for hit in degraded_service.search(self.tenant.tenant_id, "水果", limit=3)
+        ]
+        self.assertEqual(degraded, baseline)
+
+    def test_final_ranking_keeps_only_best_chunk_per_source(self):
+        candidates = ["a1", "a2", "b1", "c1"]
+        details = {
+            "a1": {"source_id": "source-a"},
+            "a2": {"source_id": "source-a"},
+            "b1": {"source_id": "source-b"},
+            "c1": {"source_id": "source-c"},
+        }
+
+        selected = KnowledgeService._distinct_source_candidates(
+            candidates, details, limit=3
+        )
+
+        self.assertEqual(selected, ["a1", "b1", "c1"])
 
     def test_memory_review_conflict_secret_and_forget(self):
         extractor = FakeExtractor([
@@ -391,6 +533,7 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
             service.get_soul(self.tenant.tenant_id)["content"],
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX atomic rename works while readers hold the file open")
     def test_soul_atomic_write_never_exposes_partial_content(self):
         path = self.registry.tenant_root(self.tenant.tenant_id) / "SOUL.md"
         versions = {
@@ -430,7 +573,12 @@ class SqliteKnowledgeMemoryTests(unittest.TestCase):
             "list",
         )
         self.assertIn("SQLite 待办", listed.summary)
-        self.assertFalse((self.registry.tenant_root(self.tenant.tenant_id) / "scripts" / "todo" / "todos.json").exists())
+        self.assertFalse(
+            (
+                self.registry.tenant_root(self.tenant.tenant_id)
+                / "scripts" / "todo" / "todos.json"
+            ).exists()
+        )
 
     def test_tenant_deletion_purges_fts_and_keeps_audit(self):
         service = KnowledgeService(self.registry, None)

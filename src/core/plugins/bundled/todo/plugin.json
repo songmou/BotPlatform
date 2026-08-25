@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "id": "todo",
+  "name": "私人待办",
+  "version": "1.0.0",
+  "description": "管理每个机器人用户相互隔离的待办事项与一次性提醒。",
+  "entrypoint": "src.core.plugins.todo:TodoPlugin",
+  "core_api": "1",
+  "icon": "T",
+  "color": "#f59e0b",
+  "services": ["tenant_storage", "notification"],
+  "instructions": "用户要求新增、查询、编辑、完成、恢复或归档私人待办时使用 todo_manage；不要与外部 OA 或考勤事项混用。",
+  "background_jobs": [
+    {
+      "id": "due_reminders",
+      "interval_seconds": 30
+    }
+  ],
+  "tools": {
+    "todo_manage": {
+      "description": "管理当前用户的私人待办：查询、新增、编辑、完成、恢复、提醒和归档。",
+      "approval": "none",
+      "direct_response": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["add", "archive", "complete", "edit", "list", "remind", "reopen"]
+          },
+          "todo_id": {"type": "string"},
+          "title": {"type": "string"},
+          "scope": {
+            "type": "string",
+            "enum": ["all", "archived", "completed", "pending"]
+          },
+          "remind_at": {"type": ["string", "null"]},
+          "is_one_off": {"type": "boolean"}
+        },
+        "required": ["action"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "settings_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

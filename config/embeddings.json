@@ -1,8 +1,0 @@
-{
-  "id": "bge_m3_local",
-  "enabled": false,
-  "base_url": "http://127.0.0.1:11434",
-  "model": "bge-m3",
-  "dimensions": 1024,
-  "timeout_seconds": 60
-}

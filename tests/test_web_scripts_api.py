@@ -1,0 +1,228 @@
+"""Integration tests for the external script management endpoints."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from tests._web_api_base import WebApiTestBase
+
+
+class ScriptsApiUnavailableTest(WebApiTestBase):
+    """Without script services every endpoint must answer 503."""
+
+    def test_endpoints_return_503(self):
+        self.assertEqual(self.client.get("/api/scripts").status_code, 503)
+        self.assertEqual(
+            self.client.put(
+                "/api/scripts/roots", json={"allowed_roots": []}
+            ).status_code,
+            503,
+        )
+        self.assertEqual(
+            self.client.get("/api/script-runs", params={"tenant_id": "x"}).status_code,
+            503,
+        )
+
+
+class ScriptsApiTest(WebApiTestBase):
+    def setUp(self):
+        self.script_registry = MagicMock()
+        self.script_service = MagicMock()
+        super().setUp()
+
+        self.script_registry.allowed_roots = ["/tmp/scripts"]
+        self.script_registry.list_entries.return_value = []
+        self.script_service.list_scripts.return_value = [
+            {"id": "demo", "name": "演示脚本"}
+        ]
+
+    def app_kwargs(self):
+        return {
+            "script_registry": self.script_registry,
+            "script_service": self.script_service,
+        }
+
+    # ---- listing / roots ----
+
+    def test_list_scripts(self):
+        response = self.client.get("/api/scripts")
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["allowed_roots"], ["/tmp/scripts"])
+        self.assertEqual(data["scripts"][0]["id"], "demo")
+
+    def test_list_scripts_includes_env_allowlist(self):
+        self.script_service.list_scripts.return_value = [
+            {
+                "id": "demo",
+                "name": "演示脚本",
+                "env_allowlist": ["API_TOKEN", "PLUGIN_DEBUG"],
+            }
+        ]
+        response = self.client.get("/api/scripts")
+        self.assertEqual(response.status_code, 200, response.text)
+        script = response.json()["scripts"][0]
+        self.assertEqual(script["env_allowlist"], ["API_TOKEN", "PLUGIN_DEBUG"])
+
+    def test_script_credentials_status(self):
+        self.script_service.integration_status.return_value = {
+            "integration_id": "ctsehr",
+            "requires_credentials": True,
+            "account_set": True,
+            "keychain_secret_set": False,
+            "ready": False,
+            "injected": ["ILINKBOT_INTEGRATION_ACCOUNT"],
+        }
+        tenant = self._make_tenant()
+        response = self.client.get(
+            "/api/scripts/ctsehr_check/credentials",
+            params={"tenant_id": tenant.tenant_id},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["integration_id"], "ctsehr")
+        self.assertTrue(data["account_set"])
+        self.assertFalse(data["keychain_secret_set"])
+        self.assertFalse(data["ready"])
+
+    def test_script_credentials_no_integration(self):
+        self.script_service.integration_status.return_value = None
+        response = self.client.get("/api/scripts/demo/credentials")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["requires_credentials"])
+
+    def test_script_credentials_unknown_script_404(self):
+        saved = self.script_service.definitions
+        self.script_service.definitions = {}
+        try:
+            response = self.client.get("/api/scripts/ghost/credentials")
+            self.assertEqual(response.status_code, 404)
+        finally:
+            self.script_service.definitions = saved
+
+    def test_update_roots(self):
+        self.script_registry.configure_roots.return_value = ["/srv/scripts"]
+        response = self.client.put(
+            "/api/scripts/roots", json={"allowed_roots": ["/srv/scripts"]}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["allowed_roots"], ["/srv/scripts"])
+        self.script_service.reload_external_definitions.assert_called_once()
+
+    def test_update_roots_rejects_non_list(self):
+        response = self.client.put(
+            "/api/scripts/roots", json={"allowed_roots": "not-a-list"}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_roots_maps_value_error_to_400(self):
+        self.script_registry.configure_roots.side_effect = ValueError("目录不存在")
+        response = self.client.put(
+            "/api/scripts/roots", json={"allowed_roots": ["/nope"]}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("目录不存在", response.json()["detail"])
+
+    # ---- create / update / delete ----
+
+    def test_create_script(self):
+        self.script_registry.create.return_value = SimpleNamespace(id="demo")
+        response = self.client.post(
+            "/api/scripts", json={"id": "demo", "path": "demo.py"}
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["id"], "demo")
+
+    def test_create_script_invalid_payload(self):
+        self.script_registry.create.side_effect = ValueError("路径不合法")
+        response = self.client.post("/api/scripts", json={"id": "bad"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_script(self):
+        response = self.client.put("/api/scripts/demo", json={"name": "改名"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.script_registry.update.assert_called_once()
+
+    def test_delete_script(self):
+        response = self.client.delete("/api/scripts/demo")
+        self.assertEqual(response.status_code, 200)
+        self.script_registry.delete.assert_called_once_with("demo")
+
+    # ---- runs ----
+
+    def test_run_script_requires_tenant_id_string(self):
+        response = self.client.post(
+            "/api/scripts/demo/runs", json={"tenant_id": 123}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_run_script_unknown_tenant(self):
+        response = self.client.post(
+            "/api/scripts/demo/runs",
+            json={"tenant_id": "00000000-0000-0000-0000-000000000009"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_run_script_submits(self):
+        tenant = self._make_tenant()
+        self.script_service.submit.return_value = {"run_id": "r1", "status": "queued"}
+        self.script_service.recipient_store.load.return_value = None
+        response = self.client.post(
+            "/api/scripts/demo/runs",
+            json={"tenant_id": tenant.tenant_id, "parameters": {"a": 1}},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["run_id"], "r1")
+        self.script_service.submit.assert_called_once()
+
+    def test_list_runs(self):
+        tenant = self._make_tenant()
+        self.script_service.list_runs.return_value = [{"run_id": "r1"}]
+        response = self.client.get(
+            "/api/script-runs", params={"tenant_id": tenant.tenant_id}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()[0]["run_id"], "r1")
+
+    def test_get_run_not_found(self):
+        tenant = self._make_tenant()
+        self.script_service.get_run.side_effect = ValueError("运行不存在")
+        response = self.client.get(
+            "/api/script-runs/r404", params={"tenant_id": tenant.tenant_id}
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_cancel_run(self):
+        tenant = self._make_tenant()
+        self.script_service.cancel_run.return_value = {"run_id": "r1", "status": "cancelled"}
+        response = self.client.post(
+            "/api/script-runs/r1/cancel", json={"tenant_id": tenant.tenant_id}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "cancelled")
+
+    def test_retired_tenant_script_schedule_routes_return_404(self):
+        tenant = self._make_tenant()
+        base = "/api/tenants/{}/script-schedules".format(tenant.tenant_id)
+        self.assertEqual(self.client.get(base).status_code, 404)
+        self.assertEqual(self.client.post(base, json={}).status_code, 404)
+        self.assertEqual(self.client.put(base + "/s1", json={}).status_code, 404)
+        self.assertEqual(self.client.delete(base + "/s1").status_code, 404)
+
+    # ---- permissions ----
+
+    def test_viewer_has_no_script_permissions(self):
+        self.assertEqual(self.viewer_client.get("/api/scripts").status_code, 403)
+        self.assertEqual(
+            self.viewer_client.put(
+                "/api/scripts/roots", json={"allowed_roots": []}
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.viewer_client.post(
+                "/api/scripts/demo/runs", json={"tenant_id": "x"}
+            ).status_code,
+            403,
+        )

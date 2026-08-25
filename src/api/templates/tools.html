@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% block title %}工具 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/tools.css">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <!-- Skill 技能 -->
+    <div class="tools-pane" id="tools-pane-skills" style="display:none">
+        <div class="page-header">
+            <div class="page-header-row">
+                <div>
+                    <h2>Skill 技能</h2>
+                    <p class="page-desc">管理智能体可调用的技能指令</p>
+                </div>
+                <button id="create-skill-btn" class="btn-primary">+ 新建技能</button>
+            </div>
+        </div>
+        <div id="skill-list" class="plugin-card-grid"></div>
+    </div>
+
+    <!-- MCP 服务 -->
+    <div class="tools-pane" id="tools-pane-mcp" style="display:none">
+        <div class="page-header">
+            <div class="page-header-row">
+                <div>
+                    <h2>MCP 服务</h2>
+                    <p class="page-desc">管理 Model Context Protocol 外部服务</p>
+                </div>
+                <div class="page-header-actions">
+                    <button id="create-mcp-btn" class="btn-primary">+ 添加服务</button>
+                    <button id="create-mcp-from-template-btn" class="btn-secondary">从模板创建</button>
+                </div>
+            </div>
+        </div>
+        <div id="mcp-list" class="plugin-card-grid"></div>
+    </div>
+
+    <!-- MCP 服务详情 -->
+    <div class="tools-pane" id="tools-pane-mcp-detail" style="display:none">
+        <div class="mcp-detail-header">
+            <button id="mcp-detail-back" class="btn-secondary btn-sm">← 返回</button>
+            <h2 id="mcp-detail-title">MCP 服务</h2>
+            <span class="tag">MCP</span>
+        </div>
+        <div class="mcp-detail-subtabs">
+            <button type="button" class="mcp-detail-subtab active" data-detail-tab="overview">概览</button>
+            <button type="button" class="mcp-detail-subtab" data-detail-tab="tools">工具列表</button>
+        </div>
+
+        <div id="mcp-detail-overview" class="mcp-detail-section">
+            <h3 class="section-title">基本信息</h3>
+            <div id="mcp-detail-info" class="mcp-info-grid"></div>
+            <h3 class="section-title">MCP 配置</h3>
+            <div class="mcp-config-box">
+                <button id="mcp-detail-copy" class="btn-secondary btn-sm mcp-config-copy">复制</button>
+                <pre id="mcp-detail-config"></pre>
+            </div>
+            <div class="mcp-detail-actions">
+                <button id="mcp-detail-edit" class="btn-primary">编辑配置</button>
+                <button id="mcp-detail-delete" class="btn-danger">删除服务</button>
+            </div>
+        </div>
+
+        <div id="mcp-detail-tools" class="mcp-detail-section" style="display:none">
+            <div class="mcp-tools-head">
+                <h3 class="section-title">工具列表</h3>
+                <span id="mcp-detail-tools-count" class="text-muted"></span>
+            </div>
+            <div class="mcp-tools-layout">
+                <div id="mcp-detail-tools-list" class="mcp-tools-left"></div>
+                <div id="mcp-tool-debug" class="mcp-tools-right">
+                    <div class="mcp-debug-empty">选择左侧工具进行调试</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 内置工具 -->
+    <div class="tools-pane" id="tools-pane-builtin" style="display:none">
+        <div class="page-header">
+            <div class="page-header-row">
+                <div>
+                    <h2>工具管理 <span id="builtin-tools-count" class="text-muted"></span></h2>
+                    <p class="page-desc">管理系统内置工具与已配置插件提供的具体工具</p>
+                </div>
+            </div>
+        </div>
+        <div id="builtin-category-tabs" class="tab-bar builtin-category-tabs"
+             role="tablist" aria-label="内置工具分类"></div>
+        <div id="builtin-tools-list" class="builtin-tools-grid"
+             role="tabpanel" aria-live="polite"></div>
+    </div>
+
+    <!-- 执行审计 -->
+    <div class="tools-pane" id="tools-pane-audit" style="display:none">
+        <div class="page-header">
+            <div class="page-header-row">
+                <div>
+                    <h2>执行审计</h2>
+                    <p class="page-desc">用于安全追踪与故障排查；不保存原始参数或工具输出正文，仅记录工具名称、状态、耗时、参数哈希与输出大小</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <div class="search-box">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                    <input type="text" id="audit-filter-tool" placeholder="搜索工具名称...">
+                </div>
+                <select id="audit-filter-status" class="filter-select">
+                    <option value="">全部状态</option>
+                    <option value="成功">成功</option>
+                    <option value="失败">失败</option>
+                </select>
+            </div>
+            <div class="toolbar-left">
+                <span id="audit-total" class="text-muted"></span>
+                <button id="audit-refresh" class="btn-secondary" type="button">刷新</button>
+            </div>
+        </div>
+
+        <div id="tool-audit-table">
+            <div class="tool-audit-head">
+                <span>时间</span>
+                <span>工具</span>
+                <span>状态</span>
+                <span class="audit-head-owner">归属</span>
+                <span>耗时</span>
+                <span></span>
+            </div>
+            <div id="tool-audit-list"></div>
+        </div>
+        <div id="audit-load-more-wrap" style="display:none;margin-top:12px">
+            <button id="audit-load-more" class="btn-secondary">加载更多</button>
+        </div>
+    </div>
+</div>
+
+<!-- Skill Modal -->
+<div id="skill-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3 id="skill-modal-title">新建技能</h3>
+            <button id="skill-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="skill-form" class="modal-body">
+            <div class="form-section">
+                <div class="form-section-title">基础信息</div>
+                <div class="form-group" id="skill-id-group">
+                    <label for="skill-id">技能 ID</label>
+                    <input type="text" id="skill-id" placeholder="如 translator" required pattern="^[a-z][a-z0-9_]{0,63}$">
+                    <small>小写字母开头，可含数字和下划线</small>
+                </div>
+                <div class="form-group">
+                    <label for="skill-name">名称</label>
+                    <input type="text" id="skill-name" placeholder="如 多语言翻译" required>
+                </div>
+                <div class="form-group">
+                    <label for="skill-description">描述</label>
+                    <textarea id="skill-description" rows="2" placeholder="简述技能用途" maxlength="256" style="resize:vertical"></textarea>
+                    <div class="char-counter"><span id="skill-desc-count">0</span>/256</div>
+                </div>
+            </div>
+            <div class="form-section">
+                <div class="section-title-row">
+                    <div class="form-section-title">技能指令（Prompt）</div>
+                    <button type="button" id="skill-fill-example" class="btn-text">填入案例</button>
+                </div>
+                <div class="form-group">
+                    <textarea id="skill-prompt" rows="10" placeholder="你是一个..." required style="font-family:monospace;font-size:13px;width:100%;resize:vertical"></textarea>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label"><input type="checkbox" id="skill-enabled" checked> 启用</label>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="skill-delete-btn" class="btn-danger" style="display:none">删除</button>
+                <button type="button" id="skill-modal-cancel" class="btn-secondary">取消</button>
+                <button type="submit" id="skill-submit-btn" class="btn-primary">立即创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- MCP Modal -->
+<div id="mcp-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3 id="mcp-modal-title">添加 MCP 服务</h3>
+            <button id="mcp-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="mcp-form" class="modal-body">
+            <div class="form-section">
+                <div class="form-section-title">MCP 服务配置</div>
+                <div class="form-group" id="mcp-id-group">
+                    <label for="mcp-id">服务 ID</label>
+                    <input type="text" id="mcp-id" placeholder="如 filesystem" required pattern="^[a-z][a-z0-9_]{0,63}$">
+                    <small>小写字母开头，可含数字和下划线</small>
+                </div>
+                <div class="form-group">
+                    <label for="mcp-name">名称</label>
+                    <input type="text" id="mcp-name" placeholder="如 文件系统 MCP" required>
+                </div>
+                <div class="form-group">
+                    <label>传输方式</label>
+                    <div class="transport-selector" id="mcp-transport-selector">
+                        <button type="button" class="transport-option active" data-transport="stdio">
+                            <span class="transport-option-name">stdio</span>
+                            <span class="transport-option-desc">本地命令</span>
+                        </button>
+                        <button type="button" class="transport-option" data-transport="sse">
+                            <span class="transport-option-name">sse</span>
+                            <span class="transport-option-desc">远程 URL</span>
+                        </button>
+                        <button type="button" class="transport-option" data-transport="streamablehttp">
+                            <span class="transport-option-name">Streamable HTTP</span>
+                            <span class="transport-option-desc">远程 HTTP</span>
+                        </button>
+                    </div>
+                    <input type="hidden" id="mcp-transport" value="stdio">
+                </div>
+                <div class="form-group" id="mcp-command-group">
+                    <label for="mcp-command">命令</label>
+                    <input type="text" id="mcp-command" placeholder="如 npx">
+                </div>
+                <div class="form-group" id="mcp-args-group">
+                    <label for="mcp-args">参数（空格分隔）</label>
+                    <input type="text" id="mcp-args" placeholder="如 -y @modelcontextprotocol/server-filesystem /tmp">
+                </div>
+                <div class="form-group" id="mcp-url-group" style="display:none">
+                    <label for="mcp-url">服务地址</label>
+                    <input type="text" id="mcp-url" placeholder="如 http://localhost:3001/sse">
+                </div>
+                <div class="form-group" id="mcp-headers-group" style="display:none">
+                    <label for="mcp-headers">请求头（JSON，可选）</label>
+                    <textarea id="mcp-headers" rows="2" placeholder='如 {"Authorization": "Bearer <token>"}'></textarea>
+                    <small>用于鉴权等自定义请求头，JSON 键值对格式</small>
+                </div>
+                <div class="form-group" id="mcp-secret-group" style="display:none">
+                    <label for="mcp-secret-value" id="mcp-secret-label">密钥</label>
+                    <input type="password" id="mcp-secret-value" placeholder="填写 Token / 密钥" autocomplete="off">
+                    <small id="mcp-secret-help"></small>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label"><input type="checkbox" id="mcp-enabled" checked> 启用</label>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="mcp-modal-cancel" class="btn-secondary">取消</button>
+                <button type="submit" id="mcp-submit-btn" class="btn-primary">立即创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- MCP 模板选择器 -->
+<div id="mcp-template-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h3>从模板创建 MCP 服务</h3>
+            <button id="mcp-template-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="page-desc">选择一个预设服务，系统会自动填好固定配置，你只需补全密钥即可创建实例。</p>
+            <div id="mcp-template-list" class="plugin-card-grid"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>window.BP_INITIAL_TOOLS_TAB = {{ tools_tab|default('builtin')|tojson }};</script>
+<script src="/static/js/tools.js?v=20260806a"></script>
+<script>initTools();</script>
+{% endblock %}

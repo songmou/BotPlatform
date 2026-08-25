@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+ $ErrorActionPreference = "Stop"
 
 $ProjectDir = $PSScriptRoot
 $VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
@@ -19,7 +19,7 @@ if (Test-Path -LiteralPath $VenvPip -PathType Leaf) {
 
 & $VenvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Codex 任务插件要求 Python 3.10 或更高版本，请重新创建 .venv。"
+    Write-Error "BotPlatform 要求 Python 3.10 或更高版本，请重新创建 .venv。"
 }
 
 if (Test-Path -LiteralPath $ModelEnvFile -PathType Leaf) {

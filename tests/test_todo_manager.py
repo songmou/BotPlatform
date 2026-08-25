@@ -37,6 +37,7 @@ class TodoManagerTests(unittest.TestCase):
         with store.database.read() as connection:
             return store._load(connection, moment("2026-01-01T00:00:00"))
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_initialization_ids_and_full_lifecycle(self) -> None:
         first = self._execute("add", title=" 编写待办测试 ", now=moment("2026-01-01T00:00:00"))
         second = self._execute("add", title="补充文档", now=moment("2026-01-01T01:00:00"))

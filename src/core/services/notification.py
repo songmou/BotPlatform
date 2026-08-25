@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from src.core.messaging import (
     RecipientUnavailable,
 )
 from src.core.storage.tenants import (
+    ConversationStore,
     TenantContext,
     TenantRegistry,
     TenantStoreError,
@@ -225,7 +227,26 @@ class NotificationOutboxStore:
     ) -> None:
         self.registry = registry
         self.now_provider = now_provider
-        self.migrate_existing_events()
+        # Idempotent migration: older databases lack the waiting_since column.
+        try:
+            with registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "ALTER TABLE notification_outbox ADD COLUMN waiting_since TEXT"
+                )
+        except (sqlite3.Error, OSError):
+            # Column already exists (or schema owned elsewhere) — ignore.
+            pass
+        # Idempotent migration: preferred_channel_id lets the dispatcher fall
+        # back within the same channel instead of blindly picking the
+        # tenant's most-recently-active endpoint (which may be a different
+        # channel, e.g. a WeChat result landing on Feishu).
+        try:
+            with registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "ALTER TABLE notification_outbox ADD COLUMN preferred_channel_id TEXT"
+                )
+        except (sqlite3.Error, OSError):
+            pass
 
     @staticmethod
     def _iso(value: datetime) -> str:
@@ -244,8 +265,9 @@ class NotificationOutboxStore:
                     "INSERT OR IGNORE INTO notification_outbox("
                     "notification_id, tenant_id, batch_id, batch_position, "
                     "source_type, source_key, source_ref, kind, text_payload, "
-                    "image_path, delivery_status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                    "image_path, selected_endpoint_id, preferred_channel_id, "
+                    "delivery_status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                     (
                         row["notification_id"],
                         row["tenant_id"],
@@ -257,6 +279,8 @@ class NotificationOutboxStore:
                         row["kind"],
                         row.get("text_payload"),
                         row.get("image_path"),
+                        row.get("selected_endpoint_id"),
+                        row.get("preferred_channel_id"),
                         row["created_at"],
                     ),
                 )
@@ -343,114 +367,6 @@ class NotificationOutboxStore:
             raise NotificationError("待办提醒入队失败")
         return dict(row)
 
-    def migrate_existing_events(self) -> int:
-        """Adopt durable Codex and due todo events created before the Outbox."""
-
-        now = self._iso(self.now_provider())
-        migrated = 0
-        with self.registry.database.transaction(immediate=True) as connection:
-            sources: List[Dict[str, Any]] = []
-            codex_rows = connection.execute(
-                "SELECT event_id, event_key, tenant_id, message, delivery_status, "
-                "attempt_count, next_attempt_at, created_at, last_error "
-                "FROM codex_task_events WHERE delivery_status IN "
-                "('pending','sending','retry','waiting_recipient')"
-            ).fetchall()
-            for row in codex_rows:
-                sources.append(
-                    {
-                        "sort_at": str(row["created_at"]),
-                        "tenant_id": str(row["tenant_id"]),
-                        "source_type": "codex",
-                        "source_key": str(row["event_key"]),
-                        "source_ref": str(row["event_id"]),
-                        "text": str(row["message"]),
-                        "status": (
-                            "waiting_recipient"
-                            if row["delivery_status"] == "waiting_recipient"
-                            else "retry"
-                            if row["delivery_status"] == "retry"
-                            else "pending"
-                        ),
-                        "attempt_count": int(row["attempt_count"]),
-                        "next_attempt_at": (
-                            row["next_attempt_at"] or now
-                            if row["delivery_status"] == "retry"
-                            else None
-                        ),
-                        "last_error": row["last_error"],
-                    }
-                )
-            todo_rows = connection.execute(
-                "SELECT event.tenant_id, event.todo_number, event.due_at, "
-                "event.delivery_status, event.attempt_count, event.created_at, "
-                "event.last_error, todo.title FROM todo_reminder_events AS event "
-                "JOIN todos AS todo ON todo.tenant_id=event.tenant_id "
-                "AND todo.todo_number=event.todo_number "
-                "WHERE event.delivery_status IN ('pending','sending') "
-                "AND event.due_at<=? AND todo.status='pending' "
-                "AND todo.reminder_at=event.due_at",
-                (now,),
-            ).fetchall()
-            for row in todo_rows:
-                sources.append(
-                    {
-                        "sort_at": str(row["created_at"]),
-                        "tenant_id": str(row["tenant_id"]),
-                        "source_type": "todo",
-                        "source_key": "{}:{}".format(
-                            row["todo_number"], row["due_at"]
-                        ),
-                        "source_ref": str(row["todo_number"]),
-                        "text": "【待办提醒】T{:04d} {}".format(
-                            int(row["todo_number"]), row["title"]
-                        ),
-                        "status": "pending",
-                        "attempt_count": int(row["attempt_count"]),
-                        "next_attempt_at": None,
-                        "last_error": row["last_error"],
-                    }
-                )
-            for item in sorted(sources, key=lambda value: value["sort_at"]):
-                notification_id = str(uuid.uuid4())
-                inserted = connection.execute(
-                    "INSERT OR IGNORE INTO notification_outbox("
-                    "notification_id, tenant_id, batch_id, batch_position, "
-                    "source_type, source_key, source_ref, kind, text_payload, "
-                    "delivery_status, attempt_count, next_attempt_at, created_at, "
-                    "last_error) VALUES (?, ?, ?, 0, ?, ?, ?, 'text', ?, ?, ?, ?, ?, ?)",
-                    (
-                        notification_id,
-                        item["tenant_id"],
-                        notification_id,
-                        item["source_type"],
-                        item["source_key"],
-                        item["source_ref"],
-                        item["text"],
-                        item["status"],
-                        item["attempt_count"],
-                        item["next_attempt_at"],
-                        item["sort_at"],
-                        item["last_error"],
-                    ),
-                ).rowcount
-                if not inserted:
-                    continue
-                migrated += 1
-                if item["source_type"] == "codex" and item["status"] != "waiting_recipient":
-                    connection.execute(
-                        "UPDATE codex_task_events SET delivery_status='sending', "
-                        "next_attempt_at=NULL WHERE event_id=?",
-                        (int(item["source_ref"]),),
-                    )
-                elif item["source_type"] == "todo":
-                    connection.execute(
-                        "UPDATE todo_reminder_events SET delivery_status='sending', "
-                        "updated_at=? WHERE tenant_id=? AND todo_number=?",
-                        (now, item["tenant_id"], int(item["source_ref"])),
-                    )
-        return migrated
-
     def claim_due(self, limit: int = 20) -> List[Dict[str, Any]]:
         now = self._iso(self.now_provider())
         lease = self._iso(self.now_provider() + timedelta(seconds=180))
@@ -467,7 +383,7 @@ class NotificationOutboxStore:
                 "WHERE earlier.tenant_id=candidate.tenant_id "
                 "AND earlier.outbox_id<candidate.outbox_id "
                 "AND earlier.delivery_status IN "
-                "('pending','sending','retry','waiting_recipient')) "
+                "('pending','sending','retry')) "
                 "ORDER BY candidate.outbox_id LIMIT ?",
                 (now, now, limit),
             ).fetchall()
@@ -538,8 +454,8 @@ class NotificationOutboxStore:
                 connection.execute(
                     "UPDATE notification_outbox SET delivery_status='waiting_recipient', "
                     "attempt_count=?, next_attempt_at=NULL, lease_expires_at=NULL, "
-                    "last_error=? WHERE outbox_id=?",
-                    (attempts, error[:1000] or None, outbox_id),
+                    "waiting_since=?, last_error=? WHERE outbox_id=?",
+                    (attempts, timestamp, error[:1000] or None, outbox_id),
                 )
             elif status == "failed":
                 image_path = str(row["image_path"]) if row["image_path"] else None
@@ -573,37 +489,7 @@ class NotificationOutboxStore:
     ) -> None:
         source_type = str(row.get("source_type") or "")
         source_ref = str(row.get("source_ref") or "")
-        if source_type == "codex" and source_ref.isdigit():
-            delivery_status = {
-                "sent": "sent",
-                "waiting_recipient": "waiting_recipient",
-                "failed": "failed",
-            }.get(status, "retry")
-            connection.execute(
-                "UPDATE codex_task_events SET delivery_status=?, attempt_count=?, "
-                "next_attempt_at=NULL, sent_at=?, last_error=? WHERE event_id=?",
-                (
-                    delivery_status,
-                    attempts,
-                    timestamp if status == "sent" else None,
-                    None if status == "sent" else (error[:1000] or None),
-                    int(source_ref),
-                ),
-            )
-            if status in ("sent", "failed"):
-                event = connection.execute(
-                    "SELECT thread_id, event_type FROM codex_task_events WHERE event_id=?",
-                    (int(source_ref),),
-                ).fetchone()
-                if event is not None and event["event_type"] in (
-                    "completed", "failed", "interrupted"
-                ):
-                    connection.execute(
-                        "UPDATE codex_task_runs SET notification_status=? "
-                        "WHERE thread_id=?",
-                        (status, event["thread_id"]),
-                    )
-        elif source_type == "todo" and source_ref.isdigit():
+        if source_type == "todo" and source_ref.isdigit():
             number = int(source_ref)
             if status == "sent":
                 connection.execute(
@@ -634,6 +520,40 @@ class NotificationOutboxStore:
             )
             return int(cursor.rowcount)
 
+    def requeue_aged_waiting_recipient(
+        self, age_seconds: int, max_attempts: int = 20
+    ) -> int:
+        """Re-attempt ``waiting_recipient`` rows that have stalled.
+
+        A row only becomes eligible once it has been waiting longer than
+        ``age_seconds`` (tracked via ``waiting_since``), so freshly-stalled
+        rows are left to the inbound-refresh path and we avoid hammering a
+        row whose recipient context can never be satisfied. Rows that have
+        already been retried ``max_attempts`` times are skipped to bound the
+        effort; they still get delivered when the user next messages (which
+        calls ``requeue_waiting_recipient`` directly).
+        """
+        threshold = self._iso(self.now_provider() - timedelta(seconds=age_seconds))
+        with self.registry.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE notification_outbox SET delivery_status='pending', "
+                "next_attempt_at=NULL, lease_expires_at=NULL "
+                "WHERE delivery_status='waiting_recipient' "
+                "AND attempt_count < ? "
+                "AND (waiting_since IS NULL OR waiting_since <= ?)",
+                (max_attempts, threshold),
+            )
+            return int(cursor.rowcount)
+
+    def count_waiting_recipient(self, tenant_id: str) -> int:
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM notification_outbox "
+                "WHERE tenant_id=? AND delivery_status='waiting_recipient'",
+                (tenant_id,),
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
     def select_endpoint(self, outbox_id: int, endpoint_id: Optional[str]) -> None:
         with self.registry.database.transaction(immediate=True) as connection:
             connection.execute(
@@ -658,7 +578,7 @@ class NotificationOutboxStore:
         referenced = {str(Path(str(row["image_path"])).resolve()) for row in rows}
         cutoff = self.now_provider().timestamp() - 600
         removed = 0
-        for tenant in self.registry.list_contexts():
+        for tenant in self.registry.list_contexts(include_internal=True):
             root = self.registry.tenant_root(tenant.tenant_id) / "notification_outbox"
             if not root.is_dir():
                 continue
@@ -690,6 +610,7 @@ class NotificationService:
         image_loader: Optional[ImageSourceLoader] = None,
         message_router: Optional[MessageRouter] = None,
         address_store: Optional[ChannelAddressStore] = None,
+        conversation_store: Optional[ConversationStore] = None,
     ) -> None:
         self.credentials_loader = credentials_loader
         self.recipient_store = recipient_store
@@ -697,10 +618,41 @@ class NotificationService:
         self.image_loader = image_loader or ImageSourceLoader()
         self.message_router = message_router
         self.address_store = address_store
+        self.conversation_store = conversation_store
         self.outbox = NotificationOutboxStore(
             recipient_store.registry,
         )
         self.outbox.cleanup_orphan_images()
+
+    def _record_delivered_context(
+        self,
+        tenant_id: str,
+        content: str,
+        *,
+        image: bool = False,
+        idempotency_key: str = "",
+    ) -> None:
+        if self.conversation_store is None:
+            return
+        delivery_key = (
+            "notification:{}".format(idempotency_key)
+            if idempotency_key
+            else ""
+        )
+        try:
+            self.conversation_store.record_outbound_message(
+                tenant_id,
+                content,
+                image=image,
+                delivery_key=delivery_key,
+            )
+        except (OSError, sqlite3.Error, TenantStoreError):
+            LOGGER.exception("记录已送达主动消息的对话上下文失败 tenant=%s", tenant_id)
+
+    def _conversation_lock(self, tenant_id: str):
+        if self.conversation_store is None:
+            return nullcontext()
+        return self.conversation_store.lock_for(tenant_id)
 
     @staticmethod
     def _source_key(base: Optional[str], position: int, count: int) -> Optional[str]:
@@ -723,6 +675,8 @@ class NotificationService:
         source_key: Optional[str] = None,
         source_ref: Optional[str] = None,
         attempt_immediately: bool = False,
+        selected_endpoint_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
     ) -> NotificationEnqueueResult:
         """Persist literal text before any delivery attempt."""
         if not isinstance(message, str) or not message.strip():
@@ -743,6 +697,8 @@ class NotificationService:
                         "source_ref": source_ref,
                         "kind": "text",
                         "text_payload": message,
+                        "selected_endpoint_id": selected_endpoint_id,
+                        "preferred_channel_id": channel_id,
                         "created_at": now,
                     }
                 ]
@@ -766,6 +722,8 @@ class NotificationService:
         source_key: Optional[str] = None,
         source_ref: Optional[str] = None,
         attempt_immediately: bool = False,
+        selected_endpoint_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
     ) -> NotificationEnqueueResult:
         """Snapshot and persist an image batch before any delivery attempt."""
         self._validate_tenant(tenant_id)
@@ -810,6 +768,8 @@ class NotificationService:
                     "source_ref": source_ref,
                     "kind": "text",
                     "text_payload": normalized_caption,
+                    "selected_endpoint_id": selected_endpoint_id,
+                    "preferred_channel_id": channel_id,
                     "created_at": now,
                 }
             )
@@ -824,6 +784,8 @@ class NotificationService:
                 "source_ref": source_ref,
                 "kind": "image",
                 "image_path": str(image_path),
+                "selected_endpoint_id": selected_endpoint_id,
+                "preferred_channel_id": channel_id,
                 "created_at": now,
             }
         )
@@ -924,12 +886,12 @@ class NotificationService:
                     str(exc),
                 )
             except NotificationImageError as exc:
-                path = self.outbox.finish(
+                cleanup_path = self.outbox.finish(
                     int(claimed["outbox_id"]), "failed", str(exc)
                 )
-                if path:
+                if cleanup_path:
                     try:
-                        Path(path).unlink()
+                        Path(cleanup_path).unlink()
                     except OSError:
                         pass
             except (NotificationError, OSError, ValueError) as exc:
@@ -951,10 +913,10 @@ class NotificationService:
                     self._retry_delay(int(claimed["attempt_count"])),
                 )
             else:
-                path = self.outbox.finish(int(claimed["outbox_id"]), "sent")
-                if path:
+                cleanup_path = self.outbox.finish(int(claimed["outbox_id"]), "sent")
+                if cleanup_path:
                     try:
-                        Path(path).unlink()
+                        Path(cleanup_path).unlink()
                     except OSError:
                         pass
                 delivered += 1
@@ -962,6 +924,11 @@ class NotificationService:
 
     def on_recipient_refreshed(self, tenant_id: str) -> int:
         return self.outbox.requeue_waiting_recipient(tenant_id)
+
+    def count_waiting_recipient(self, tenant_id: str) -> int:
+        """Return how many notifications for a tenant are stalled waiting for a
+        fresh recipient context (e.g. an expired WeChat context_token)."""
+        return self.outbox.count_waiting_recipient(tenant_id)
 
     def pin_channel(
         self,
@@ -1001,14 +968,26 @@ class NotificationService:
             if selected_id
             else None
         )
+        if endpoint is not None:
+            return endpoint
+        # No pinned endpoint: prefer a same-channel fallback so a result never
+        # silently cross-posts to another channel (e.g. a WeChat result landing
+        # on Feishu just because Feishu was the tenant's last-active endpoint).
+        # Only when there is no channel hint do we fall back to the tenant's
+        # most-recently-active endpoint across all channels.
+        channel_id = claimed.get("preferred_channel_id") or None
+        if channel_id:
+            endpoint = self.address_store.latest_endpoint(
+                str(claimed["tenant_id"]), channel_id=channel_id
+            )
         if endpoint is None:
             endpoint = self.address_store.latest_endpoint(str(claimed["tenant_id"]))
-            if endpoint is None:
-                raise NotificationRecipientError("该用户尚无有效的消息收件地址")
-            self.outbox.select_endpoint(
-                int(claimed["outbox_id"]),
-                endpoint.endpoint_id,
-            )
+        if endpoint is None:
+            raise NotificationRecipientError("该用户尚无有效的消息收件地址")
+        self.outbox.select_endpoint(
+            int(claimed["outbox_id"]),
+            endpoint.endpoint_id,
+        )
         return endpoint
 
     def send_text_to(self, recipient: Recipient, message: str) -> NotificationResult:
@@ -1030,28 +1009,36 @@ class NotificationService:
         """Send to an explicit tenant; never fall back to a last-active user."""
         if not isinstance(message, str) or not message.strip():
             raise NotificationError("通知内容不能为空")
-        if self.message_router is not None and self.address_store is not None:
-            selected = endpoint or self.address_store.latest_endpoint(
+        with self._conversation_lock(tenant_id):
+            if self.message_router is not None and self.address_store is not None:
+                selected = endpoint or self.address_store.latest_endpoint(
+                    tenant_id,
+                    channel_id=channel_id,
+                )
+                if selected is None:
+                    raise NotificationRecipientError("该用户尚无有效的消息收件地址")
+                result = self._deliver_endpoint(
+                    selected,
+                    OutboundMessage(
+                        text=message,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
+            else:
+                credentials = self._load_credentials()
+                try:
+                    recipient = self.recipient_store.load(tenant_id)
+                except (RecipientStoreError, TypeError) as exc:
+                    raise NotificationRecipientError(str(exc)) from exc
+                if recipient is None:
+                    raise NotificationRecipientError("该用户尚无有效的微信收件地址")
+                result = self._deliver(credentials, recipient, message)
+            self._record_delivered_context(
                 tenant_id,
-                channel_id=channel_id,
+                message,
+                idempotency_key=idempotency_key,
             )
-            if selected is None:
-                raise NotificationRecipientError("该用户尚无有效的消息收件地址")
-            return self._deliver_endpoint(
-                selected,
-                OutboundMessage(
-                    text=message,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        credentials = self._load_credentials()
-        try:
-            recipient = self.recipient_store.load(tenant_id)
-        except (RecipientStoreError, TypeError) as exc:
-            raise NotificationRecipientError(str(exc)) from exc
-        if recipient is None:
-            raise NotificationRecipientError("该用户尚无有效的微信收件地址")
-        return self._deliver(credentials, recipient, message)
+        return result
 
     def send_image_to(
         self,
@@ -1074,33 +1061,45 @@ class NotificationService:
         idempotency_key: str = "",
     ) -> NotificationResult:
         """Send an image to an explicit tenant recipient."""
-        if self.message_router is not None and self.address_store is not None:
-            selected = endpoint or self.address_store.latest_endpoint(
+        with self._conversation_lock(tenant_id):
+            if self.message_router is not None and self.address_store is not None:
+                selected = endpoint or self.address_store.latest_endpoint(
+                    tenant_id,
+                    channel_id=channel_id,
+                )
+                if selected is None:
+                    raise NotificationRecipientError("该用户尚无有效的消息收件地址")
+                try:
+                    image_bytes = self.image_loader.load(source)
+                except ImageSourceError as exc:
+                    raise NotificationImageError(str(exc)) from exc
+                result = self._deliver_endpoint(
+                    selected,
+                    OutboundMessage(
+                        text=caption,
+                        image_bytes=image_bytes,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
+            else:
+                credentials = self._load_credentials()
+                try:
+                    recipient = self.recipient_store.load(tenant_id)
+                except (RecipientStoreError, TypeError) as exc:
+                    raise NotificationRecipientError(str(exc)) from exc
+                if recipient is None:
+                    raise NotificationRecipientError("该用户尚无有效的微信收件地址")
+                result = self._deliver_image(credentials, recipient, source, caption)
+            context = "[主动推送图片]"
+            if caption.strip():
+                context += "\n" + caption
+            self._record_delivered_context(
                 tenant_id,
-                channel_id=channel_id,
+                context,
+                image=True,
+                idempotency_key=idempotency_key,
             )
-            if selected is None:
-                raise NotificationRecipientError("该用户尚无有效的消息收件地址")
-            try:
-                image_bytes = self.image_loader.load(source)
-            except ImageSourceError as exc:
-                raise NotificationImageError(str(exc)) from exc
-            return self._deliver_endpoint(
-                selected,
-                OutboundMessage(
-                    text=caption,
-                    image_bytes=image_bytes,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        credentials = self._load_credentials()
-        try:
-            recipient = self.recipient_store.load(tenant_id)
-        except (RecipientStoreError, TypeError) as exc:
-            raise NotificationRecipientError(str(exc)) from exc
-        if recipient is None:
-            raise NotificationRecipientError("该用户尚无有效的微信收件地址")
-        return self._deliver_image(credentials, recipient, source, caption)
+        return result
 
     def _load_credentials(self) -> Credentials:
         if self.credentials_loader is None:
@@ -1227,9 +1226,11 @@ class NotificationDispatcher:
         self,
         service: NotificationService,
         poll_interval_seconds: float = 2.0,
+        watchdog_age_seconds: int = 300,
     ) -> None:
         self.service = service
         self.poll_interval_seconds = poll_interval_seconds
+        self.watchdog_age_seconds = watchdog_age_seconds
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread = threading.Thread(
@@ -1264,6 +1265,11 @@ class NotificationDispatcher:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                # Periodically give stalled (waiting_recipient) rows another
+                # chance so a result is not held hostage to user inactivity.
+                self.service.outbox.requeue_aged_waiting_recipient(
+                    self.watchdog_age_seconds
+                )
                 while self.service.dispatch_due():
                     if self._stop.is_set():
                         return

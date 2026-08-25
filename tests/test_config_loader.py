@@ -31,6 +31,10 @@ class ConfigLoaderTests(unittest.TestCase):
     def save_json(path: Path, data) -> None:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    @staticmethod
+    def script_manifest(directory: str, folder: str) -> Path:
+        return Path(directory) / "src" / "core" / "jobs" / folder / "script.json"
+
     def test_valid_project_configuration_loads(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
         self.assertEqual(config.app.default_agent, "general")
@@ -38,7 +42,7 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertIn("translator", config.agents)
         self.assertEqual(len(config.schedules), 7)
         self.assertEqual(
-            set(config.scripts), {"autogen_monitor", "ctsehr_check"}
+            set(config.scripts), {"autogen_monitor", "ctsehr_check", "ctsoa_check"}
         )
         self.assertTrue(
             all(not script.requires_approval for script in config.scripts.values())
@@ -59,32 +63,48 @@ class ConfigLoaderTests(unittest.TestCase):
         reminder = next(
             task for task in config.schedules if task.id == "inactive_user_reminder"
         )
-        self.assertTrue(reminder.enabled)
+        self.assertTrue(all(not task.enabled for task in config.schedules))
         self.assertEqual(reminder.condition.type, "inactivity_once")
         self.assertEqual(reminder.condition.after_hours, 20)
         self.assertEqual(reminder.condition.before_hours, 24)
         self.assertTrue(config.tools.enabled)
+        self.assertTrue(config.plugins["todo"].enabled)
+        self.assertFalse(config.plugins["browser_automation"].enabled)
+        self.assertFalse(config.plugins["web_research"].enabled)
+        self.assertFalse(config.plugins["codex_tasks"].enabled)
+        self.assertFalse(config.plugins["ocr"].enabled)
+        self.assertTrue(config.plugins["ocr"].settings["auto_process_chat_images"])
+        self.assertEqual(config.plugins["ocr"].settings["model_tier"], "small")
+        self.assertEqual(config.plugins["ocr"].settings["max_pdf_pages"], 10)
+        self.assertNotIn("ocr_extract_text", config.active_agent.tools)
+        self.assertIn(
+            "ocr_extract_text", config.active_agent.plugin_tools.get("ocr", [])
+        )
         self.assertIn("run_command", config.active_agent.tools)
-        self.assertEqual(config.app.active_model, "deepseek_cloud")
+        self.assertEqual(config.active_agent.mcp_servers, [])
+        self.assertEqual(config.mcp_servers, [])
+        self.assertEqual(config.datasources, [])
+        self.assertEqual(config.app.active_model, "qwen_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
         self.assertTrue(config.active_model.enabled)
         self.assertTrue(config.models["ollama_local"].enabled)
         self.assertEqual(config.models["ollama_local"].model, "gemma4:e4b")
         self.assertEqual(config.app.local_model, "ollama_local")
         self.assertEqual(config.app.vision_model, "ollama_local")
-        self.assertFalse(config.embedding.enabled)
-        self.assertEqual(config.app.fallback_model, "deepseek_cloud")
+        self.assertEqual(config.app.embedding_model, "bge_m3_local")
+        self.assertEqual(config.app.rerank_model, "")
+        self.assertEqual(config.models["bge_m3_local"].modality, "embedding")
+        self.assertEqual(config.models["bge_m3_local"].dimensions, 1024)
+        self.assertFalse(config.models["bge_m3_local"].enabled)
+        self.assertEqual(config.app.fallback_model, "qwen_cloud")
         self.assertEqual(config.app.fallback_cooldown_seconds, 60)
-        self.assertIn("deepseek_cloud", config.models)
-        self.assertIn("deepseek_pro", config.models)
-        self.assertEqual(config.models["deepseek_cloud"].model, "deepseek-v4-flash")
-        self.assertFalse(config.models["deepseek_cloud"].capabilities.vision)
-        self.assertEqual(
-            config.models["deepseek_cloud"].request_extra["thinking"]["type"],
-            "disabled",
-        )
-        self.assertEqual(config.models["deepseek_pro"].model, "deepseek-v4-pro")
-        self.assertTrue(config.models["deepseek_pro"].capabilities.reasoning)
+        self.assertNotIn("deepseek_cloud", config.models)
+        self.assertNotIn("deepseek_pro", config.models)
+        self.assertIn("qwen_cloud", config.models)
+        self.assertTrue(config.models["qwen_cloud"].enabled)
+        self.assertEqual(config.models["qwen_cloud"].model, "qwen-flash")
+        self.assertEqual(config.models["qwen_cloud"].provider, "dashscope")
+        self.assertFalse(config.models["qwen_cloud"].capabilities.vision)
 
     def test_agent_prompts_define_user_language_and_chinese_fallback(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
@@ -103,23 +123,33 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_script_approval_defaults_to_true_and_must_be_boolean(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            path = config_dir / "scripts.json"
+            path = self.script_manifest(directory, "ctsehr")
             data = self.load_json(path)
-            ctsehr = next(item for item in data["scripts"] if item["id"] == "ctsehr_check")
-            ctsehr.pop("requires_approval")
+            data.pop("requires_approval")
             self.save_json(path, data)
             config = load_project_config(config_dir)
             self.assertTrue(config.scripts["ctsehr_check"].requires_approval)
 
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            path = config_dir / "scripts.json"
+            path = self.script_manifest(directory, "ctsehr")
             data = self.load_json(path)
-            ctsehr = next(item for item in data["scripts"] if item["id"] == "ctsehr_check")
-            ctsehr["requires_approval"] = "false"
+            data["requires_approval"] = "false"
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "requires_approval.*布尔值"):
                 load_project_config(config_dir)
+
+    def test_jobs_folder_without_manifest_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            helper_dir = Path(directory) / "src" / "core" / "jobs" / "helpers"
+            helper_dir.mkdir()
+            (helper_dir / "shared.py").write_text("VALUE = 1\n", encoding="utf-8")
+            config = load_project_config(config_dir)
+            self.assertEqual(
+                set(config.scripts),
+                {"autogen_monitor", "ctsehr_check", "ctsoa_check"},
+            )
 
     def test_invalid_tool_root_and_unknown_agent_tool_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -168,6 +198,38 @@ class ConfigLoaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "Agent id 重复.*general"):
                 load_project_config(config_dir)
 
+    def test_agent_enabled_defaults_true_and_flag_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "agents" / "translator.json"
+            data = self.load_json(path)
+            data["enabled"] = False
+            self.save_json(path, data)
+            config = load_project_config(config_dir)
+            # Field missing on disk -> enabled by default.
+            self.assertTrue(config.agents["general"].enabled)
+            self.assertFalse(config.agents["translator"].enabled)
+
+    def test_agent_enabled_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "agents" / "general.json"
+            data = self.load_json(path)
+            data["enabled"] = 1
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "enabled.*布尔值"):
+                load_project_config(config_dir)
+
+    def test_disabled_default_agent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "agents" / "general.json"
+            data = self.load_json(path)
+            data["enabled"] = False
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "默认 Agent general 必须启用"):
+                load_project_config(config_dir)
+
     def test_invalid_timezone_and_cron_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
@@ -205,6 +267,208 @@ class ConfigLoaderTests(unittest.TestCase):
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "agent_id.*missing"):
                 load_project_config(config_dir)
+
+    def test_agent_skills_and_mcp_servers_load(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            # Prepend the fixture skill so existing agent skill references
+            # (writer, coder, ...) still resolve against the copied config.
+            skills_data = self.load_json(config_dir / "skills.json")
+            skills_data["skills"].insert(
+                0,
+                {"id": "greeting_skill", "name": "问候", "prompt": "保持礼貌。", "enabled": True},
+            )
+            self.save_json(config_dir / "skills.json", skills_data)
+            self.save_json(config_dir / "mcp_servers.json", {
+                "servers": [
+                    {"id": "echo", "name": "Echo", "transport": "stdio", "command": "echo", "enabled": True}
+                ]
+            })
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["skills"] = ["greeting_skill"]
+            agent_data["mcp_servers"] = ["echo"]
+            self.save_json(agent_path, agent_data)
+
+            config = load_project_config(config_dir)
+            self.assertEqual(config.agents["general"].skills, ["greeting_skill"])
+            self.assertEqual(config.agents["general"].mcp_servers, ["echo"])
+            self.assertEqual(config.skills[0]["id"], "greeting_skill")
+            self.assertEqual(config.mcp_servers[0]["id"], "echo")
+
+    def test_mcp_server_headers_merged_from_secret_store(self) -> None:
+        import src.core.config.mcp_headers as mcp_headers
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "mcp_servers.json", {
+                "servers": [
+                    {
+                        "id": "remote_api",
+                        "name": "远程服务",
+                        "transport": "streamablehttp",
+                        "url": "https://example.com/mcp",
+                        "headers": {},
+                        "enabled": True,
+                    }
+                ]
+            })
+            headers_file = Path(directory) / "mcp_headers.json"
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["mcp_servers"] = ["remote_api"]
+            self.save_json(agent_path, agent_data)
+            with patch.object(mcp_headers, "MCP_HEADERS_FILE", headers_file):
+                mcp_headers.save_headers(
+                    "remote_api", {"Authorization": "Bearer secret-token"}
+                )
+                config = load_project_config(config_dir)
+            self.assertEqual(
+                config.mcp_servers[0]["headers"],
+                {"Authorization": "Bearer secret-token"},
+            )
+
+    def test_unknown_skill_reference_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["skills"] = ["missing_skill"]
+            self.save_json(agent_path, agent_data)
+            with self.assertRaisesRegex(ConfigError, "未知技能.*missing_skill"):
+                load_project_config(config_dir)
+
+    def test_unknown_mcp_server_reference_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent_data = self.load_json(agent_path)
+            agent_data["mcp_servers"] = ["missing_server"]
+            self.save_json(agent_path, agent_data)
+            with self.assertRaisesRegex(ConfigError, "未知 MCP 服务.*missing_server"):
+                load_project_config(config_dir)
+
+    def test_missing_plugin_binding_remains_visible_without_blocking_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            plugins_path = config_dir / "plugins.json"
+            plugins = self.load_json(plugins_path)
+            plugins["plugins"].append(
+                {
+                    "id": "retired_plugin",
+                    "enabled": True,
+                    "settings": {"legacy": True},
+                }
+            )
+            self.save_json(plugins_path, plugins)
+            agent_path = config_dir / "agents" / "general.json"
+            agent = self.load_json(agent_path)
+            agent.setdefault("plugin_tools", {})["retired_plugin"] = [
+                "retired_tool"
+            ]
+            self.save_json(agent_path, agent)
+
+            config = load_project_config(config_dir)
+            self.assertTrue(config.plugins["retired_plugin"].enabled)
+            self.assertEqual(
+                config.agents["general"].plugin_tools["retired_plugin"],
+                ["retired_tool"],
+            )
+
+    def test_installed_plugin_binding_rejects_unknown_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent = self.load_json(agent_path)
+            agent.setdefault("plugin_tools", {})["todo"] = ["missing_tool"]
+            self.save_json(agent_path, agent)
+            with self.assertRaisesRegex(
+                ConfigError,
+                r"plugin_tools\.todo\[0\].*插件中不存在的工具",
+            ):
+                load_project_config(config_dir)
+
+    def test_plugin_tool_in_tools_array_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            agent_path = config_dir / "agents" / "general.json"
+            agent = self.load_json(agent_path)
+            agent["tools"] = list(agent.get("tools") or []) + ["todo_manage"]
+            self.save_json(agent_path, agent)
+            with self.assertRaisesRegex(
+                ConfigError,
+                r"tools\[\d+\].*请写入 plugin_tools",
+            ):
+                load_project_config(config_dir)
+
+    def test_invalid_skill_and_mcp_entries_are_rejected_at_load_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "skills.json", {
+                "skills": [{"id": "Bad-Id", "name": "问候"}]
+            })
+            with self.assertRaisesRegex(ConfigError, r"skills\[0\].id"):
+                load_project_config(config_dir)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            self.save_json(config_dir / "mcp_servers.json", {
+                "servers": [{"id": "echo", "name": "Echo", "transport": "stdio"}]
+            })
+            with self.assertRaisesRegex(ConfigError, "command.*stdio"):
+                load_project_config(config_dir)
+
+    def test_runtime_updates_validate_and_mutate_lists_in_place(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        skills_ref = config.skills
+        servers_ref = config.mcp_servers
+        config.update_skills(
+            [{"id": "greeting_skill", "name": "问候", "prompt": "保持礼貌。", "enabled": True}]
+        )
+        config.update_mcp_servers(
+            [{"id": "echo", "name": "Echo", "transport": "stdio", "command": "echo", "enabled": True}]
+        )
+        # In-place mutation keeps every holder of the original list up to date.
+        self.assertIs(config.skills, skills_ref)
+        self.assertIs(config.mcp_servers, servers_ref)
+        self.assertEqual([entry["id"] for entry in skills_ref], ["greeting_skill"])
+        self.assertEqual([entry["id"] for entry in servers_ref], ["echo"])
+
+    def test_runtime_updates_reject_invalid_entries_without_side_effects(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        skills_before = list(config.skills)
+        servers_before = list(config.mcp_servers)
+
+        invalid_skill_lists = [
+            [{"id": "Bad-Id", "name": "问候"}],
+            [{"id": "dup", "name": "甲"}, {"id": "dup", "name": "乙"}],
+            [{"id": "ok_skill", "name": "问候", "surprise": 1}],
+            [{"id": "ok_skill", "name": "问候", "enabled": "yes"}],
+            [{"id": "ok_skill", "name": " "}],
+        ]
+        for skills in invalid_skill_lists:
+            with self.subTest(skills=skills):
+                with self.assertRaises(ConfigError):
+                    config.update_skills(skills)
+
+        invalid_server_lists = [
+            [{"id": "echo", "name": "Echo", "transport": "stdio"}],
+            [{"id": "echo", "name": "Echo", "transport": "carrier_pigeon", "command": "x"}],
+            [{"id": "echo", "name": "Echo", "transport": "sse"}],
+            [{"id": "echo", "name": "Echo", "transport": "stdio", "command": "x", "args": [1]}],
+            [
+                {"id": "echo", "name": "Echo", "transport": "stdio", "command": "x"},
+                {"id": "echo", "name": "Echo2", "transport": "stdio", "command": "y"},
+            ],
+        ]
+        for servers in invalid_server_lists:
+            with self.subTest(servers=servers):
+                with self.assertRaises(ConfigError):
+                    config.update_mcp_servers(servers)
+
+        # Failed updates must leave the live lists untouched.
+        self.assertEqual(config.skills, skills_before)
+        self.assertEqual(config.mcp_servers, servers_before)
 
     def test_image_schedule_supports_local_path_url_and_optional_caption(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -298,13 +562,11 @@ class ConfigLoaderTests(unittest.TestCase):
     def test_script_registry_and_schedule_parameters_are_strictly_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            outside = Path(directory) / "outside.py"
-            outside.write_text("print('outside')\n", encoding="utf-8")
-            path = config_dir / "scripts.json"
+            path = self.script_manifest(directory, "ctsehr")
             data = self.load_json(path)
-            data["scripts"][0]["entrypoint"] = "outside.py"
+            data["entrypoint"] = "../ctsoa/monitor.py"
             self.save_json(path, data)
-            with self.assertRaisesRegex(ConfigError, "src/core/jobs 目录内"):
+            with self.assertRaisesRegex(ConfigError, "脚本目录内"):
                 load_project_config(config_dir)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -329,17 +591,21 @@ class ConfigLoaderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config_dir = self.copy_config(directory)
-            path = config_dir / "scripts.json"
-            data = self.load_json(path)
-            data["scripts"].append(dict(data["scripts"][0]))
-            self.save_json(path, data)
+            duplicate_dir = Path(directory) / "src" / "core" / "jobs" / "zz_duplicate"
+            duplicate_dir.mkdir()
+            (duplicate_dir / "monitor.py").write_text(
+                "print('dup')\n", encoding="utf-8"
+            )
+            manifest = self.load_json(self.script_manifest(directory, "ctsehr"))
+            manifest["entrypoint"] = "monitor.py"
+            self.save_json(duplicate_dir / "script.json", manifest)
             with self.assertRaisesRegex(ConfigError, "脚本 id 重复"):
                 load_project_config(config_dir)
 
     def test_model_profile_override_and_disabled_active_validation(self) -> None:
-        with patch.dict("os.environ", {"MODEL_PROFILE": "deepseek_cloud"}, clear=False):
+        with patch.dict("os.environ", {"MODEL_PROFILE": "qwen_cloud"}, clear=False):
             config = load_project_config(SOURCE_CONFIG)
-            self.assertEqual(config.active_model.id, "deepseek_cloud")
+            self.assertEqual(config.active_model.id, "qwen_cloud")
         with patch.dict("os.environ", {"MODEL_PROFILE": "ollama_local"}, clear=False):
             config = load_project_config(SOURCE_CONFIG)
             self.assertEqual(config.active_model.id, "ollama_local")
@@ -377,7 +643,7 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "models.json"
             data = self.load_json(path)
-            data["profiles"]["deepseek_cloud"]["base_url"] = "http://remote.example"
+            data["profiles"]["qwen_cloud"]["base_url"] = "http://remote.example"
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "HTTPS"):
                 load_project_config(config_dir)
@@ -386,12 +652,93 @@ class ConfigLoaderTests(unittest.TestCase):
             config_dir = self.copy_config(directory)
             path = config_dir / "models.json"
             data = self.load_json(path)
-            data["profiles"]["deepseek_cloud"]["request_extra"] = {
+            data["profiles"]["qwen_cloud"]["request_extra"] = {
                 "model": "override"
             }
             self.save_json(path, data)
             with self.assertRaisesRegex(ConfigError, "不能覆盖核心字段.*model"):
                 load_project_config(config_dir)
+
+    def test_modality_defaults_to_chat_when_field_absent(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        # Existing chat profiles omit the modality field entirely.
+        self.assertEqual(config.models["qwen_cloud"].modality, "chat")
+        self.assertIsNone(config.models["qwen_cloud"].dimensions)
+
+    def test_embedding_profile_requires_positive_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "models.json"
+            data = self.load_json(path)
+            del data["profiles"]["bge_m3_local"]["dimensions"]
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "dimensions.*大于 0 的整数"):
+                load_project_config(config_dir)
+
+    def test_embedding_profile_rejects_chat_only_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "models.json"
+            data = self.load_json(path)
+            data["profiles"]["bge_m3_local"]["temperature"] = 0.5
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "包含未知字段.*temperature"):
+                load_project_config(config_dir)
+
+    def test_rerank_profile_rejects_ollama_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "models.json"
+            data = self.load_json(path)
+            data["profiles"]["local_rerank"] = {
+                "enabled": False,
+                "modality": "rerank",
+                "type": "ollama",
+                "provider": "ollama",
+                "base_url": "http://127.0.0.1:11434",
+                "model": "bge-reranker",
+                "timeout_seconds": 60,
+            }
+            self.save_json(path, data)
+            with self.assertRaisesRegex(ConfigError, "重排模型仅支持 openai_compatible 或 local_transformers"):
+                load_project_config(config_dir)
+
+    def test_local_transformers_rerank_profile_is_valid(self) -> None:
+        config = load_project_config(SOURCE_CONFIG)
+        profile = config.models["bge_reranker_v2_m3_local"]
+        self.assertEqual(profile.modality, "rerank")
+        self.assertEqual(profile.type, "local_transformers")
+        self.assertEqual(profile.base_url, "local://transformers")
+
+    def test_role_binding_modalities_are_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "app.json"
+            data = self.load_json(path)
+            data["vision_model"] = "bge_m3_local"
+            self.save_json(path, data)
+            with self.assertRaisesRegex(
+                ConfigError, "vision_model 必须引用对话（chat）"
+            ):
+                load_project_config(config_dir)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = self.copy_config(directory)
+            path = config_dir / "app.json"
+            data = self.load_json(path)
+            data["embedding_model"] = "qwen_cloud"
+            self.save_json(path, data)
+            with self.assertRaisesRegex(
+                ConfigError, "embedding_model 必须引用向量（embedding）"
+            ):
+                load_project_config(config_dir)
+
+    def test_ollama_model_override_skips_embedding_profile(self) -> None:
+        with patch.dict("os.environ", {"OLLAMA_MODEL": "custom-chat"}, clear=False):
+            config = load_project_config(SOURCE_CONFIG)
+        # OLLAMA_MODEL rewrites the chat model but leaves embedding untouched.
+        self.assertEqual(config.models["ollama_local"].model, "custom-chat")
+        self.assertEqual(config.models["bge_m3_local"].model, "bge-m3")
 
 
 if __name__ == "__main__":

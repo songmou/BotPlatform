@@ -2,7 +2,6 @@
 
 from src.core.application.bot import (
     MessageBot,
-    WeChatBot,
     delete_credentials,
     display_qr_code,
     load_credentials,
@@ -14,12 +13,10 @@ from src.core.application.cli import (
     main,
     parse_args,
     run_channel_command,
-    run_codex_hook_command,
     run_notify_command,
 )
 
 __all__ = [
-    "WeChatBot",
     "MessageBot",
     "delete_credentials",
     "display_qr_code",
@@ -29,7 +26,6 @@ __all__ = [
     "print_login_status",
     "run_bot",
     "run_channel_command",
-    "run_codex_hook_command",
     "run_notify_command",
     "save_credentials",
 ]

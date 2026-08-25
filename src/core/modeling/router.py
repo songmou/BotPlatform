@@ -14,6 +14,7 @@ from .contracts import (
     ModelRequest,
     ModelResponse,
 )
+from .retry import complete_with_retry
 
 
 FallbackLogger = Callable[[ModelIdentity, ModelIdentity, str], None]
@@ -55,7 +56,11 @@ class ModelSession:
     def complete(self, request: ModelRequest) -> ModelResponse:
         client = self._router.clients[self._profile_id]
         try:
-            return client.complete(request)
+            return complete_with_retry(
+                lambda: client.complete(request),
+                profile_id=self._profile_id,
+                sleep=self._router.retry_sleep,
+            )
         except ModelError as exc:
             if not self._router.can_fail_over(
                 self.mode, self._profile_id, has_image=self.has_image
@@ -66,7 +71,11 @@ class ModelSession:
             self._profile_id = self._router.fallback_profile_id
             target = self._router.clients[self._profile_id]
             self._router.log_fallback(source, target.identity, exc.safe_message)
-            return target.complete(request)
+            return complete_with_retry(
+                lambda: target.complete(request),
+                profile_id=self._profile_id,
+                sleep=self._router.retry_sleep,
+            )
 
     def close(self) -> None:
         return None
@@ -90,6 +99,7 @@ class ModelRouter:
         cooldown_seconds: int = 60,
         fallback_logger: Optional[FallbackLogger] = None,
         monotonic: Callable[[], float] = time.monotonic,
+        retry_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if primary_profile_id not in clients:
             raise ValueError("缺少主模型档案 {}".format(primary_profile_id))
@@ -102,9 +112,7 @@ class ModelRouter:
             "ollama_local" if "ollama_local" in clients else primary_profile_id
         )
         self.flash_profile_id = flash_profile_id or fallback_profile_id
-        self.pro_profile_id = pro_profile_id or (
-            "deepseek_pro" if "deepseek_pro" in clients else primary_profile_id
-        )
+        self.pro_profile_id = pro_profile_id or primary_profile_id
         self.vision_profile_id = vision_profile_id or next(
             (
                 profile_id
@@ -116,6 +124,7 @@ class ModelRouter:
         self.cooldown_seconds = cooldown_seconds
         self._fallback_logger = fallback_logger
         self._monotonic = monotonic
+        self.retry_sleep = retry_sleep
         self._cooldown_until = 0.0
         self._last_primary_error: Optional[str] = None
         self._lock = threading.RLock()
@@ -133,6 +142,53 @@ class ModelRouter:
             vision_profile_id=(profile_id if client.capabilities.vision else None),
             cooldown_seconds=1,
         )
+
+    def rebind(
+        self,
+        *,
+        primary: str,
+        fallback: str,
+        local: Optional[str] = None,
+        flash: Optional[str] = None,
+        pro: Optional[str] = None,
+        vision: Optional[str] = None,
+        cooldown_seconds: Optional[int] = None,
+    ) -> None:
+        """Atomically repoint routing slots to already-loaded clients.
+
+        Callers must validate ids beforehand; unknown chat ids are rejected
+        here as a last line of defence so the router never enters a state
+        where ``clients[primary_profile_id]`` raises KeyError.
+        """
+        for profile_id, label in ((primary, "主"), (fallback, "兜底")):
+            if profile_id not in self.clients:
+                raise ValueError("{}模型档案 {} 未加载".format(label, profile_id))
+        for profile_id, label in (
+            (local, "本地"),
+            (flash, "Flash"),
+            (pro, "Pro"),
+            (vision, "视觉"),
+        ):
+            if profile_id and profile_id not in self.clients:
+                raise ValueError("{}模型档案 {} 未加载".format(label, profile_id))
+        with self._lock:
+            self.primary_profile_id = primary
+            self.fallback_profile_id = fallback
+            self.local_profile_id = local or primary
+            self.flash_profile_id = flash or fallback
+            self.pro_profile_id = pro or primary
+            self.vision_profile_id = vision or next(
+                (
+                    candidate
+                    for candidate, client in self.clients.items()
+                    if client.capabilities.vision
+                ),
+                None,
+            )
+            if cooldown_seconds is not None:
+                self.cooldown_seconds = int(cooldown_seconds)
+            self._cooldown_until = 0.0
+            self._last_primary_error = None
 
     @property
     def identity(self) -> ModelIdentity:
@@ -210,6 +266,10 @@ class ModelRouter:
             has_image=has_image,
             start_profile_id=start_profile_id,
         )
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        """Complete a request through the default per-turn routing rules."""
+        return self.session().complete(request)
 
     def can_fail_over(self, mode: str, profile_id: str, *, has_image: bool) -> bool:
         return bool(

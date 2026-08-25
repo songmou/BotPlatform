@@ -1,0 +1,331 @@
+{% extends "base.html" %}
+{% block title %}模型管理 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/models.css?v=20260806a">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h2>模型管理</h2>
+                <p class="page-desc">统一管理模型配置、用量、成本、质量与预算</p>
+            </div>
+            <button id="create-model-btn" class="btn-primary">+ 添加模型</button>
+        </div>
+    </div>
+    <div class="tab-bar model-tabs">
+        <button class="tab-btn active" data-model-tab="config">模型配置</button>
+        <button class="tab-btn" data-model-tab="usage">用量与成本</button>
+        <button class="tab-btn" data-model-tab="quality">质量</button>
+        <button class="tab-btn" data-model-tab="budgets">预算预警</button>
+    </div>
+
+    <section class="model-tab-pane active" data-model-pane="config">
+        <div id="model-status" class="status-card"></div>
+        <div class="model-subnav">
+            <div class="segmented" role="tablist">
+                <button type="button" class="seg-btn active" data-model-cat="chat" role="tab">对话模型<span class="seg-count" data-cat-count="chat"></span></button>
+                <button type="button" class="seg-btn" data-model-cat="embedding" role="tab">向量模型<span class="seg-count" data-cat-count="embedding"></span></button>
+                <button type="button" class="seg-btn" data-model-cat="rerank" role="tab">重排模型<span class="seg-count" data-cat-count="rerank"></span></button>
+                <button type="button" class="seg-btn" data-model-cat="roles" role="tab">专用绑定</button>
+            </div>
+        </div>
+
+        <div id="model-list" class="card-grid"></div>
+
+        <div id="model-roles-pane" class="model-roles-pane" hidden>
+            <div class="model-roles-grid">
+                <div class="role-card">
+                    <div class="role-card-head">
+                        <span class="role-icon" aria-hidden="true">👁</span>
+                        <div class="role-card-title">
+                            <strong>视觉模型</strong>
+                            <span class="role-tag role-tag-live">即时生效</span>
+                        </div>
+                    </div>
+                    <p class="role-desc">用于识图、图文理解等视觉任务，保存后立即生效。</p>
+                    <div class="form-group">
+                        <select id="role-vision"></select>
+                    </div>
+                </div>
+                <div class="role-card">
+                    <div class="role-card-head">
+                        <span class="role-icon" aria-hidden="true">🔡</span>
+                        <div class="role-card-title">
+                            <strong>向量模型</strong>
+                            <span class="role-tag role-tag-restart">需重启</span>
+                        </div>
+                    </div>
+                    <p class="role-desc">用于知识库分块向量化与语义检索，变更后需完整重启。</p>
+                    <div class="form-group">
+                        <select id="role-embedding"></select>
+                    </div>
+                </div>
+                <div class="role-card">
+                    <div class="role-card-head">
+                        <span class="role-icon" aria-hidden="true">🎯</span>
+                        <div class="role-card-title">
+                            <strong>重排模型</strong>
+                            <span class="role-tag role-tag-restart">需重启</span>
+                        </div>
+                    </div>
+                    <p class="role-desc">用于优化知识库检索结果的排序，变更后需完整重启。</p>
+                    <div class="form-group">
+                        <select id="role-rerank"></select>
+                    </div>
+                </div>
+            </div>
+            <div class="model-roles-actions">
+                <span class="text-muted">不需要专用模型时可保持“未绑定”</span>
+                <button id="save-roles-btn" class="btn-primary" type="button">保存绑定</button>
+            </div>
+        </div>
+    </section>
+
+    <section class="model-tab-pane" data-model-pane="usage">
+        <div class="analytics-toolbar">
+            <label>时间范围
+                <select id="analytics-days">
+                    <option value="1">最近 24 小时</option>
+                    <option value="7" selected>最近 7 天</option>
+                    <option value="30">最近 30 天</option>
+                    <option value="90">最近 90 天</option>
+                </select>
+            </label>
+            <label>模型
+                <select id="analytics-profile"><option value="">全部模型</option></select>
+            </label>
+            <label>来源
+                <select id="analytics-source">
+                    <option value="">全部来源</option>
+                    <option value="web">Web</option>
+                    <option value="wechat">微信</option>
+                    <option value="schedule">定时任务</option>
+                    <option value="internal">内部任务</option>
+                </select>
+            </label>
+            <button id="analytics-refresh" class="btn-secondary">刷新</button>
+            <a id="analytics-export" class="btn-secondary" href="/api/model-analytics/export.csv">导出 CSV</a>
+        </div>
+        <div id="usage-stats" class="analytics-stats"></div>
+        <div class="analytics-grid">
+            <div class="analytics-card">
+                <h3>调用与成本趋势</h3>
+                <div id="usage-trend" class="trend-chart"></div>
+            </div>
+            <div class="analytics-card">
+                <h3>模型分布</h3>
+                <div id="usage-breakdown"></div>
+            </div>
+        </div>
+        <div class="analytics-card">
+            <div class="card-title-row">
+                <h3>运行明细</h3>
+                <small>只展示元数据，不保存提示词、回答或推理内容</small>
+            </div>
+            <div class="table-scroll"><table class="data-table">
+                <thead><tr><th>时间</th><th>来源</th><th>智能体</th><th>状态</th><th>调用</th><th>Token</th><th>成本</th></tr></thead>
+                <tbody id="model-runs-body"></tbody>
+            </table></div>
+        </div>
+    </section>
+
+    <section class="model-tab-pane" data-model-pane="quality">
+        <div id="quality-stats" class="analytics-stats"></div>
+        <div class="analytics-card">
+            <h3>质量说明</h3>
+            <p class="page-desc">质量按反馈、可用性、延迟、截断、工具失败、重试和模型切换分别呈现，不合成为单一分数。</p>
+            <div id="quality-notes" class="quality-notes"></div>
+        </div>
+    </section>
+
+    <section class="model-tab-pane" data-model-pane="budgets">
+        <div class="analytics-card">
+            <h3>新增月度预算</h3>
+            <form id="budget-form" class="budget-form">
+                <label>范围
+                    <select id="budget-scope-type">
+                        <option value="global">全局</option>
+                        <option value="tenant">租户</option>
+                        <option value="profile">模型档案</option>
+                        <option value="agent">智能体</option>
+                    </select>
+                </label>
+                <label>范围 ID
+                    <input id="budget-scope-id" placeholder="全局预算无需填写">
+                </label>
+                <label>月度金额
+                    <input id="budget-amount" type="number" min="0.000001" step="0.01" required>
+                </label>
+                <button class="btn-primary" type="submit">保存预算</button>
+            </form>
+        </div>
+        <div class="analytics-grid">
+            <div class="analytics-card">
+                <h3>本月预算进度</h3>
+                <div id="budget-list"></div>
+            </div>
+            <div class="analytics-card">
+                <h3>预警记录</h3>
+                <div id="budget-alerts"></div>
+            </div>
+        </div>
+    </section>
+</div>
+
+<!-- Modal -->
+<div id="model-modal" class="modal-overlay" style="display:none">
+    <div class="modal model-editor-modal">
+        <div class="modal-header">
+            <h3 id="model-modal-title">添加模型</h3>
+            <button id="model-modal-close" class="modal-close-btn">&times;</button>
+        </div>
+        <form id="model-form" class="modal-body" novalidate>
+            <div class="tab-bar editor-tabs" role="tablist">
+                <button type="button" class="tab-btn active" data-editor-tab="basic" role="tab" aria-selected="true">基础信息</button>
+                <button type="button" class="tab-btn" data-editor-tab="connection" role="tab" aria-selected="false">连接与鉴权</button>
+                <button type="button" class="tab-btn" data-editor-tab="params" role="tab" aria-selected="false">能力与参数</button>
+                <button type="button" class="tab-btn" data-editor-tab="pricing" role="tab" aria-selected="false">计价设置</button>
+            </div>
+
+            <div class="tab-panel" data-editor-panel="basic">
+                <div class="form-row">
+                    <div class="form-group" id="model-id-group">
+                        <label for="model-id">档案 ID</label>
+                        <input type="text" id="model-id" placeholder="如 alibaba_qwen" required pattern="^[a-z][a-z0-9_]{0,63}$">
+                        <small>小写字母开头，可含数字和下划线</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-modality">模型类型</label>
+                        <select id="model-modality">
+                            <option value="chat">对话</option>
+                            <option value="embedding">向量</option>
+                            <option value="rerank">重排</option>
+                        </select>
+                        <small>向量 / 重排模型仅用于知识库检索，保存后需完整重启生效</small>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="model-provider">厂商</label>
+                        <div class="dropdown-wrap">
+                            <input type="text" id="model-provider" placeholder="如 alibaba, deepseek, openai" autocomplete="off">
+                            <div id="provider-dropdown" class="dropdown-list" style="display:none">
+                                <div class="dropdown-item" data-value="alibaba">alibaba</div>
+                                <div class="dropdown-item" data-value="deepseek">deepseek</div>
+                                <div class="dropdown-item" data-value="openai">openai</div>
+                                <div class="dropdown-item" data-value="ollama">ollama</div>
+                                <div class="dropdown-item" data-value="zhipu">zhipu</div>
+                                <div class="dropdown-item" data-value="moonshot">moonshot</div>
+                                <div class="dropdown-item" data-value="siliconflow">siliconflow</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-type">类型</label>
+                        <select id="model-type">
+                            <option value="openai_compatible">OpenAI 兼容</option>
+                            <option value="ollama">Ollama 本地</option>
+                            <option value="local_transformers">Transformers 本地重排</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="model-name">模型名称</label>
+                    <input type="text" id="model-name" placeholder="如 qwen-plus, deepseek-chat, gpt-4o" required>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="model-enabled" checked> 启用</label>
+                </div>
+            </div>
+
+            <div class="tab-panel" data-editor-panel="connection" hidden>
+                <div class="form-group">
+                    <label for="model-base-url">API 地址</label>
+                    <input type="text" id="model-base-url" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="model-api-key">API Key</label>
+                        <input type="password" id="model-api-key" autocomplete="new-password" placeholder="初次录入密钥；编辑时留空表示保持不变">
+                        <small id="model-api-key-helper">密钥仅一次性保存，保存后不再显示明文。</small>
+                        <span id="model-api-key-status" class="badge"></span>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-timeout">超时(秒)</label>
+                        <input type="number" id="model-timeout" value="120" min="10">
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-panel" data-editor-panel="params" hidden>
+                <div class="form-group chat-only" id="model-capabilities-group">
+                    <label>能力</label>
+                    <div class="checkbox-row">
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-tools"> 工具调用</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-vision"> 视觉</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-reasoning"> 推理</label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group chat-only">
+                        <label for="model-temperature">温度</label>
+                        <input type="number" id="model-temperature" value="0.7" min="0" max="2" step="0.1">
+                    </div>
+                    <div class="form-group chat-only">
+                        <label for="model-max-tokens">最大 Token</label>
+                        <input type="number" id="model-max-tokens" value="2048" min="256" step="256">
+                    </div>
+                </div>
+                <div class="form-group embedding-only" id="model-dimensions-group" style="display:none">
+                    <label for="model-dimensions">向量维度</label>
+                    <input type="number" id="model-dimensions" min="1" step="1" placeholder="如 1024">
+                </div>
+            </div>
+
+            <div class="tab-panel" data-editor-panel="pricing" hidden>
+                <p class="panel-hint">计价单位为每百万 Token，留空表示未计价。</p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="price-input">普通输入</label>
+                        <input type="number" id="price-input" min="0" step="0.000001">
+                    </div>
+                    <div class="form-group">
+                        <label for="price-cached">缓存输入</label>
+                        <input type="number" id="price-cached" min="0" step="0.000001">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="price-output">普通输出</label>
+                        <input type="number" id="price-output" min="0" step="0.000001">
+                    </div>
+                    <div class="form-group">
+                        <label for="price-reasoning">推理输出</label>
+                        <input type="number" id="price-reasoning" min="0" step="0.000001">
+                    </div>
+                </div>
+                <small class="panel-note">统一使用系统结算币种；价格修改后需完整重启，历史调用保留原价格快照。</small>
+            </div>
+
+        </form>
+        <div class="modal-footer">
+            <button type="button" id="model-modal-cancel" class="btn-secondary">取消</button>
+            <button type="submit" form="model-form" class="btn-primary">保存</button>
+        </div>
+    </div>
+</div>
+
+<div id="run-detail-modal" class="modal-overlay" style="display:none">
+    <div class="modal analytics-detail-modal">
+        <div class="modal-header">
+            <h3>模型调用链</h3>
+            <button id="run-detail-close" class="modal-close-btn">&times;</button>
+        </div>
+        <div id="run-detail-content" class="modal-body"></div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/models.js?v=20260806d"></script>
+<script>initModels();</script>
+{% endblock %}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import ipaddress
+import logging
 import os
 import socket
 import threading
@@ -12,10 +13,15 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, cast
 from urllib.parse import urlsplit
 
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser, BrowserContext, Page, Playwright
+
 from .base import PluginContext, PluginError, PluginToolDefinition
+
+logger = logging.getLogger(__name__)
 
 
 INTERACTIVE_SELECTOR = ", ".join(
@@ -97,7 +103,7 @@ def _host_is_public(hostname: str) -> bool:
         addresses = []
         for record in records:
             try:
-                address = ipaddress.ip_address(record[4][0].split("%", 1)[0])
+                address = ipaddress.ip_address(str(record[4][0]).split("%", 1)[0])
             except ValueError:
                 return False
             if address not in addresses:
@@ -129,10 +135,10 @@ class BrowserSession:
 
     def __init__(self, config: BrowserAutomationConfig) -> None:
         self.config = config
-        self._playwright = None
-        self.browser = None
-        self.context = None
-        self.page = None
+        self._playwright: Optional[Playwright] = None
+        self.browser: Optional[Browser] = None
+        self.context: Optional[BrowserContext] = None
+        self.page: Optional[Page] = None
         self.launch_name = ""
 
     def __enter__(self) -> "BrowserSession":
@@ -214,14 +220,14 @@ class BrowserSession:
                 continue
             try:
                 item.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("关闭浏览器资源失败", exc_info=True)
         self.page = self.context = self.browser = None
         if self._playwright is not None:
             try:
                 self._playwright.stop()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                logger.warning("停止 Playwright 失败", exc_info=True)
             self._playwright = None
 
     def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
@@ -252,7 +258,7 @@ class _AgentPageController:
         assert self.session.page is not None
         self.session.page.goto(
             url,
-            wait_until=wait_until,
+            wait_until=cast(Any, wait_until),
             timeout=self.config.navigation_timeout_seconds * 1000,
         )
         return self.snapshot()
@@ -261,8 +267,8 @@ class _AgentPageController:
         for handle in self.references.values():
             try:
                 handle.dispose()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - handle may already be gone
+                logger.debug("释放页面引用失败", exc_info=True)
         self.references.clear()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -280,7 +286,7 @@ class _AgentPageController:
         if truncated:
             text = text[: self.config.max_snapshot_chars] + "……"
 
-        elements = []
+        elements: List[Dict[str, Any]] = []
         candidates = page.locator(INTERACTIVE_SELECTOR)
         scan_limit = min(candidates.count(), self.config.max_snapshot_elements * 5)
         for index in range(scan_limit):
@@ -366,7 +372,9 @@ class _AgentPageController:
         timeout_ms = timeout_seconds * 1000
         try:
             if condition == "load":
-                page.wait_for_load_state(value or "domcontentloaded", timeout=timeout_ms)
+                page.wait_for_load_state(
+                    cast(Any, value or "domcontentloaded"), timeout=timeout_ms
+                )
             elif condition == "selector":
                 if not value:
                     raise PluginError("等待元素时必须提供 value")
@@ -414,8 +422,8 @@ class _ManagedAgentSession:
         self._closed = True
         try:
             self._executor.submit(self._controller.close).result(timeout=10)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - best effort on shutdown
+            logger.warning("关闭浏览器控制器失败", exc_info=True)
         self._executor.shutdown(wait=False)
 
 
@@ -481,7 +489,11 @@ class BrowserAutomationPlugin:
             raise ValueError("browser_automation 包含未知配置：{}".format("、".join(unknown)))
         if "headless" in settings and not isinstance(settings["headless"], bool):
             raise ValueError("browser_automation.headless 必须是布尔值")
-        if "executable_path" in settings and settings["executable_path"] is not None and not isinstance(settings["executable_path"], str):
+        if (
+            "executable_path" in settings
+            and settings["executable_path"] is not None
+            and not isinstance(settings["executable_path"], str)
+        ):
             raise ValueError("browser_automation.executable_path 必须是字符串或 null")
         limits = {
             "navigation_timeout_seconds": (1, 120),

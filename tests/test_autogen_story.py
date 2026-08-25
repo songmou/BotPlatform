@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,7 @@ class AutoGenStoryTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.data_root = self.root / "autogen"
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits (0o600) are asserted")
     def test_first_story_state_is_saved_and_loaded(self) -> None:
         with patch.object(monitor, "DATA_ROOT", self.data_root):
             monitor.save_story_state(scene())
@@ -239,8 +241,18 @@ class AutoGenStoryTests(unittest.TestCase):
         page = _ResponsePage()
         monitor.attach_website_task_tracker(page, result)
         self.assertEqual(page.event, "response")
-        page.callback(_Response("https://site/api/general-ai/generate-image", {"taskId": "task-123", "content": "任务已创建"}))
-        page.callback(_Response("https://site/api/general-ai/task/task-123", {"status": "processing", "content": "正在排队"}))
+        page.callback(
+            _Response(
+                "https://site/api/general-ai/generate-image",
+                {"taskId": "task-123", "content": "任务已创建"},
+            )
+        )
+        page.callback(
+            _Response(
+                "https://site/api/general-ai/task/task-123",
+                {"status": "processing", "content": "正在排队"},
+            )
+        )
         self.assertEqual(result.website_task_id, "task-123")
         self.assertEqual(result.website_task_status, "processing")
         self.assertEqual(result.website_task_detail, "正在排队")
