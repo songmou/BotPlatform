@@ -229,6 +229,29 @@ class MainBotTests(unittest.TestCase):
         self.assertEqual(self.channel.typing_events[0][0], "start")
         self.assertEqual(self.channel.typing_events[1][0], "stop")
 
+    def test_inbound_platform_is_forwarded_as_model_source(self) -> None:
+        captured = {}
+
+        def chat(_subject, _question, **kwargs):
+            captured.update(kwargs)
+            return FinalAnswer("飞书回答")
+
+        message = InboundMessage(
+            event_id="feishu-event",
+            channel_id="wechat-main",
+            platform="feishu",
+            account_id="bot",
+            sender_id="feishu-user",
+            conversation_type=DIRECT,
+            conversation_id="feishu-user",
+            text="飞书问题",
+        )
+        with patch.object(self.agent_service, "chat", side_effect=chat):
+            self.bot.handle_inbound(message)
+        self.assertEqual(captured["source"], "feishu")
+        self.assertEqual(MessageBot._model_source("wechat_ilink"), "wechat")
+        self.assertEqual(MessageBot._model_source("wecom_aibot"), "wecom")
+
     def test_thinking_is_combined_with_answer_after_typing_stops(self) -> None:
         class ThinkingOllama(FakeOllama):
             capabilities = ModelCapabilities(tools=True, vision=True, reasoning=True)

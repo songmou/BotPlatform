@@ -32,6 +32,10 @@ _DISCONNECT_MARKERS = (
     "EndOfStream",
     "ConnectionError",
     "ConnectionResetError",
+    # A silent 30s hang (server alive but unresponsive) raises TimeoutError
+    # rather than a transport-level break.  Treat it as a disconnect so the
+    # manager still reconnects and retries once instead of failing outright.
+    "TimeoutError",
 )
 
 
@@ -125,11 +129,19 @@ class McpClientManager:
         self._timeout = timeout
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
-        self._connections: Dict[str, _Connection] = {}
-        self._token_providers: Dict[str, Any] = {}
+        # Connections are keyed by (server_id, user_id) so a user-delegated
+        # token (UAT) is bound to the right user.  user_id defaults to "" for
+        # app-level (TAT) servers that are not user-scoped.
+        self._connections: Dict[tuple, _Connection] = {}
+        self._token_providers: Dict[tuple, Any] = {}
+        self._configs: Dict[str, Dict[str, Any]] = {}
         self._provider_lock = threading.RLock()
         self._lock = threading.RLock()
         self._started = False
+
+    @staticmethod
+    def _conn_key(server_id: str, user_id: Optional[str]) -> tuple:
+        return (server_id, user_id or "")
 
     # ---- lifecycle ----
     def start(self) -> None:
@@ -156,9 +168,9 @@ class McpClientManager:
 
     def close(self) -> None:
         with self._lock:
-            for sid in list(self._connections.keys()):
+            for key in list(self._connections.keys()):
                 try:
-                    self._disconnect_locked(sid)
+                    self._disconnect_locked(key)
                 except Exception:  # noqa: BLE001 - best effort on shutdown
                     pass
             if self._loop is not None:
@@ -176,54 +188,78 @@ class McpClientManager:
             if sid:
                 wanted[sid] = cfg
         with self._lock:
-            for sid in set(self._connections.keys()) - set(wanted.keys()):
-                self._disconnect_locked(sid)
+            live_sids = {key[0] for key in self._connections.keys()}
+            for sid in live_sids - set(wanted.keys()):
+                for key in [k for k in self._connections.keys() if k[0] == sid]:
+                    self._disconnect_locked(key)
             for sid, cfg in wanted.items():
-                existing = self._connections.get(sid)
+                self._configs[sid] = cfg
+                # UAT servers without a pinned user are connected lazily, after
+                # the operator completes the Feishu OAuth flow (which creates a
+                # per-user connection).  Skip the shared bootstrap for them to
+                # avoid a noisy "missing token" failure at startup.
+                provider_cfg = cfg.get("token_provider") or {}
+                if provider_cfg.get("kind") == "feishu_uat" and not provider_cfg.get("user_id"):
+                    continue
+                existing = self._connections.get((sid, ""))
                 if existing is not None and existing.cfg == cfg:
                     continue
                 if existing is not None:
-                    self._disconnect_locked(sid)
+                    self._disconnect_locked((sid, ""))
                 try:
-                    self._connect_locked(cfg)
+                    self._connect_locked(cfg, "")
                 except Exception as exc:  # noqa: BLE001 - keep other servers alive
                     logger.warning(
                         "MCP 服务 %s 连接失败：%s", sid, _format_mcp_error(exc), exc_info=exc
                     )
 
-    def connect_server(self, cfg: Dict[str, Any]) -> List[str]:
+    def connect_server(self, cfg: Dict[str, Any], user_id: Optional[str] = None) -> List[str]:
         with self._lock:
-            self._connect_locked(cfg)
-            conn = self._connections.get(cfg["id"])
+            self._connect_locked(cfg, user_id)
+            conn = self._connections.get(self._conn_key(cfg["id"], user_id))
             return list(conn.tools.keys()) if conn else []
 
     def server_ids(self) -> List[str]:
         with self._lock:
-            return list(self._connections.keys())
+            return sorted({key[0] for key in self._connections.keys()})
 
     def tool_names(self, server_id: Optional[str] = None) -> List[str]:
         with self._lock:
             if server_id is not None:
-                conn = self._connections.get(server_id)
-                return list(conn.tools.keys()) if conn else []
+                names: List[str] = []
+                for (sid, _user_id), conn in self._connections.items():
+                    if sid != server_id:
+                        continue
+                    for name in conn.tools:
+                        if name not in names:
+                            names.append(name)
+                return names
             names: List[str] = []
             for conn in self._connections.values():
-                names.extend(conn.tools.keys())
+                for name in conn.tools:
+                    if name not in names:
+                        names.append(name)
             return names
 
     def server_tools(self, server_id: str) -> List[Dict[str, Any]]:
         with self._lock:
-            conn = self._connections.get(server_id)
-            if conn is None:
-                return []
-            return [
-                {
-                    "name": tool["real_name"],
-                    "description": tool["description"],
-                    "parameters": tool["parameters"],
-                }
-                for tool in conn.tools.values()
-            ]
+            tools: List[Dict[str, Any]] = []
+            seen = set()
+            for (sid, _user_id), conn in self._connections.items():
+                if sid != server_id:
+                    continue
+                for namespaced, tool in conn.tools.items():
+                    if namespaced in seen:
+                        continue
+                    seen.add(namespaced)
+                    tools.append(
+                        {
+                            "name": tool["real_name"],
+                            "description": tool["description"],
+                            "parameters": tool["parameters"],
+                        }
+                    )
+            return tools
 
     def has_tool(self, name: str) -> bool:
         with self._lock:
@@ -243,8 +279,10 @@ class McpClientManager:
                     }
         return None
 
-    def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
-        target = self._resolve_target(name)
+    def call_tool(
+        self, name: str, arguments: Dict[str, Any], user_id: Optional[str] = None
+    ) -> Any:
+        target = self._resolve_target(name, user_id)
         if target is None:
             raise RuntimeError("未知 MCP 工具：{}".format(name))
         server_id, session, real_name = target
@@ -253,36 +291,60 @@ class McpClientManager:
         except Exception as exc:  # noqa: BLE001 - retried once when disconnected
             if _is_disconnected(exc):
                 logger.warning("MCP 服务 %s 连接已断开，正在重连", server_id)
-                session, real_name = self._reconnect(server_id, name)
+                session, real_name = self._reconnect(server_id, name, user_id)
                 result = self._run(self._call(session, real_name, arguments))
             elif _is_auth_error(exc):
                 # Token likely expired mid-session.  Force a fresh token and
                 # reconnect so the next attempt carries a valid credential.
                 logger.warning("MCP 服务 %s 鉴权失败，强制刷新令牌并重连", server_id)
-                self._invalidate_provider(server_id)
-                session, real_name = self._reconnect(server_id, name)
+                self._invalidate_provider(server_id, user_id)
+                session, real_name = self._reconnect(server_id, name, user_id)
                 result = self._run(self._call(session, real_name, arguments))
             else:
                 raise
         return self._serialize_result(result)
 
-    def _resolve_target(self, name: str) -> Optional[tuple]:
+    def _resolve_target(
+        self, name: str, user_id: Optional[str] = None
+    ) -> Optional[tuple]:
         with self._lock:
-            for conn in self._connections.values():
+            exact = None
+            shared = None
+            fallback = None
+            for (sid, uid), conn in self._connections.items():
                 tool = conn.tools.get(name)
-                if tool is not None:
-                    return (conn.server_id, conn.session, tool["real_name"])
-        return None
+                if tool is None:
+                    continue
+                if fallback is None:
+                    fallback = (sid, conn.session, tool["real_name"])
+                if uid == "":
+                    shared = (sid, conn.session, tool["real_name"])
+                if user_id is not None and uid == user_id:
+                    exact = (sid, conn.session, tool["real_name"])
+                    break
+            if user_id is not None:
+                # A user-scoped request may use the shared app-level connection,
+                # but must never borrow another user's delegated connection.
+                return exact or shared
+            return fallback
 
-    def _reconnect(self, server_id: str, name: str) -> tuple:
+    def _reconnect(self, server_id: str, name: str, user_id: Optional[str] = None) -> tuple:
         with self._lock:
-            conn = self._connections.get(server_id)
-            if conn is None:
+            cfg = self._configs.get(server_id)
+            if cfg is None:
+                raise RuntimeError("MCP 服务 {} 未配置".format(server_id))
+            # Pick the connection key: the user-scoped one if requested, else
+            # any connection for this server.
+            conn_key = self._conn_key(server_id, user_id)
+            if conn_key not in self._connections:
+                conn_key = next(
+                    (k for k in self._connections.keys() if k[0] == server_id), None
+                )
+            if conn_key is None:
                 raise RuntimeError("MCP 服务 {} 未连接".format(server_id))
-            cfg = dict(conn.cfg)
-            self._disconnect_locked(server_id)
-            self._connect_locked(cfg)
-            conn = self._connections.get(server_id)
+            self._disconnect_locked(conn_key)
+            self._connect_locked(cfg, conn_key[1])
+            conn = self._connections.get(conn_key)
             tool = conn.tools.get(name) if conn is not None else None
             if conn is None or tool is None:
                 raise RuntimeError("未知 MCP 工具：{}".format(name))
@@ -290,7 +352,10 @@ class McpClientManager:
 
     # ---- async internals ----
     async def _connection_lifecycle(
-        self, cfg: Dict[str, Any], ready: "concurrent.futures.Future"
+        self,
+        cfg: Dict[str, Any],
+        ready: "concurrent.futures.Future",
+        user_id: Optional[str] = None,
     ) -> None:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -313,7 +378,7 @@ class McpClientManager:
                 headers = headers or None
                 provider_cfg = cfg.get("token_provider")
                 if isinstance(provider_cfg, dict) and provider_cfg.get("kind"):
-                    provider = self._resolve_provider(cfg)
+                    provider = self._resolve_provider(cfg, user_id)
                     provider_headers = await provider.get_headers()
                     headers = {**(headers or {}), **provider_headers}
                 if transport == "sse":
@@ -361,30 +426,32 @@ class McpClientManager:
     async def _set_event(event: asyncio.Event) -> None:
         event.set()
 
-    def _connect_locked(self, cfg: Dict[str, Any]) -> None:
+    def _connect_locked(self, cfg: Dict[str, Any], user_id: Optional[str] = None) -> None:
         if self._loop is None:
             raise RuntimeError("McpClientManager 尚未启动")
         sid = cfg["id"]
+        key = self._conn_key(sid, user_id)
         ready: "concurrent.futures.Future" = concurrent.futures.Future()
         task_future = asyncio.run_coroutine_threadsafe(
-            self._connection_lifecycle(cfg, ready), self._loop
+            self._connection_lifecycle(cfg, ready, user_id), self._loop
         )
         try:
             session, tools, stop_event = ready.result(timeout=self._timeout)
         except Exception:
             task_future.cancel()
             raise
-        self._connections[sid] = _Connection(
+        self._connections[key] = _Connection(
             sid, cfg, session, tools, stop_event, task_future
         )
+        self._configs[sid] = cfg
 
-    def _disconnect_locked(self, server_id: str) -> None:
-        conn = self._connections.pop(server_id, None)
+    def _disconnect_locked(self, conn_key: tuple) -> None:
+        conn = self._connections.pop(conn_key, None)
         if conn is None:
             return
         # Drop any cached token provider so the next connect re-resolves the
         # secret and re-fetches a fresh token.
-        self._invalidate_provider(server_id)
+        self._invalidate_provider(conn.server_id, conn_key[1])
         try:
             asyncio.run_coroutine_threadsafe(
                 self._set_event(conn.stop_event), self._loop
@@ -392,15 +459,16 @@ class McpClientManager:
             conn.task_future.result(timeout=10)
         except Exception as exc:  # noqa: BLE001 - best effort
             logger.warning(
-                "关闭 MCP 服务 %s 失败：%s", server_id, _format_mcp_error(exc), exc_info=exc
+                "关闭 MCP 服务 %s 失败：%s", conn.server_id, _format_mcp_error(exc), exc_info=exc
             )
             conn.task_future.cancel()
 
-    def _resolve_provider(self, cfg: Dict[str, Any]) -> Any:
+    def _resolve_provider(self, cfg: Dict[str, Any], user_id: Optional[str] = None) -> Any:
         """Return the (cached) token provider for a server, building it if needed.
 
-        Providers are cached per server id so a TAT stays in memory across the
-        lifetime of a connection.  The cache is cleared on disconnect/reconnect
+        Providers are cached per (server_id, user_id) so a TAT (app-level, no
+        user) stays in memory across the lifetime of a connection, and each
+        user's UAT is isolated.  The cache is cleared on disconnect/reconnect
         (see ``_invalidate_provider``) so a reconnect always re-fetches.
         """
         from src.core.tooling.mcp_token_providers import build_provider
@@ -411,17 +479,20 @@ class McpClientManager:
             raise RuntimeError(
                 "MCP 服务 {} 的 token_provider 配置无效".format(server_id)
             )
+        cache_key = self._conn_key(server_id, user_id)
         with self._provider_lock:
-            cached = self._token_providers.get(server_id)
+            cached = self._token_providers.get(cache_key)
             if cached is not None:
                 return cached
-            provider = build_provider(server_id, provider_cfg)
-            self._token_providers[server_id] = provider
+            provider = build_provider(server_id, provider_cfg, user_id=user_id)
+            self._token_providers[cache_key] = provider
             return provider
 
-    def _invalidate_provider(self, server_id: str) -> None:
+    def _invalidate_provider(
+        self, server_id: str, user_id: Optional[str] = None
+    ) -> None:
         with self._provider_lock:
-            self._token_providers.pop(server_id, None)
+            self._token_providers.pop(self._conn_key(server_id, user_id), None)
 
     async def _call(self, session: Any, real_name: str, arguments: Dict[str, Any]) -> Any:
         return await asyncio.wait_for(

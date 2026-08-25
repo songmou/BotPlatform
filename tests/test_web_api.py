@@ -772,6 +772,8 @@ class WebApiTest(unittest.TestCase):
         response = self.client.get("/platform/models", params=self._auth_params())
         self.assertEqual(response.status_code, 200)
         self.assertIn("model-list", response.text)
+        self.assertIn('<option value="feishu">飞书</option>', response.text)
+        self.assertIn("完整输入与输出", response.text)
 
     def test_page_agents(self):
         response = self.client.get("/platform/agent-templates", params=self._auth_params())

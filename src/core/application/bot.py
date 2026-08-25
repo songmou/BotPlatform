@@ -225,6 +225,14 @@ class MessageBot:
         config = self._channel_config(channel_id)
         return (config.agent_id or None) if config is not None else None
 
+    @staticmethod
+    def _model_source(platform: str) -> str:
+        return {
+            "wechat_ilink": "wechat",
+            "wecom_aibot": "wecom",
+            "feishu": "feishu",
+        }.get(platform, "internal")
+
     def _is_organization_channel(self, channel_id: str) -> bool:
         if self.address_store is None:
             return False
@@ -281,6 +289,28 @@ class MessageBot:
 
     def _direction(self, action: str, endpoint: DeliveryEndpoint) -> str:
         return "消息{}[{}]".format(action, endpoint.channel_id)
+
+    @staticmethod
+    def _friendly_error(exc: Exception) -> str:
+        """Map a raw exception to a user-facing message for the catch-all.
+
+        The raw error is logged to stderr (with the full traceback) but must
+        not be echoed verbatim to the user: it can contain tokens or internal
+        hostnames.  We only surface a templated hint when the error clearly
+        points at an external integration (Feishu/MCP auth) so the operator
+        gets actionable guidance instead of a generic "internal error".
+        """
+        message = str(exc).lower()
+        if any(k in message for k in (
+            "access token", "20005", "invalid token", "unauthorized",
+            "unauthenticated", "forbidden", "鉴权", "令牌", "未授权",
+            "mcp", "飞书", "feishu",
+        )):
+            return (
+                "调用外部服务（如飞书）时出错：授权可能已失效或连接异常，"
+                "请检查对应集成的授权配置后重试。"
+            )
+        return "处理消息时出现内部错误，请稍后重试。"
 
     def _cancel_approval_timer(self, user_id: Any) -> None:
         key = self._subject_key(user_id)
@@ -1122,6 +1152,7 @@ class MessageBot:
                     question,
                     image_bytes=image_bytes,
                     agent_id=self._channel_agent_id(message.channel_id),
+                    source=self._model_source(message.platform),
                     conversation_id=self._session_key(message),
                     allow_tools=message.conversation_type == DIRECT,
                     allow_private_context=message.conversation_type == DIRECT,
@@ -1141,13 +1172,10 @@ class MessageBot:
             # the full traceback, tell the user, and finish this message.
             traceback.print_exc()
             print("处理用户消息异常：{}".format(repr(exc)), file=sys.stderr)
+            reply = self._friendly_error(exc)
             try:
-                self._reply(endpoint, "处理消息时出现内部错误，请稍后重试。", tenant)
-                self._log(
-                    self._direction("输出", endpoint),
-                    user_id,
-                    "处理消息时出现内部错误，请稍后重试。",
-                )
+                self._reply(endpoint, reply, tenant)
+                self._log(self._direction("输出", endpoint), user_id, reply)
             except Exception:  # noqa: BLE001 - best effort on the error reply
                 pass
             return

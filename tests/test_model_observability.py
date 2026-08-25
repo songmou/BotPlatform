@@ -43,7 +43,7 @@ class FakeClient:
 
 
 class ObservabilityTests(unittest.TestCase):
-    def test_success_and_failure_log_only_metadata(self) -> None:
+    def test_success_and_failure_log_structured_content(self) -> None:
         logs = []
 
         def logger(*values):
@@ -55,12 +55,14 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(logs[0][2], "成功")
         self.assertEqual(logs[0][5], 1)
         self.assertEqual(logs[0][6], "request")
-        self.assertNotIn("private prompt", repr(logs[0]))
+        self.assertEqual(logs[0][11], request)
+        self.assertEqual(logs[0][12].actual_model, "actual")
 
         with self.assertRaises(ModelError):
             ObservedModelClient(FakeClient(error=True), logger).complete(request)
         self.assertEqual(logs[1][2], "失败")
-        self.assertNotIn("private prompt", repr(logs[1]))
+        self.assertEqual(logs[1][11], request)
+        self.assertIsNone(logs[1][12])
 
 
 if __name__ == "__main__":

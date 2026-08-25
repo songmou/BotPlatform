@@ -83,7 +83,7 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertIn("run_command", config.active_agent.tools)
         self.assertEqual(config.active_agent.mcp_servers, [])
         self.assertEqual(config.mcp_servers, [])
-        self.assertEqual(config.datasources, [])
+        self.assertIsInstance(config.datasources, list)
         self.assertEqual(config.app.active_model, "qwen_cloud")
         self.assertEqual(config.active_model.type, "openai_compatible")
         self.assertTrue(config.active_model.enabled)

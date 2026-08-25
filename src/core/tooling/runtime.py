@@ -765,7 +765,10 @@ class ToolRuntime:
             elif (plugin := self._plugin_tools.get(name)) is not None:
                 data = plugin.execute(name, arguments, self.tenant)
             elif self.mcp_manager is not None and self.mcp_manager.has_tool(name):
-                data = self.mcp_manager.call_tool(name, arguments)
+                # Bind the call to the real end-user so a user-delegated token
+                # (UAT) is used for user-context tools like Feishu get-user.
+                user_id = getattr(audit_context, "user_id", None) if audit_context else None
+                data = self.mcp_manager.call_tool(name, arguments, user_id=user_id)
             else:
                 handler = getattr(self, "_tool_{}".format(name), None)
                 if name not in TOOL_DEFINITIONS or not handler:
@@ -777,8 +780,21 @@ class ToolRuntime:
             status = "成功"
             output_size = len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             return ToolResult(True, data=data)
-        except (ToolError, PluginError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        except (
+            ToolError,
+            PluginError,
+            OSError,
+            ValueError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            TimeoutError,
+        ) as exc:
             error_msg = str(exc)
+            # MCP tool failures surface as RuntimeError ("MCP 工具调用失败" or
+            # the remote server's error text, e.g. "invalid access token") and
+            # silent hangs surface as TimeoutError.  Turn them into a normal
+            # tool result so the agent can explain the failure to the user and
+            # retry, instead of the raw exception crashing the message loop.
             return ToolResult(False, error=error_msg)
         finally:
             duration = time.monotonic() - started

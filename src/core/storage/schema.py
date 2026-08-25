@@ -2,7 +2,50 @@
 
 from __future__ import annotations
 
-SCHEMA_FORMAT_VERSION = 2
+SCHEMA_FORMAT_VERSION = 3
+
+
+MODEL_ANALYTICS_SCHEMA_V3 = r"""
+CREATE TABLE model_runs_v3 (
+    run_id TEXT PRIMARY KEY,
+    tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK (
+        source IN ('wechat', 'wecom', 'feishu', 'web', 'schedule', 'internal')
+    ),
+    agent_id TEXT,
+    conversation_id TEXT,
+    status TEXT NOT NULL DEFAULT 'running' CHECK (
+        status IN ('running', 'success', 'partial', 'failed', 'cancelled')
+    ),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    response_event_id INTEGER
+        REFERENCES conversation_events(event_id) ON DELETE SET NULL,
+    error_category TEXT,
+    user_id INTEGER REFERENCES admin_users(user_id) ON DELETE SET NULL
+);
+
+INSERT INTO model_runs_v3(
+    run_id, tenant_id, source, agent_id, conversation_id, status, started_at,
+    finished_at, response_event_id, error_category, user_id
+)
+SELECT
+    run_id, tenant_id, source, agent_id, conversation_id, status, started_at,
+    finished_at, response_event_id, error_category, user_id
+FROM model_runs;
+
+DROP TABLE model_runs;
+ALTER TABLE model_runs_v3 RENAME TO model_runs;
+
+CREATE INDEX ix_model_runs_started
+    ON model_runs(started_at DESC);
+
+CREATE INDEX ix_model_runs_tenant_started
+    ON model_runs(tenant_id, started_at DESC);
+
+CREATE INDEX ix_model_runs_agent_started
+    ON model_runs(agent_id, started_at DESC);
+"""
 
 
 WORKFLOW_SCHEMA_V2 = r"""
@@ -541,7 +584,9 @@ CREATE INDEX ix_conversation_delivery_receipts_tenant
 CREATE TABLE model_runs (
     run_id TEXT PRIMARY KEY,
     tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    source TEXT NOT NULL CHECK (source IN ('wechat', 'web', 'schedule', 'internal')),
+    source TEXT NOT NULL CHECK (
+        source IN ('wechat', 'wecom', 'feishu', 'web', 'schedule', 'internal')
+    ),
     agent_id TEXT,
     conversation_id TEXT,
     status TEXT NOT NULL DEFAULT 'running' CHECK (
@@ -600,6 +645,9 @@ CREATE TABLE model_calls (
     cost_status TEXT NOT NULL CHECK (
         cost_status IN ('priced', 'free', 'unpriced', 'usage_unknown')
     ),
+    request_json TEXT,
+    response_json TEXT,
+    error_message TEXT,
     UNIQUE (run_id, sequence)
 );
 

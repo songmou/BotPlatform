@@ -109,3 +109,49 @@ def delete_secret(server_id: str) -> None:
         _store().delete_secret(_secret_reference(server_id))
     except KeychainError:
         logger.warning("无法删除 MCP 服务 %s 的密钥存储", server_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-user OAuth tokens (UAT): user_access_token + refresh_token, scoped by
+# both server_id and the platform user who completed the Feishu authorization.
+# ---------------------------------------------------------------------------
+_USER_TOKEN_SERVICE = "mcp.uat"
+
+
+def _user_reference(server_id: str, user_id: str) -> KeychainReference:
+    return KeychainReference(_USER_TOKEN_SERVICE, "{}\n{}".format(server_id, user_id))
+
+
+def load_user_token(server_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Return the stored UAT payload for a (server, user), or ``None``."""
+    try:
+        raw = _store().get_secret(_user_reference(server_id, user_id))
+    except KeychainError:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        logger.warning("MCP 服务 %s 用户 %s 的 UAT 存储格式无效，已忽略", server_id, user_id)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_user_token(server_id: str, user_id: str, token: Dict[str, Any]) -> None:
+    """Persist a UAT payload (access_token/refresh_token/expiry) for a user."""
+    if not token:
+        delete_user_token(server_id, user_id)
+        return
+    payload = json.dumps(
+        {str(k): v for k, v in token.items()},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    _store().set_secret(_user_reference(server_id, user_id), payload)
+
+
+def delete_user_token(server_id: str, user_id: str) -> None:
+    """Remove a stored UAT payload for a (server, user)."""
+    try:
+        _store().delete_secret(_user_reference(server_id, user_id))
+    except KeychainError:
+        logger.warning("无法删除 MCP 服务 %s 用户 %s 的 UAT 存储", server_id, user_id)

@@ -164,6 +164,37 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsInstance(logs[0][4], int)
         self.assertNotIn(str(result.data), repr(logs[0]))
 
+    def test_mcp_runtime_error_becomes_tool_result(self) -> None:
+        # A failed MCP call (RuntimeError from _serialize_result, e.g. the
+        # remote's "invalid access token" text) must be turned into a normal
+        # ToolResult(False) rather than crashing the message loop.
+        from unittest.mock import MagicMock
+
+        fake_manager = MagicMock()
+        fake_manager.has_tool.return_value = True
+        fake_manager.call_tool.side_effect = RuntimeError(
+            "；".join(["failed to get user info: OAPI business error: code=20005"])
+        )
+        self.runtime.mcp_manager = fake_manager
+        context = ToolAuditContext("user1", "deepseek", "cloud", "actual-model")
+        result = self.runtime.execute("feishu__get-user", {}, context)
+        self.assertFalse(result.ok)
+        self.assertIn("20005", result.error)
+        # The user id must be threaded through to the MCP call.
+        _, kwargs = fake_manager.call_tool.call_args
+        self.assertEqual(kwargs.get("user_id"), "user1")
+
+    def test_mcp_timeout_becomes_tool_result(self) -> None:
+        from unittest.mock import MagicMock
+
+        fake_manager = MagicMock()
+        fake_manager.has_tool.return_value = True
+        fake_manager.call_tool.side_effect = TimeoutError("30s")
+        self.runtime.mcp_manager = fake_manager
+        result = self.runtime.execute("feishu__list-docs", {})
+        self.assertFalse(result.ok)
+        self.assertIn("30s", result.error)
+
     @unittest.skipUnless(os.name == "posix", "symlink creation needs privileges on Windows")
     def test_path_escape_symlink_and_sensitive_files_are_rejected(self) -> None:
         outside = Path(self.temp.name) / "outside.txt"

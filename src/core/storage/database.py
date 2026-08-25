@@ -12,6 +12,7 @@ from typing import Iterator
 
 from src.core.storage.schema import (
     CURRENT_SCHEMA,
+    MODEL_ANALYTICS_SCHEMA_V3,
     SCHEMA_FORMAT_VERSION,
     WORKFLOW_SCHEMA_V2,
 )
@@ -110,9 +111,9 @@ class Database:
                 "SELECT format_version FROM schema_metadata WHERE singleton=1"
             ).fetchone()
             version = int(row[0]) if row is not None else None
-            if version == 1 and SCHEMA_FORMAT_VERSION == 2:
+            if version in {1, 2} and SCHEMA_FORMAT_VERSION == 3:
                 connection.close()
-                self._backup_and_migrate_v2()
+                self._backup_and_migrate_v3(version)
                 return
             if version != SCHEMA_FORMAT_VERSION:
                 raise DatabaseError(
@@ -131,13 +132,13 @@ class Database:
             except sqlite3.Error:
                 pass
 
-    def _backup_and_migrate_v2(self) -> None:
-        """Back up and atomically add the durable workflow schema."""
+    def _backup_and_migrate_v3(self, source_version: int) -> None:
+        """Back up and atomically upgrade a supported database to v3."""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup_root = self.path.parent / "backups"
         backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        backup_path = backup_root / "{}-v1-{}{}".format(
-            self.path.stem, stamp, self.path.suffix or ".sqlite3"
+        backup_path = backup_root / "{}-v{}-{}{}".format(
+            self.path.stem, source_version, stamp, self.path.suffix or ".sqlite3"
         )
         try:
             source = sqlite3.connect(
@@ -151,12 +152,34 @@ class Database:
                 source.close()
             connection = sqlite3.connect(str(self.path), isolation_level=None)
             try:
-                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("PRAGMA foreign_keys=OFF")
                 connection.execute(
                     "PRAGMA busy_timeout={}".format(self.busy_timeout_ms)
                 )
-                connection.executescript("BEGIN IMMEDIATE;\n" + WORKFLOW_SCHEMA_V2)
-                missing = {
+                call_columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(model_calls)"
+                    ).fetchall()
+                }
+                content_columns = (
+                    "request_json",
+                    "response_json",
+                    "error_message",
+                )
+                add_content_columns = "\n".join(
+                    "ALTER TABLE model_calls ADD COLUMN {} TEXT;".format(column)
+                    for column in content_columns
+                    if column not in call_columns
+                )
+                scripts = []
+                if source_version == 1:
+                    scripts.append(WORKFLOW_SCHEMA_V2)
+                scripts.extend((MODEL_ANALYTICS_SCHEMA_V3, add_content_columns))
+                connection.executescript(
+                    "BEGIN IMMEDIATE;\n" + "\n".join(scripts)
+                )
+                missing_workflow_tables = {
                     "organization_workflows",
                     "organization_workflow_versions",
                     "workflow_runs",
@@ -169,17 +192,33 @@ class Database:
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     ).fetchall()
                 }
-                if missing:
+                if missing_workflow_tables:
                     raise DatabaseError(
-                        "工作流数据库升级缺少表：{}".format(", ".join(sorted(missing)))
+                        "工作流数据库升级缺少表：{}".format(
+                            ", ".join(sorted(missing_workflow_tables))
+                        )
+                    )
+                migrated_columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(model_calls)"
+                    ).fetchall()
+                }
+                missing_content_columns = set(content_columns) - migrated_columns
+                if missing_content_columns:
+                    raise DatabaseError(
+                        "模型观测数据库升级缺少列：{}".format(
+                            ", ".join(sorted(missing_content_columns))
+                        )
                     )
                 violations = connection.execute("PRAGMA foreign_key_check").fetchall()
                 if violations:
-                    raise DatabaseError("工作流数据库升级后的外键检查失败")
+                    raise DatabaseError("数据库升级后的外键检查失败")
                 connection.execute(
-                    "UPDATE schema_metadata SET format_version=2 WHERE singleton=1"
+                    "UPDATE schema_metadata SET format_version=3 WHERE singleton=1"
                 )
                 connection.commit()
+                connection.execute("PRAGMA foreign_keys=ON")
             except Exception:
                 connection.rollback()
                 raise
@@ -187,7 +226,7 @@ class Database:
                 connection.close()
         except (sqlite3.Error, OSError, DatabaseError) as exc:
             raise DatabaseError(
-                "工作流数据库升级失败，原数据库未修改，备份位于 {}：{}".format(
+                "数据库升级失败，原数据库未修改，备份位于 {}：{}".format(
                     backup_path, exc
                 )
             ) from exc

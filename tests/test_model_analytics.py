@@ -12,7 +12,10 @@ from src.api.app import create_app
 from src.core.config.loader import ModelPricing
 from src.core.modeling import (
     CanonicalMessage,
+    CanonicalToolCall,
+    GenerationOptions,
     ModelCallContext,
+    ModelError,
     ModelIdentity,
     ModelRequest,
     ModelResponse,
@@ -53,6 +56,27 @@ class ModelAnalyticsStoreTests(unittest.TestCase):
         self.store = ModelAnalyticsStore(self.registry, self.config)
 
     def record(self, run_id: str, *, usage: ModelUsage | None = None) -> None:
+        request = ModelRequest(
+            messages=[
+                CanonicalMessage("system", "系统提示"),
+                CanonicalMessage("user", "private prompt"),
+            ],
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            image=b"private-image-bytes",
+            generation=GenerationOptions(temperature=0.2, max_tokens=256),
+        )
+        response = ModelResponse(
+            CanonicalMessage(
+                "assistant",
+                "模型回答",
+                tool_calls=[CanonicalToolCall("call-1", "lookup", {"id": 7})],
+                extensions={"reasoning_content": "规范化推理字段"},
+            ),
+            actual_model="actual",
+            usage=usage,
+            request_id="provider-request",
+            finish_reason="tool_calls",
+        )
         self.store.record_model_call(
             ModelIdentity("test_model", "test", "configured"),
             "actual",
@@ -79,6 +103,8 @@ class ModelAnalyticsStoreTests(unittest.TestCase):
             "stop",
             0.05,
             None,
+            request,
+            response,
         )
 
     def test_cost_feedback_budget_and_tenant_cascade(self) -> None:
@@ -94,6 +120,22 @@ class ModelAnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(call["cost_micros"], 1880)
         self.assertEqual(call["cost_status"], "priced")
         self.assertEqual(call["input_price_micros_per_million"], 1_000_000)
+        self.assertEqual(call["request"]["messages"][0]["content"], "系统提示")
+        self.assertEqual(call["request"]["tools"][0]["function"]["name"], "lookup")
+        self.assertEqual(
+            call["request"]["image"],
+            {"present": True, "size_bytes": len(b"private-image-bytes")},
+        )
+        self.assertEqual(call["response"]["message"]["content"], "模型回答")
+        self.assertEqual(
+            call["response"]["message"]["tool_calls"][0]["arguments"],
+            {"id": 7},
+        )
+        with self.registry.database.read() as connection:
+            stored = connection.execute(
+                "SELECT request_json FROM model_calls WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+        self.assertNotIn("private-image-bytes", stored)
 
         self.store.put_feedback(
             run_id,
@@ -151,7 +193,23 @@ class ModelAnalyticsStoreTests(unittest.TestCase):
             self.store.run_detail(second)["calls"][0]["cost_status"], "unpriced"
         )
 
-    def test_stream_observer_records_terminal_usage_without_prompt(self) -> None:
+    def test_historical_call_without_content_returns_null(self) -> None:
+        run_id = self.store.start_run(source="internal")
+        self.store.record_model_call(
+            ModelIdentity("test_model", "test", "configured"),
+            "actual",
+            "成功",
+            0.1,
+            ModelUsage(1, 1, 2),
+            0,
+            None,
+            ModelCallContext(run_id=run_id, source="internal"),
+        )
+        call = self.store.run_detail(run_id)["calls"][0]
+        self.assertIsNone(call["request"])
+        self.assertIsNone(call["response"])
+
+    def test_stream_observer_records_terminal_usage_and_content(self) -> None:
         class StreamClient(FakeClient):
             def complete_stream(self, request):
                 yield ModelStreamEvent(text="你")
@@ -176,7 +234,98 @@ class ModelAnalyticsStoreTests(unittest.TestCase):
         self.assertEqual(chunks, ["你", "好"])
         self.assertEqual(logs[0][2], "成功")
         self.assertEqual(logs[0][4].total_tokens, 5)
-        self.assertNotIn("private prompt", repr(logs[0]))
+        self.assertEqual(logs[0][11].messages[0].content, "private prompt")
+        self.assertEqual(logs[0][12].message.content, "你好")
+
+    def test_failed_call_keeps_request_and_safe_error(self) -> None:
+        run_id = self.store.start_run(
+            tenant_id=self.tenant.tenant_id, source="feishu"
+        )
+        request = ModelRequest(messages=[CanonicalMessage("user", "失败输入")])
+        error = ModelError(
+            "模型服务暂不可用", provider="test", retryable=True
+        )
+        self.store.record_model_call(
+            ModelIdentity("test_model", "test", "configured"),
+            "configured",
+            "失败",
+            0.1,
+            None,
+            0,
+            None,
+            ModelCallContext(run_id=run_id, source="feishu"),
+            error=error,
+            request=request,
+        )
+        detail = self.store.run_detail(run_id)
+        self.assertEqual(detail["source"], "feishu")
+        self.assertEqual(detail["calls"][0]["request"]["messages"][0]["content"], "失败输入")
+        self.assertIsNone(detail["calls"][0]["response"])
+        self.assertEqual(detail["calls"][0]["error_message"], "模型服务暂不可用")
+
+    def test_tool_loop_calls_keep_each_request_and_response(self) -> None:
+        run_id = self.store.start_run(
+            tenant_id=self.tenant.tenant_id, source="feishu", agent_id="general"
+        )
+        context = ModelCallContext(
+            run_id=run_id,
+            tenant_id=self.tenant.tenant_id,
+            source="feishu",
+            operation="tool_loop",
+            agent_id="general",
+        )
+        tool_call = CanonicalToolCall("call-1", "lookup", {"query": "天气"})
+        first_response = ModelResponse(
+            CanonicalMessage("assistant", tool_calls=[tool_call])
+        )
+        first_request = ModelRequest(
+            messages=[CanonicalMessage("user", "今天天气")],
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+        )
+        self.store.record_model_call(
+            ModelIdentity("test_model", "test", "configured"),
+            "actual",
+            "成功",
+            0.1,
+            ModelUsage(10, 2, 12),
+            1,
+            "request-1",
+            context,
+            request=first_request,
+            response=first_response,
+        )
+        second_request = ModelRequest(
+            messages=[
+                CanonicalMessage("user", "今天天气"),
+                first_response.message,
+                CanonicalMessage(
+                    "tool", '{"temperature":26}', tool_call_id="call-1"
+                ),
+            ],
+            tools=first_request.tools,
+        )
+        self.store.record_model_call(
+            ModelIdentity("test_model", "test", "configured"),
+            "actual",
+            "成功",
+            0.1,
+            ModelUsage(20, 5, 25),
+            0,
+            "request-2",
+            context,
+            request=second_request,
+            response=ModelResponse(CanonicalMessage("assistant", "今天 26℃")),
+        )
+        calls = self.store.run_detail(run_id)["calls"]
+        self.assertEqual([call["sequence"] for call in calls], [1, 2])
+        self.assertEqual(
+            calls[0]["response"]["message"]["tool_calls"][0]["name"],
+            "lookup",
+        )
+        self.assertEqual(
+            calls[1]["request"]["messages"][-1]["tool_call_id"], "call-1"
+        )
+        self.assertEqual(calls[1]["response"]["message"]["content"], "今天 26℃")
 
 
 class ModelAnalyticsApiTests(unittest.TestCase):
@@ -231,11 +380,37 @@ class ModelAnalyticsApiTests(unittest.TestCase):
                 operation="answer",
                 agent_id="general",
             ),
+            request=ModelRequest(
+                messages=[CanonicalMessage("user", "接口输入")]
+            ),
+            response=ModelResponse(CanonicalMessage("assistant", "接口输出")),
         )
 
         response = self.client.get("/api/model-analytics/overview")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["call_count"], 1)
+
+        detail_response = self.client.get(
+            "/api/model-analytics/runs/{}".format(run_id)
+        )
+        self.assertEqual(detail_response.status_code, 200)
+        call = detail_response.json()["calls"][0]
+        self.assertEqual(call["request"]["messages"][0]["content"], "接口输入")
+        self.assertEqual(call["response"]["message"]["content"], "接口输出")
+        self.assertNotIn("request_json", call)
+        self.assertNotIn("response_json", call)
+        self.assertEqual(
+            self.client.get(
+                "/api/model-analytics/runs", params={"source": "feishu"}
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/model-analytics/runs", params={"source": "unknown"}
+            ).status_code,
+            400,
+        )
 
         response = self.client.put(
             "/api/model-runs/{}/feedback".format(run_id),
@@ -257,6 +432,8 @@ class ModelAnalyticsApiTests(unittest.TestCase):
         csv_response = self.client.get("/api/model-analytics/export.csv")
         self.assertEqual(csv_response.status_code, 200)
         self.assertIn("run_id", csv_response.text)
+        self.assertNotIn("接口输入", csv_response.text)
+        self.assertNotIn("接口输出", csv_response.text)
 
 
 if __name__ == "__main__":
