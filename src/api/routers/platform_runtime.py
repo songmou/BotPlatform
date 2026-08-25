@@ -585,7 +585,7 @@ def feishu_oauth_callback(
     cfg = _feishu_server_cfg(get_resource_store(request))
     app_id = _feishu_app_id(cfg)
     try:
-        payload = exchange_feishu_code(server_id, user_id, app_id, code)
+        exchange_feishu_code(server_id, user_id, app_id, code)
     except Exception as exc:  # noqa: BLE001 - show the operator what went wrong
         logger.warning("飞书 OAuth 回调失败（用户 %s）：%s", user_id, exc)
         return HTMLResponse(
