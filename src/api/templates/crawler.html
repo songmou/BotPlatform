@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}资料抓取 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/crawler.css?v=20260820c">{% endblock %}
+{% block content %}
+<section class="page-container crawler-page" id="crawler-page">
+  <div class="page-header">
+    <div><div class="organization-eyebrow">组织工作台</div><h2>资料抓取</h2>
+      <p class="page-desc">抓取 HTTP/HTTPS 网页与 PDF，保存版本、提取字段并写入知识库。</p></div>
+    <div class="crawler-actions"><button class="btn-secondary" id="crawler-refresh" type="button">刷新</button>
+      <button class="btn-primary" id="crawler-add" type="button">新建抓取源</button></div>
+  </div>
+  <div class="status-card" id="crawler-notice" hidden></div>
+  <div class="crawler-summary" id="crawler-summary"></div>
+  <div class="crawler-tabs" role="tablist">
+    <button class="active" data-crawler-tab="sources" type="button">抓取源</button>
+    <button data-crawler-tab="runs" type="button">运行记录</button>
+    <button data-crawler-tab="pages" type="button">页面版本</button>
+    <button data-crawler-tab="records" type="button">结构化数据</button>
+  </div>
+  <div class="crawler-panel" data-crawler-panel="sources"><div id="crawler-sources" class="crawler-grid"></div></div>
+  <div class="crawler-panel" data-crawler-panel="runs" hidden><div class="table-wrap"><table><thead><tr><th>状态</th><th>触发</th><th>页面</th><th>变更</th><th>记录</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="crawler-runs"></tbody></table></div></div>
+  <div class="crawler-panel" data-crawler-panel="pages" hidden><div class="table-wrap"><table><thead><tr><th>标题</th><th>网址</th><th>类型</th><th>状态</th><th>抓取时间</th><th>操作</th></tr></thead><tbody id="crawler-pages"></tbody></table></div></div>
+  <div class="crawler-panel" data-crawler-panel="records" hidden><div id="crawler-chart" class="crawler-chart"></div><div class="table-wrap"><table><thead><tr><th>模板</th><th>数据</th><th>方式</th><th>来源</th><th>抓取时间</th></tr></thead><tbody id="crawler-records"></tbody></table></div></div>
+</section>
+
+<dialog id="crawler-editor" class="crawler-dialog">
+  <form method="dialog" id="crawler-form"><div class="dialog-title"><h3 id="crawler-editor-title">新建抓取源</h3><button type="button" id="crawler-editor-close" aria-label="关闭">×</button></div>
+    <input type="hidden" id="crawler-source-id">
+    <div class="crawler-form-grid">
+      <label>名称<input id="crawler-name" type="text" maxlength="100" required></label>
+      <label>渲染方式<select id="crawler-render"><option value="auto">自动</option><option value="static">仅静态</option><option value="browser">总是浏览器</option></select></label>
+      <label class="wide">种子 URL（每行一个）<textarea id="crawler-seeds" rows="3" required></textarea></label>
+      <label class="wide">允许域名（每行一个，留空从种子推断）<textarea id="crawler-domains" rows="2"></textarea></label>
+      <label>最大深度<input id="crawler-depth" type="number" min="0" max="10" value="2"></label>
+      <label>最大页面数<input id="crawler-max-pages" type="number" min="1" max="10000" value="100"></label>
+      <label>版本保留数<input id="crawler-retention" type="number" min="1" max="20" value="5"></label>
+      <div class="crawler-form-field">五段 Cron（{{ platform_timezone }}）
+        <span class="crawler-cron-control"><input id="crawler-cron" type="text" placeholder="例如 0 1 * * *"><button class="btn-secondary" id="crawler-cron-example" type="button">每天 01:00</button></span>
+        <small>格式：分 时 日 月 周。留空表示仅手动抓取。</small>
+      </div>
+      <label class="wide">包含路径正则（每行一个）<textarea id="crawler-includes" rows="2"></textarea></label>
+      <label class="wide">排除路径正则（每行一个）<textarea id="crawler-excludes" rows="2"></textarea></label>
+      <label class="wide">目标知识库<select id="crawler-category"><option value="">不写入知识库</option></select></label>
+      <label class="wide">提取模板 JSON<textarea id="crawler-templates" rows="10" spellcheck="false">[]</textarea><small>数组项包含 name、url_pattern、schema 和 fields；HTML 使用 selector，PDF/正文使用 regex。</small></label>
+      <label class="check"><input id="crawler-enabled" type="checkbox" checked> 启用定时抓取</label>
+    </div>
+    <div class="dialog-actions"><button class="btn-secondary" value="cancel" type="button" id="crawler-cancel">取消</button><button class="btn-primary" type="submit">保存</button></div>
+  </form>
+</dialog>
+
+<dialog id="crawler-detail" class="crawler-dialog crawler-detail"><div class="dialog-title"><h3>页面版本差异</h3><button type="button" id="crawler-detail-close" aria-label="关闭">×</button></div><pre id="crawler-diff"></pre></dialog>
+{% endblock %}
+{% block scripts %}<script src="/static/js/crawler.js?v=20260820c"></script>{% endblock %}

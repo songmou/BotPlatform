@@ -17,6 +17,7 @@ from src.core.plugins.browser_automation import (
     BrowserUnavailableError,
     _AgentPageController,
     validate_public_https_url,
+    validate_web_url,
 )
 from src.core.storage.tenants import TenantRegistry
 from src.core.tooling import ToolRuntime
@@ -91,6 +92,52 @@ class BrowserCoreTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(PluginError):
                 validate_public_https_url(url)
 
+    def test_configurable_url_policy_allows_http_private_and_loopback(self) -> None:
+        private_record = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.10.20", 0))
+        ]
+        options = {
+            "allow_http": True,
+            "allow_private_network": True,
+            "allow_loopback": True,
+        }
+        with patch(
+            "src.core.plugins.browser_automation.socket.getaddrinfo",
+            return_value=private_record,
+        ):
+            validate_web_url("http://intranet.test/path", **options)
+        validate_web_url("http://localhost:8080/health", **options)
+        validate_web_url("https://127.0.0.1/status", **options)
+        validate_web_url("http://[::1]:8080/status", **options)
+        validate_web_url("ws://127.0.0.1/socket", subresource=True, **options)
+        for url in (
+            "http://169.254.169.254/latest/meta-data",
+            "http://224.0.0.1/",
+            "http://0.0.0.0/",
+            "http://192.0.2.1/",
+            "http://100.64.0.1/",
+            "file:///tmp/private",
+        ):
+            with self.subTest(url=url), self.assertRaises(PluginError):
+                validate_web_url(url, **options)
+
+    def test_browser_session_route_uses_its_network_policy(self) -> None:
+        request = SimpleNamespace(
+            url="http://127.0.0.1:8080/app.js",
+            is_navigation_request=lambda: False,
+        )
+        permissive_route = MagicMock()
+        BrowserSession(BrowserAutomationConfig(
+            allow_http=True,
+            allow_private_network=True,
+            allow_loopback=True,
+        ))._route_request(permissive_route, request)
+        permissive_route.continue_.assert_called_once_with()
+
+        strict_route = MagicMock()
+        BrowserSession(BrowserAutomationConfig())._route_request(strict_route, request)
+        strict_route.abort.assert_called_once_with("blockedbyclient")
+
     def test_stale_element_reference_is_rejected(self) -> None:
         controller = object.__new__(_AgentPageController)
         controller.session = SimpleNamespace(page=SimpleNamespace(url="https://example.com"))
@@ -163,10 +210,10 @@ class PluginFrameworkTests(unittest.TestCase):
         self.assertEqual(logs[0][1:3], ("fake_read", "成功"))
         self.assertTrue(plugin.closed)
 
-    def test_browser_plugin_is_disabled_by_default_and_tools_are_prebound(self) -> None:
+    def test_browser_plugin_is_enabled_by_default_and_tools_are_prebound(self) -> None:
         config = load_project_config(SOURCE_CONFIG)
         plugin_config = config.plugins["browser_automation"]
-        self.assertFalse(plugin_config.enabled)
+        self.assertTrue(plugin_config.enabled)
         plugin = BrowserAutomationPlugin(plugin_config.settings)
         try:
             self.assertIn(

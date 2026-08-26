@@ -106,6 +106,8 @@ class KnowledgeHit:
     drive_scope: Optional[str] = None
     drive_tenant_id: Optional[str] = None
     drive_path: Optional[str] = None
+    source_url: Optional[str] = None
+    fetched_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         download_url = None
@@ -134,6 +136,8 @@ class KnowledgeHit:
             "drive_tenant_id": self.drive_tenant_id,
             "drive_path": self.drive_path,
             "download_url": download_url,
+            "source_url": self.source_url,
+            "fetched_at": self.fetched_at,
         }
 
 
@@ -457,6 +461,34 @@ class KnowledgeService:
             )
         return self._index(category, "text", name, content)
 
+    def upsert_web_source(
+        self,
+        tenant_id: str,
+        category_id: str,
+        name: str,
+        content: str,
+        source_url: str,
+        crawl_page_id: str,
+        fetched_at: str,
+        source_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Index one crawled page while preserving its canonical citation URL."""
+        category = self._category_for_tenant(category_id, tenant_id)
+        if category["scope"] != "tenant":
+            raise ValueError("网页抓取内容只能写入当前组织知识库")
+        name = _clean_name(name, "知识名称")
+        source_url = _clean_name(source_url, "来源网址")
+        return self._index(
+            category,
+            "web",
+            name,
+            content,
+            source_id=source_id,
+            source_url=source_url,
+            crawl_page_id=crawl_page_id,
+            fetched_at=fetched_at,
+        )
+
     def index_file(
         self,
         tenant: TenantContext,
@@ -608,6 +640,9 @@ class KnowledgeService:
         file_size: Optional[int] = None,
         file_mtime_ns: Optional[int] = None,
         source_id: Optional[str] = None,
+        source_url: Optional[str] = None,
+        crawl_page_id: Optional[str] = None,
+        fetched_at: Optional[str] = None,
     ) -> Dict[str, Any]:
         chunks = self._chunks(content)
         digest = _hash(content)
@@ -641,7 +676,7 @@ class KnowledgeService:
                     "WHERE category_id=? AND source_type='text' AND name=?",
                     (category["category_id"], name),
                 ).fetchone()
-            else:
+            elif source_type == "file":
                 existing = connection.execute(
                     "SELECT source_id, content_hash, status FROM knowledge_sources "
                     "WHERE category_id=? AND source_type='file' AND drive_scope=? "
@@ -652,6 +687,12 @@ class KnowledgeService:
                         drive_tenant_id,
                         drive_path,
                     ),
+                ).fetchone()
+            elif source_type == "web":
+                existing = connection.execute(
+                    "SELECT source_id, content_hash, status FROM knowledge_sources "
+                    "WHERE category_id=? AND source_type='web' AND source_url=?",
+                    (category["category_id"], source_url),
                 ).fetchone()
             if existing and existing["content_hash"] == digest and str(
                 existing["status"]
@@ -664,8 +705,14 @@ class KnowledgeService:
                 )
                 connection.execute(
                     "UPDATE knowledge_sources SET file_size=?, file_mtime_ns=?, "
-                    "last_error=NULL, updated_at=? WHERE source_id=?",
-                    (file_size, file_mtime_ns, _now(), existing["source_id"]),
+                    "source_url=COALESCE(?, source_url), "
+                    "crawl_page_id=COALESCE(?, crawl_page_id), "
+                    "fetched_at=COALESCE(?, fetched_at), last_error=NULL, updated_at=? "
+                    "WHERE source_id=?",
+                    (
+                        file_size, file_mtime_ns, source_url, crawl_page_id,
+                        fetched_at, _now(), existing["source_id"],
+                    ),
                 )
                 return {
                     "source_id": str(existing["source_id"]),
@@ -694,7 +741,8 @@ class KnowledgeService:
                 )
                 connection.execute(
                     "UPDATE knowledge_sources SET category_id=?, tenant_id=?, source_type=?, "
-                    "name=?, relative_path=?, drive_scope=?, drive_tenant_id=?, drive_path=?, "
+                    "name=?, source_url=?, crawl_page_id=?, fetched_at=?, relative_path=?, "
+                    "drive_scope=?, drive_tenant_id=?, drive_path=?, "
                     "file_size=?, file_mtime_ns=?, content_hash=?, status=?, last_error=?, "
                     "updated_at=? WHERE source_id=?",
                     (
@@ -702,6 +750,9 @@ class KnowledgeService:
                         tenant_id,
                         source_type,
                         name,
+                        source_url,
+                        crawl_page_id,
+                        fetched_at,
                         relative_path,
                         drive_scope,
                         drive_tenant_id,
@@ -719,16 +770,20 @@ class KnowledgeService:
                 created = _now()
                 connection.execute(
                     "INSERT INTO knowledge_sources("
-                    "source_id, category_id, tenant_id, source_type, name, relative_path, "
+                    "source_id, category_id, tenant_id, source_type, name, "
+                    "source_url, crawl_page_id, fetched_at, relative_path, "
                     "drive_scope, drive_tenant_id, drive_path, file_size, file_mtime_ns, "
                     "content_hash, status, last_error, created_at, updated_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         resolved_source_id,
                         category["category_id"],
                         tenant_id,
                         source_type,
                         name,
+                        source_url,
+                        crawl_page_id,
+                        fetched_at,
                         relative_path,
                         drive_scope,
                         drive_tenant_id,
@@ -1123,13 +1178,14 @@ class KnowledgeService:
         with self.registry.database.read() as connection:
             source = connection.execute(
                 "SELECT source_id, source_type, name, drive_scope, "
-                "drive_tenant_id, drive_path FROM knowledge_sources "
+                "drive_tenant_id, drive_path, source_url, fetched_at "
+                "FROM knowledge_sources "
                 "WHERE source_id=?",
                 (source_id,),
             ).fetchone()
             if source is None:
                 raise ValueError("未找到知识来源")
-            if source["source_type"] == "text":
+            if source["source_type"] in {"text", "web"}:
                 rows = connection.execute(
                     "SELECT heading, content FROM knowledge_chunks "
                     "WHERE source_id=? ORDER BY position",
@@ -1158,6 +1214,8 @@ class KnowledgeService:
             "name": str(source["name"]),
             "content": content[:MAX_PREVIEW_CHARACTERS],
             "truncated": truncated,
+            "source_url": source["source_url"],
+            "fetched_at": source["fetched_at"],
         }
 
     def _list_category_ids(
@@ -1171,6 +1229,7 @@ class KnowledgeService:
             rows = connection.execute(
                 "SELECT s.source_id, s.category_id, c.name AS category_name, "
                 "c.scope AS category_scope, s.source_type, s.name, s.relative_path, "
+                "s.source_url, s.crawl_page_id, s.fetched_at, "
                 "s.drive_scope, s.drive_tenant_id, s.drive_path, s.status, s.last_error, "
                 "s.updated_at, COUNT(ch.chunk_id) AS chunks FROM knowledge_sources s "
                 "JOIN knowledge_categories c ON c.category_id=s.category_id "
@@ -1333,6 +1392,7 @@ class KnowledgeService:
             rows = connection.execute(
                 "SELECT ch.chunk_id, ch.source_id, s.name AS source_name, "
                 "s.source_type, s.drive_scope, s.drive_tenant_id, s.drive_path, "
+                "s.source_url, s.fetched_at, "
                 "ch.category_id, c.name AS category_name, c.scope AS category_scope, "
                 "ch.heading, ch.content, ch.locator "
                 "FROM knowledge_chunks ch JOIN knowledge_sources s "
@@ -1375,6 +1435,12 @@ class KnowledgeService:
                     else None
                 ),
                 drive_path=str(row["drive_path"]) if row["drive_path"] else None,
+                source_url=(
+                    str(row["source_url"]) if row["source_url"] else None
+                ),
+                fetched_at=(
+                    str(row["fetched_at"]) if row["fetched_at"] else None
+                ),
             ).to_dict()
             hit["retrieval_sources"] = [
                 name

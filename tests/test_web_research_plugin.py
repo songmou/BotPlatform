@@ -105,7 +105,7 @@ class ConfigAndDefinitionTests(unittest.TestCase):
 
         project = load_project_config(SOURCE_CONFIG)
         plugin_config = project.plugins["web_research"]
-        self.assertFalse(plugin_config.enabled)
+        self.assertTrue(plugin_config.enabled)
         for agent_id in ("researcher", "general"):
             tools = set(
                 project.agents[agent_id].plugin_tools["web_research"]

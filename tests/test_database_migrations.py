@@ -98,7 +98,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             ).fetchone()[0]
             self.assertEqual(count, 1)
 
-    def test_v2_database_is_backed_up_and_upgraded_to_v3(self) -> None:
+    def test_v2_database_is_backed_up_and_upgraded_to_current(self) -> None:
         legacy_schema = CURRENT_SCHEMA.replace(
             "__SCHEMA_FORMAT_VERSION__", "2"
         ).replace(
@@ -137,7 +137,7 @@ class DatabaseSchemaTests(unittest.TestCase):
                 connection.execute(
                     "SELECT format_version FROM schema_metadata WHERE singleton=1"
                 ).fetchone()[0],
-                3,
+                SCHEMA_FORMAT_VERSION,
             )
             self.assertEqual(
                 connection.execute(
@@ -171,6 +171,9 @@ class DatabaseSchemaTests(unittest.TestCase):
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
         self.assertEqual(
             len(list((self.path.parent / "backups").glob("*-v2-*.sqlite3"))), 1
+        )
+        self.assertEqual(
+            len(list((self.path.parent / "backups").glob("*-v3-*.sqlite3"))), 1
         )
 
     def test_foreign_keys_are_enforced(self) -> None:

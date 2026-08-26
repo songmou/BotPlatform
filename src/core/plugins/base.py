@@ -40,6 +40,8 @@ class PluginContext:
     plugin_id: str = ""
     env_resolver: Optional[Any] = None
     env_allowlist: Tuple[str, ...] = ()
+    knowledge_service: Optional[Any] = None
+    model_router: Optional[Any] = None
 
     def env(self, tenant_id: str, name: str, default: str = "") -> str:
         """Resolve a declared environment variable for a tenant.

@@ -44,12 +44,36 @@ function initOrganizationModule(requestedModule) {
     };
 
     function request(url, options) {
-        return fetch(url, options).then(function (response) {
+        options = options || {};
+        var timeout = options.timeout;
+        var fetchOptions = {};
+        for (var k in options) {
+            if (k === "timeout") continue;
+            if (Object.prototype.hasOwnProperty.call(options, k)) fetchOptions[k] = options[k];
+        }
+        var controller = null;
+        if (timeout && typeof AbortController !== "undefined") {
+            controller = new AbortController();
+            fetchOptions.signal = controller.signal;
+        }
+        var promise = fetch(url, fetchOptions).then(function (response) {
             return response.json().catch(function () { return {}; }).then(function (body) {
                 if (!response.ok) throw new Error(body.detail || "请求失败");
                 return body;
             });
         });
+        if (controller && timeout) {
+            promise = Promise.race([
+                promise,
+                new Promise(function (_resolve, reject) {
+                    setTimeout(function () {
+                        try { controller.abort(); } catch (e) {}
+                        reject(new Error("请求超时，请重试"));
+                    }, timeout);
+                })
+            ]);
+        }
+        return promise;
     }
 
     function loadAgentOptions() {
@@ -300,7 +324,7 @@ function initOrganizationModule(requestedModule) {
                 : '<div class="wecom-qr-placeholder">正在生成二维码…</div>') +
                 '<p class="wechat-connect-hint">' + hint + "</p>";
         }
-        if (status.connected || status.state === "success") {
+        if ((status.connected || status.state === "success") && !status.qr) {
             return '<div class="wechat-connect-status">' +
                 '<span class="badge badge-success">已连接</span>' +
                 (status.bot_id ? '<span class="text-muted"> bot_id: ' + escapeHtml(status.bot_id) + "</span>" : "") +
@@ -319,8 +343,9 @@ function initOrganizationModule(requestedModule) {
             '<button type="button" class="btn-primary" data-action="channel-wechat-login">扫码登录</button>';
     }
 
-    function pollChannelWechatStatus(channelId, modalMode, onConnected, isPersonal) {
+    function pollChannelWechatStatus(channelId, modalMode, onConnected, isPersonal, deadline) {
         stopChannelWechatPoll();
+        if (deadline === undefined) deadline = Date.now() + 180000;
         var qrArea = document.getElementById("organization-channel-wechat-qr-area");
         request(channelEndpoint(channelId, isPersonal, "/wechat/status")).then(function (status) {
             if (!qrArea) return;
@@ -337,8 +362,14 @@ function initOrganizationModule(requestedModule) {
             }
             qrArea.innerHTML = channelWechatStatusHtml(status);
             if (status.state === "pending" || status.state === "scanned") {
+                if (Date.now() > deadline) {
+                    qrArea.innerHTML = '<div class="wechat-connect-status"><span class="badge badge-muted">机器人未连接</span></div>' +
+                        '<p class="wechat-connect-error">等待超时，请重新扫码。</p>' +
+                        '<button type="button" class="btn-primary" data-action="channel-wechat-login">刷新二维码</button>';
+                    return;
+                }
                 channelWechatTimer = setTimeout(function () {
-                    pollChannelWechatStatus(channelId, modalMode, onConnected, isPersonal);
+                    pollChannelWechatStatus(channelId, modalMode, onConnected, isPersonal, deadline);
                 }, 2000);
             }
         }).catch(function () {
@@ -349,9 +380,24 @@ function initOrganizationModule(requestedModule) {
     function startChannelWechatLogin(channelId, modalMode, onConnected, isPersonal) {
         var qrArea = document.getElementById("organization-channel-wechat-qr-area");
         if (qrArea) qrArea.innerHTML = '<div class="wecom-qr-placeholder">正在生成二维码…</div>';
-        request(channelEndpoint(channelId, isPersonal, "/wechat/login"), { method: "POST" })
-            .then(function () { pollChannelWechatStatus(channelId, modalMode, onConnected, isPersonal); })
-            .catch(function (error) { showToast("启动扫码失败：" + error.message, "error"); });
+        var attempt = 0;
+        function tryLogin() {
+            attempt += 1;
+            request(channelEndpoint(channelId, isPersonal, "/wechat/login"), { method: "POST", timeout: 20000 })
+                .then(function () { pollChannelWechatStatus(channelId, modalMode, onConnected, isPersonal); })
+                .catch(function (error) {
+                    if (attempt < 3) {
+                        setTimeout(tryLogin, 1000 * attempt);
+                        return;
+                    }
+                    if (qrArea) {
+                        qrArea.innerHTML = '<div class="wechat-connect-status"><span class="badge badge-muted">机器人未连接</span></div>' +
+                            '<p class="wechat-connect-error">' + escapeHtml(error.message) + '</p>' +
+                            '<button type="button" class="btn-primary" data-action="channel-wechat-login">刷新二维码</button>';
+                    }
+                });
+        }
+        tryLogin();
     }
 
     var channelFeishuTimer = null;

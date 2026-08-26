@@ -276,15 +276,28 @@ class ILinkClient:
         show_qr: Callable[[str], None],
         max_refreshes: int = 3,
         status_changed: Optional[Callable[[str], None]] = None,
-    ) -> Credentials:
+        stop_event: Optional[threading.Event] = None,
+    ) -> Optional[Credentials]:
+        """Run the QR login loop until confirmed, expired, cancelled, or failed.
+
+        Returns the confirmed ``Credentials`` on success, or ``None`` if the
+        session was cancelled via ``stop_event`` before confirmation. The caller
+        (WeChatLoginManager) treats ``None`` as "do not persist".
+        """
         refreshes = 0
         last_status = ""
         while refreshes <= max_refreshes:
+            if stop_event is not None and stop_event.is_set():
+                return None
             qr_data = self.get_qr_code()
+            if stop_event is not None and stop_event.is_set():
+                return None
             show_qr(str(qr_data["qrcode_img_content"]))
             qrcode_token = str(qr_data["qrcode"])
 
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    return None
                 status_data = self.get_qr_status(qrcode_token)
                 status = str(status_data.get("status", "wait"))
                 if status != last_status and status_changed:

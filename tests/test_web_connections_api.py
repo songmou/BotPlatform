@@ -149,7 +149,7 @@ class ConnectionsApiTests(WebApiTestBase):
                 }
 
         class _FakeClient:
-            def login(self, show_qr, status_changed=None):
+            def login(self, show_qr, status_changed=None, stop_event=None):
                 return _FakeCredentials()
 
             def close(self):
@@ -508,7 +508,7 @@ class ConnectionsApiTests(WebApiTestBase):
                 }
 
         class _FakeClient:
-            def login(self, show_qr, status_changed=None):
+            def login(self, show_qr, status_changed=None, stop_event=None):
                 return _FakeCredentials()
 
             def close(self):

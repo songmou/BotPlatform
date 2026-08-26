@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.core.storage.database import Database, DatabaseError
+from src.core.storage.schema import SCHEMA_FORMAT_VERSION
 from src.core.workflows.definition import (
     NODE_CATALOG,
     WorkflowValidationError,
@@ -948,7 +949,12 @@ class WorkflowMigrationTests(unittest.TestCase):
                 connection.execute("UPDATE schema_metadata SET format_version=1 WHERE singleton=1")
             upgraded = Database(path)
             with upgraded.read() as connection:
-                self.assertEqual(connection.execute("SELECT format_version FROM schema_metadata").fetchone()[0], 3)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT format_version FROM schema_metadata"
+                    ).fetchone()[0],
+                    SCHEMA_FORMAT_VERSION,
+                )
                 self.assertEqual(
                     connection.execute("SELECT COUNT(*) FROM tenants WHERE tenant_id='preserved'").fetchone()[0],
                     1,

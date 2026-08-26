@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ from src.api.deps import (
     get_config,
     get_plugin_manager,
     get_registry,
+    get_resource_store,
     get_tool_audit_store,
     get_tool_runtime,
     require_permission,
@@ -46,6 +48,7 @@ from src.core.plugins.setup import (
     PluginSetupBusyError,
     default_setup_service,
 )
+from src.core.services.resources import ResourceError
 
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
@@ -352,7 +355,7 @@ def update_plugin(
     plugin_id: str,
     body: PluginUpdate,
     request: Request,
-    _principal=Depends(require_permission("plugins.manage")),
+    principal=Depends(require_permission("plugins.manage")),
 ):
     manifest = default_catalog().get(plugin_id)
     if manifest is None:
@@ -370,7 +373,8 @@ def update_plugin(
         manifest.validate_settings(settings)
     except (ValueError, PluginManifestError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    data = _load_plugins_json()
+    original_data = _load_plugins_json()
+    data = deepcopy(original_data)
     entries = data.setdefault("plugins", [])
     replacement = {
         "id": plugin_id,
@@ -384,6 +388,21 @@ def update_plugin(
     else:
         entries.append(replacement)
     _atomic_json(PLUGINS_FILE, data)
+    store = get_resource_store(request)
+    if store is not None:
+        try:
+            store.upsert_public(
+                "plugins",
+                plugin_id,
+                replacement,
+                principal.user.user_id,
+            )
+        except ResourceError as exc:
+            _atomic_json(PLUGINS_FILE, original_data)
+            raise HTTPException(
+                status_code=400,
+                detail="插件配置写入运行目录失败：{}".format(exc),
+            ) from exc
     if enabled and not was_enabled and manifest.missing_dependencies:
         # Kick off dependency installation when the plugin gets enabled.
         try:

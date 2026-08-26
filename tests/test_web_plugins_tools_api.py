@@ -140,6 +140,16 @@ class PluginsToolsApiTest(WebApiTestBase):
         self.assertTrue(response.json()["restart_required"])
         saved = json.loads(self.plugins_file.read_text(encoding="utf-8"))
         self.assertEqual(saved["plugins"][0]["id"], "todo")
+        activation = self.app.state.resource_store.activation("plugins", "todo")
+        self.assertEqual(activation["activation_state"], "restart_required")
+        published = next(
+            item
+            for item in self.app.state.resource_store.list_public(
+                "plugins", include_unpublished=True
+            )
+            if item["resource_id"] == "todo"
+        )
+        self.assertTrue(published["payload"]["enabled"])
 
     def test_update_plugin_persists(self):
         self.config.plugins["todo"] = PluginConfig(

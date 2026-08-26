@@ -20,13 +20,31 @@ class _FakeLoginClient:
         self.fail = fail
         self.closed = False
 
-    def login(self, show_qr, status_changed=None):
+    def login(self, show_qr, status_changed=None, stop_event=None):
         show_qr("qr-content-123")
         if status_changed:
             status_changed("scaned")
+        if stop_event is not None and stop_event.is_set():
+            return None
         if self.fail:
             raise ILinkError("二维码已过期")
         return _FakeCredentials()
+
+    def close(self):
+        self.closed = True
+
+
+class _BlockingLoginClient:
+    """Simulates a long-running QR scan; exits promptly when cancelled."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def login(self, show_qr, status_changed=None, stop_event=None):
+        show_qr("qr-blocked")
+        if stop_event is not None:
+            stop_event.wait(timeout=30)
+        return None
 
     def close(self):
         self.closed = True
@@ -103,37 +121,67 @@ class WeChatLoginManagerTests(unittest.TestCase):
         manager = self._make(connected_checker=broken)
         self.assertFalse(manager.is_connected())
 
+    def _make_blocking(self) -> WeChatLoginManager:
+        client = _BlockingLoginClient()
+        self.blocking_client = client
+        return WeChatLoginManager(
+            client_factory=lambda: client,
+            credentials_saver=lambda creds, path: None,
+        )
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_start_cancels_previous_thread_and_restarts(self):
+        manager = self._make_blocking()
+        manager.start()
+        self.assertTrue(manager._thread.is_alive())
+        first_thread = manager._thread
+        status = manager.start()
+        self.assertEqual(status["state"], "pending")
+        first_thread.join(timeout=5)
+        self.assertFalse(first_thread.is_alive())
+        self.assertIsNot(first_thread, manager._thread)
+        self.assertTrue(manager._thread.is_alive())
+        manager.cancel()
+        manager._thread.join(timeout=5)
 
-    def test_start_while_previous_thread_alive_does_not_deadlock(self):
-        import threading
-        import time
+    def test_cancel_stops_login_thread(self):
+        manager = self._make_blocking()
+        manager.start()
+        self.assertTrue(manager._thread.is_alive())
+        manager.cancel()
+        manager._thread.join(timeout=5)
+        self.assertFalse(manager._thread.is_alive())
+        self.assertTrue(self.blocking_client.closed)
 
-        entered = threading.Event()
-
-        class _BlockingLoginClient:
-            def __init__(self):
-                self.closed = False
-
-            def login(self, show_qr, status_changed=None):
-                entered.set()
-                time.sleep(30)  # simulate a long-running QR scan
-
-            def close(self):
-                self.closed = True
-
+    def test_active_session_hides_stale_connected(self):
         client = _BlockingLoginClient()
         manager = WeChatLoginManager(
             client_factory=lambda: client,
             credentials_saver=lambda creds, path: None,
+            connected_checker=lambda: True,
         )
+        # Before any session, connected reflects the persisted credential.
+        self.assertTrue(manager.status()["connected"])
         manager.start()
-        self.assertTrue(entered.wait(timeout=5))
-        # The login thread is still alive; start() must return promptly
+        status = manager.status()
+        self.assertTrue(status["active_login"])
+        self.assertFalse(status["connected"])
+        manager.cancel()
+        manager._thread.join(timeout=5)
+
+    def test_start_while_previous_thread_alive_does_not_deadlock(self):
+        manager = self._make_blocking()
+        manager.start()
+        self.assertTrue(manager._thread.is_alive())
+        # The previous login thread is still alive; start() must return
+        # promptly (it cancels the old thread and joins with a timeout)
         # instead of deadlocking on the state lock.
         started_at = time.time()
         result = manager.start()
         self.assertLess(time.time() - started_at, 2.0)
         self.assertEqual(result["state"], "pending")
+        manager.cancel()
+        manager._thread.join(timeout=5)
+
+
+if __name__ == "__main__":
+    unittest.main()

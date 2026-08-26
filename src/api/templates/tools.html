@@ -44,6 +44,7 @@
         <div class="mcp-detail-subtabs">
             <button type="button" class="mcp-detail-subtab active" data-detail-tab="overview">概览</button>
             <button type="button" class="mcp-detail-subtab" data-detail-tab="tools">工具列表</button>
+            <button type="button" class="mcp-detail-subtab" data-detail-tab="logs">调用日志</button>
         </div>
 
         <div id="mcp-detail-overview" class="mcp-detail-section">
@@ -70,6 +71,28 @@
                 <div id="mcp-tool-debug" class="mcp-tools-right">
                     <div class="mcp-debug-empty">选择左侧工具进行调试</div>
                 </div>
+            </div>
+        </div>
+
+        <div id="mcp-detail-logs" class="mcp-detail-section" style="display:none">
+            <div class="mcp-logs-notice">调用日志包含完整的输入与输出内容，可能涉及敏感信息，请注意保管。</div>
+            <div class="mcp-logs-toolbar">
+                <select id="mcp-logs-filter-tool" class="mcp-logs-filter"><option value="">全部工具</option></select>
+                <select id="mcp-logs-filter-source" class="mcp-logs-filter">
+                    <option value="">全部来源</option>
+                    <option value="manual">面板调用</option>
+                    <option value="agent">智能体调用</option>
+                </select>
+                <select id="mcp-logs-filter-status" class="mcp-logs-filter">
+                    <option value="">全部状态</option>
+                    <option value="success">成功</option>
+                    <option value="error">失败</option>
+                </select>
+                <button id="mcp-logs-refresh" class="btn-secondary btn-sm">刷新</button>
+            </div>
+            <div id="mcp-logs-list"></div>
+            <div id="mcp-logs-more-wrap" style="display:none">
+                <button id="mcp-logs-more" class="btn-secondary btn-sm">加载更多</button>
             </div>
         </div>
     </div>
@@ -269,6 +292,6 @@
 {% endblock %}
 {% block scripts %}
 <script>window.BP_INITIAL_TOOLS_TAB = {{ tools_tab|default('builtin')|tojson }};</script>
-<script src="/static/js/tools.js?v=20260806a"></script>
+<script src="/static/js/tools.js?v=20260817a"></script>
 <script>initTools();</script>
 {% endblock %}

@@ -231,6 +231,17 @@ def page_organization_knowledge(request: Request):
     )
 
 
+@router.get("/organization/crawler", response_class=HTMLResponse)
+def page_organization_crawler(request: Request):
+    return _organization_page(
+        request,
+        "crawler",
+        template="crawler.html",
+        active="organization-crawler",
+        platform_timezone=request.app.state.config.app.timezone,
+    )
+
+
 @router.get("/organization/drive", response_class=HTMLResponse)
 def page_organization_drive(request: Request):
     return _organization_page(

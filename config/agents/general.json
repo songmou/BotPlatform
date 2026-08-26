@@ -51,6 +51,12 @@
       "web_search_serper",
       "web_fetch",
       "web_fetch_browser"
+    ],
+    "web_crawler": [
+      "crawler_list_sources",
+      "crawler_run",
+      "crawler_get_run",
+      "crawler_query"
     ]
   },
   "capabilities": [

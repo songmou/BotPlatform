@@ -104,6 +104,7 @@ class ToolRuntime:
         plugins: Optional[Iterable[PlatformPlugin]] = None,
         plugin_manager: Optional["PluginManager"] = None,
         tool_audit_store: Optional[Any] = None,
+        mcp_call_log_store: Optional[Any] = None,
         tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
         mcp_manager: Optional["McpClientManager"] = None,
         organization_schedule_service: Optional[
@@ -149,6 +150,7 @@ class ToolRuntime:
             config, self.resolve_path, sandbox_available=sandbox_available
         )
         self.tool_audit_store = tool_audit_store
+        self.mcp_call_log_store = mcp_call_log_store
         self._tool_states: Dict[str, Dict[str, Any]] = tool_states or {}
         self.mcp_manager = mcp_manager
         self.drive_service = drive_service
@@ -754,6 +756,7 @@ class ToolRuntime:
         status = "失败"
         output_size = 0
         error_msg = ""
+        data = None
         self._audit_context = audit_context or ToolAuditContext()
         try:
             self._validate_arguments(name, arguments)
@@ -835,6 +838,41 @@ class ToolRuntime:
                     )
                 except Exception:  # noqa: BLE001 - audit must never break tool calls
                     logger.warning("写入工具审计记录失败：工具=%s", name, exc_info=True)
+            # Record MCP tool calls (agent runtime) with full input/output.
+            if (
+                self.mcp_call_log_store is not None
+                and self.mcp_manager is not None
+                and self.mcp_manager.has_tool(name)
+            ):
+                try:
+                    parts = name.split("__", 1)
+                    if len(parts) == 2:
+                        mcp_server_id, mcp_tool_name = parts
+                        ctx = audit_context or ToolAuditContext()
+                        self.mcp_call_log_store.record(
+                            server_id=mcp_server_id,
+                            tool_name=mcp_tool_name,
+                            source="agent",
+                            status="success" if status == "成功" else "error",
+                            duration_ms=int(duration * 1000),
+                            arguments=arguments,
+                            result=data if status == "成功" else None,
+                            error=error_msg or None,
+                            tenant_id=self.tenant.tenant_id if self.tenant else None,
+                            agent_id=ctx.agent_id,
+                            session_id=ctx.session_id,
+                            user_id=(
+                                ctx.member_user_id
+                                if ctx.member_user_id is not None
+                                else (
+                                    self.tenant.member_user_id
+                                    if self.tenant is not None
+                                    else None
+                                )
+                            ),
+                        )
+                except Exception:  # noqa: BLE001 - audit must never break tool calls
+                    logger.warning("写入 MCP 调用日志失败：工具=%s", name, exc_info=True)
 
     def close_tenant(self, tenant_id: str) -> None:
         if self.plugin_manager is not None:

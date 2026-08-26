@@ -25,6 +25,8 @@ SUPPORTED_SERVICES = {
     "notification",
     "project_paths",
     "tenant_storage",
+    "knowledge",
+    "model",
 }
 
 

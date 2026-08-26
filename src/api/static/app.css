@@ -1604,7 +1604,8 @@ a.btn-secondary {
 }
 
 /* Toast notifications */
-.toast-container {
+.toast-container,
+.dialog-toast-container {
     position: fixed;
     top: 20px;
     left: 50%;
@@ -1615,6 +1616,10 @@ a.btn-secondary {
     gap: 8px;
     align-items: center;
     pointer-events: none;
+}
+
+.dialog-toast-container {
+    z-index: 1;
 }
 
 .toast {

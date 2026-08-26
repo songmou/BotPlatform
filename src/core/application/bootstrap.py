@@ -152,6 +152,7 @@ def build_bot_runtime(
     services: CoreServices,
     *,
     tool_audit_store: Optional[Any] = None,
+    mcp_call_log_store: Optional[Any] = None,
     tool_states: Optional[Dict[str, Dict[str, Any]]] = None,
     drive_audit_store: Optional[Any] = None,
 ) -> BotRuntime:
@@ -219,6 +220,8 @@ def build_bot_runtime(
             timezone=project_config.app.timezone,
             data_root=DATA_DIR / "plugins",
             env_resolver=env_resolver,
+            knowledge_service=services.knowledge_service,
+            model_router=services.model_router,
         )
         plugin_manager = build_plugin_manager(
             project_config.plugins if project_config.tools.enabled else {},
@@ -250,6 +253,7 @@ def build_bot_runtime(
                 plugin_manager=plugin_manager,
                 mcp_manager=mcp_manager,
                 tool_audit_store=tool_audit_store,
+                mcp_call_log_store=mcp_call_log_store,
                 tool_states=tool_states,
                 organization_schedule_service=organization_schedule_service,
                 drive_service=services.drive_service,

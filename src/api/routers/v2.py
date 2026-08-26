@@ -1823,6 +1823,12 @@ def put_typed_organization_channel_credentials(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# Shared lock guarding creation/lookup of in-memory login/registration
+# managers. A per-call `threading.Lock()` would provide zero mutual exclusion
+# and let concurrent requests create duplicate, orphaned managers.
+_MANAGER_LOCK = threading.Lock()
+
+
 def _organization_wechat_manager(
     request: Request,
     organization_id: str,
@@ -1831,7 +1837,7 @@ def _organization_wechat_manager(
 ) -> WeChatLoginManager:
     managers = request.app.state.wechat_login_managers
     manager_key = "org-channel:{}".format(channel["id"])
-    with threading.Lock():
+    with _MANAGER_LOCK:
         manager = managers.get(manager_key)
         if manager is not None:
             return manager
@@ -1946,7 +1952,7 @@ def _organization_feishu_manager(
 ) -> FeishuRegistrationManager:
     managers = request.app.state.feishu_registration_managers
     manager_key = "org-feishu:{}".format(channel["id"])
-    with threading.Lock():
+    with _MANAGER_LOCK:
         manager = managers.get(manager_key)
         if manager is not None:
             return manager

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from src.core.modeling import ModelIdentity, ModelUsage
+from src.core.modeling import ModelIdentity, ModelRequest, ModelResponse, ModelUsage
 from src.core.tooling.models import ToolAuditContext
 
 
@@ -79,6 +79,8 @@ def log_model_call(
     finish_reason: Optional[str] = None,
     first_token_seconds: Optional[float] = None,
     error: Optional[BaseException] = None,
+    request: Optional[ModelRequest] = None,
+    response: Optional[ModelResponse] = None,
 ) -> None:
     """Log model metadata without prompts, images, credentials, or reasoning."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

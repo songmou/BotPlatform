@@ -63,6 +63,18 @@ class RemainingPagesTest(WebApiTestBase):
         self.assertIn('data-schedule-tab="runs"', response.text)
         self.assertIn('id="organization-runs-body"', response.text)
 
+    def test_plugins_page_refreshes_runtime_status_after_process_restart(self):
+        response = self.client.get("/static/js/plugins.js")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('request("/api/plugins", {cache: "no-store"})', response.text)
+        self.assertIn(
+            'document.addEventListener("visibilitychange", refreshWhenVisible)',
+            response.text,
+        )
+        self.assertIn(
+            "window.setInterval(refreshWhenVisible, 15000)", response.text
+        )
+
     def test_schedule_runs_tab_is_scoped_to_schedules_module(self):
         agents = self.client.get("/organization/agents")
         self.assertEqual(agents.status_code, 200, agents.text)

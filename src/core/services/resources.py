@@ -1128,14 +1128,20 @@ class ScopedResourceStore:
             )
             for item in self.list_public("agents")
         }
-        plugins = {
-            item["resource_id"]: PluginConfig(
+        # The dedicated plugin API historically persists config/plugins.json.
+        # Bootstrap catalog rows are only an imported snapshot of that file and
+        # must not override later file changes on every process restart. Once a
+        # plugin has a database-authored revision, that revision becomes the
+        # authoritative source instead.
+        plugins = dict(fallback.plugins)
+        for item in self.list_public("plugins"):
+            if item.get("source") == "bootstrap":
+                continue
+            plugins[item["resource_id"]] = PluginConfig(
                 id=item["resource_id"],
                 enabled=bool(item["payload"].get("enabled", True)),
                 settings=dict(item["payload"].get("settings") or {}),
             )
-            for item in self.list_public("plugins")
-        }
         scripts: Dict[str, ScriptDefinition] = {}
         for item in self.list_public("scripts"):
             payload = dict(item["payload"])

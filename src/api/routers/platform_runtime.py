@@ -11,6 +11,7 @@ import json
 import logging
 import secrets
 import sys
+import time
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 
 from src.api.deps import (
     get_config,
+    get_mcp_call_log_store,
     get_resource_store,
     get_router,
     get_tool_runtime,
@@ -501,11 +503,75 @@ def invoke_mcp_server_tool(
     arguments = body.get("arguments") if isinstance(body, dict) else None
     if not isinstance(arguments, dict):
         arguments = {}
+    started = time.monotonic()
+    status = "success"
+    error_text = None
+    result = None
     try:
         result = manager.call_tool(namespaced_name(server_id, tool_name), arguments)
     except Exception as exc:  # noqa: BLE001 - surface to the UI
-        return {"ok": False, "error": _describe_error(exc, "调用工具")}
+        status = "error"
+        error_text = _describe_error(exc, "调用工具")
+    # Record the manual invocation (best effort, never breaks the call).
+    call_log_store = get_mcp_call_log_store(request)
+    if call_log_store is not None:
+        try:
+            call_log_store.record(
+                server_id=server_id,
+                tool_name=tool_name,
+                source="manual",
+                status=status,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                arguments=arguments,
+                result=result,
+                error=error_text,
+            )
+        except Exception:  # noqa: BLE001 - audit must never break tool calls
+            logger.warning(
+                "写入 MCP 调用日志失败：server=%s tool=%s",
+                server_id, tool_name, exc_info=True,
+            )
+    if status == "error":
+        return {"ok": False, "error": error_text}
     return {"ok": True, "result": result}
+
+
+@router.get("/mcp/{server_id}/call-logs")
+def list_mcp_call_logs(
+    server_id: str,
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    tool: Optional[str] = None,
+    source: Optional[str] = None,
+    status: Optional[str] = None,
+    _principal=Depends(require_permission("panel.read")),
+):
+    """List MCP tool call logs for a server with pagination and filters."""
+    store = get_mcp_call_log_store(request)
+    if store is None:
+        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+    if limit < 1:
+        limit = 1
+    elif limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+    items = store.list_by_server(
+        server_id,
+        limit=limit,
+        offset=offset,
+        tool=tool or None,
+        source=source or None,
+        status=status or None,
+    )
+    total = store.count_by_server(
+        server_id,
+        tool=tool or None,
+        source=source or None,
+        status=status or None,
+    )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 # --------------------------------------------------------------------------- #

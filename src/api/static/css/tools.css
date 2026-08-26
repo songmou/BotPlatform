@@ -214,3 +214,135 @@
         min-width: 0;
     }
 }
+
+/* MCP call logs */
+.mcp-logs-notice {
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 6px;
+    color: #6b5b00;
+    font-size: 13px;
+}
+
+.mcp-logs-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.mcp-logs-filter {
+    padding: 4px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: #fff;
+    color: #333;
+    font-size: 13px;
+}
+
+.mcp-log-entry {
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    background: #fff;
+    overflow: hidden;
+}
+
+.mcp-log-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    user-select: none;
+    flex-wrap: wrap;
+}
+
+.mcp-log-summary:hover {
+    background: #f5f5f5;
+}
+
+.mcp-log-time {
+    color: #888;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.mcp-log-tool {
+    font-family: monospace;
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.mcp-log-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 500;
+}
+
+.mcp-log-badge-manual {
+    background: #e3f2fd;
+    color: #1565c0;
+}
+
+.mcp-log-badge-agent {
+    background: #f3e5f5;
+    color: #7b1fa2;
+}
+
+.mcp-log-duration {
+    color: #888;
+    font-size: 12px;
+    margin-left: auto;
+}
+
+.mcp-log-body {
+    padding: 0 12px 12px;
+    border-top: 1px solid #eee;
+}
+
+.mcp-log-section {
+    margin-top: 10px;
+}
+
+.mcp-log-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #666;
+    margin-bottom: 4px;
+}
+
+.mcp-log-payload {
+    background: #f6f8fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    color: #333;
+}
+
+.mcp-log-error {
+    background: #fff0f0;
+    border-color: #ffcdd2;
+    color: #c62828;
+}
+
+.mcp-log-truncated {
+    color: #e65100;
+    font-size: 11px;
+    font-weight: 600;
+}

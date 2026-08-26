@@ -63,7 +63,15 @@ document.addEventListener("click", function (evt) {
 
 function showToast(message, type) {
     type = type || "info";
-    var container = document.getElementById("toast-container");
+    var dialogs = document.querySelectorAll("dialog[open]");
+    var dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+    var container = dialog ? dialog.querySelector(".dialog-toast-container") : null;
+    if (dialog && !container) {
+        container = document.createElement("div");
+        container.className = "dialog-toast-container";
+        dialog.appendChild(container);
+    }
+    if (!container) container = document.getElementById("toast-container");
     if (!container) return;
     var toast = document.createElement("div");
     toast.className = "toast toast-" + type;

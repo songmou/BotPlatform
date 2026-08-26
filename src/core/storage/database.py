@@ -13,6 +13,7 @@ from typing import Iterator
 from src.core.storage.schema import (
     CURRENT_SCHEMA,
     MODEL_ANALYTICS_SCHEMA_V3,
+    SCHEMA_ADDENDA,
     SCHEMA_FORMAT_VERSION,
     WORKFLOW_SCHEMA_V2,
 )
@@ -75,12 +76,31 @@ class Database:
 
         Existing databases are inspected read-only. The supported v1 format is
         backed up and migrated atomically; unknown formats are rejected.
+        After either path, idempotent schema addenda are applied so new tables
+        can be added without bumping SCHEMA_FORMAT_VERSION.
         """
         with self._schema_lock:
             if self.path.exists() and self.path.stat().st_size > 0:
                 self._validate_existing_read_only()
-                return
-            self._initialize_fresh()
+            else:
+                self._initialize_fresh()
+            self._apply_schema_addenda()
+
+    def _apply_schema_addenda(self) -> None:
+        """Apply idempotent CREATE TABLE/INDEX IF NOT EXISTS statements.
+
+        These add new tables to both fresh and existing databases without
+        requiring a format-version bump. Each statement must be safe to run
+        repeatedly.
+        """
+        connection = sqlite3.connect(str(self.path), isolation_level=None)
+        try:
+            connection.execute("PRAGMA busy_timeout={}".format(self.busy_timeout_ms))
+            connection.executescript(SCHEMA_ADDENDA)
+        except sqlite3.Error as exc:
+            raise DatabaseError("无法应用数据库补丁：{}".format(exc)) from exc
+        finally:
+            connection.close()
 
     def _validate_existing_read_only(self) -> None:
         try:
@@ -111,9 +131,16 @@ class Database:
                 "SELECT format_version FROM schema_metadata WHERE singleton=1"
             ).fetchone()
             version = int(row[0]) if row is not None else None
-            if version in {1, 2} and SCHEMA_FORMAT_VERSION == 3:
+            if version in {1, 2} and SCHEMA_FORMAT_VERSION >= 3:
                 connection.close()
                 self._backup_and_migrate_v3(version)
+                version = 3
+            if version == 3 and SCHEMA_FORMAT_VERSION == 4:
+                try:
+                    connection.close()
+                except sqlite3.Error:
+                    pass
+                self._backup_and_migrate_v4()
                 return
             if version != SCHEMA_FORMAT_VERSION:
                 raise DatabaseError(
@@ -218,6 +245,106 @@ class Database:
                     "UPDATE schema_metadata SET format_version=3 WHERE singleton=1"
                 )
                 connection.commit()
+                connection.execute("PRAGMA foreign_keys=ON")
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        except (sqlite3.Error, OSError, DatabaseError) as exc:
+            raise DatabaseError(
+                "数据库升级失败，原数据库未修改，备份位于 {}：{}".format(
+                    backup_path, exc
+                )
+            ) from exc
+        finally:
+            self._secure_files()
+            if backup_path.exists() and os.name != "nt":
+                os.chmod(str(backup_path), 0o600)
+
+    def _backup_and_migrate_v4(self) -> None:
+        """Back up v3 and add first-class web knowledge source metadata."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_root = self.path.parent / "backups"
+        backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        backup_path = backup_root / "{}-v3-{}{}".format(
+            self.path.stem, stamp, self.path.suffix or ".sqlite3"
+        )
+        try:
+            source = sqlite3.connect(
+                self.path.as_uri() + "?mode=ro", uri=True, isolation_level=None
+            )
+            destination = sqlite3.connect(str(backup_path), isolation_level=None)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+                source.close()
+            connection = sqlite3.connect(str(self.path), isolation_level=None)
+            try:
+                connection.execute("PRAGMA foreign_keys=OFF")
+                connection.execute(
+                    "PRAGMA busy_timeout={}".format(self.busy_timeout_ms)
+                )
+                connection.executescript(
+                    """
+BEGIN IMMEDIATE;
+CREATE TABLE knowledge_sources_v4 (
+    source_id TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE RESTRICT,
+    tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL CHECK (source_type IN ('text', 'file', 'web')),
+    name TEXT NOT NULL,
+    source_url TEXT,
+    crawl_page_id TEXT,
+    fetched_at TEXT,
+    relative_path TEXT,
+    drive_scope TEXT CHECK (drive_scope IN ('public', 'tenant')),
+    drive_tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    drive_path TEXT,
+    file_size INTEGER,
+    file_mtime_ns INTEGER,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('ready', 'pending_embedding', 'stale_modified', 'source_missing', 'failed')
+    ),
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO knowledge_sources_v4(
+    source_id, category_id, tenant_id, source_type, name,
+    relative_path, drive_scope, drive_tenant_id, drive_path,
+    file_size, file_mtime_ns, content_hash, status, last_error,
+    created_at, updated_at
+)
+SELECT source_id, category_id, tenant_id, source_type, name,
+       relative_path, drive_scope, drive_tenant_id, drive_path,
+       file_size, file_mtime_ns, content_hash, status, last_error,
+       created_at, updated_at
+FROM knowledge_sources;
+DROP TABLE knowledge_sources;
+ALTER TABLE knowledge_sources_v4 RENAME TO knowledge_sources;
+CREATE INDEX ix_knowledge_sources_category
+    ON knowledge_sources(category_id, updated_at DESC);
+CREATE INDEX ix_knowledge_sources_tenant
+    ON knowledge_sources(tenant_id, updated_at DESC);
+CREATE UNIQUE INDEX ux_knowledge_sources_text_name
+    ON knowledge_sources(category_id, name) WHERE source_type = 'text';
+CREATE UNIQUE INDEX ux_knowledge_sources_drive_path
+    ON knowledge_sources(category_id, drive_scope, COALESCE(drive_tenant_id, ''), drive_path)
+    WHERE source_type = 'file';
+CREATE UNIQUE INDEX ux_knowledge_sources_web_url
+    ON knowledge_sources(category_id, source_url) WHERE source_type = 'web';
+CREATE INDEX ix_knowledge_sources_drive
+    ON knowledge_sources(drive_scope, drive_tenant_id, drive_path);
+UPDATE schema_metadata SET format_version=4 WHERE singleton=1;
+COMMIT;
+"""
+                )
+                violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise DatabaseError("数据库升级后的外键检查失败")
                 connection.execute("PRAGMA foreign_keys=ON")
             except Exception:
                 connection.rollback()

@@ -23,6 +23,13 @@ from .base import PluginContext, PluginError, PluginToolDefinition
 
 logger = logging.getLogger(__name__)
 
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
 
 INTERACTIVE_SELECTOR = ", ".join(
     (
@@ -60,6 +67,9 @@ class BrowserAutomationConfig:
     max_sessions_per_tenant: int = 1
     max_snapshot_chars: int = 12_000
     max_snapshot_elements: int = 100
+    allow_http: bool = False
+    allow_private_network: bool = False
+    allow_loopback: bool = False
 
     @classmethod
     def from_environment(cls) -> "BrowserAutomationConfig":
@@ -81,6 +91,9 @@ class BrowserAutomationConfig:
             max_sessions_per_tenant=int(settings.get("max_sessions_per_tenant", 1)),
             max_snapshot_chars=int(settings.get("max_snapshot_chars", 12_000)),
             max_snapshot_elements=int(settings.get("max_snapshot_elements", 100)),
+            allow_http=bool(settings.get("allow_http", False)),
+            allow_private_network=bool(settings.get("allow_private_network", False)),
+            allow_loopback=bool(settings.get("allow_loopback", False)),
         )
 
 
@@ -89,10 +102,17 @@ def _safe_error(exc: Exception) -> str:
     return "{}: {}".format(type(exc).__name__, first_line[:240])
 
 
-def _host_is_public(hostname: str) -> bool:
+def _host_is_allowed(
+    hostname: str,
+    *,
+    allow_private_network: bool = False,
+    allow_loopback: bool = False,
+) -> bool:
     normalized = hostname.rstrip(".").lower()
-    if not normalized or normalized == "localhost" or normalized.endswith((".localhost", ".local")):
+    if not normalized:
         return False
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return allow_loopback
     try:
         addresses = [ipaddress.ip_address(normalized)]
     except ValueError:
@@ -108,22 +128,70 @@ def _host_is_public(hostname: str) -> bool:
                 return False
             if address not in addresses:
                 addresses.append(address)
-    return bool(addresses) and all(address.is_global for address in addresses)
+    if not addresses:
+        return False
+    for address in addresses:
+        if (
+            address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            return False
+        if address.is_loopback:
+            if not allow_loopback:
+                return False
+            continue
+        if address.is_reserved:
+            return False
+        if any(address in network for network in PRIVATE_NETWORKS):
+            if not allow_private_network:
+                return False
+            continue
+        if not address.is_global:
+            return False
+    return True
 
 
-def validate_public_https_url(url: str, *, subresource: bool = False) -> None:
+def _host_is_public(hostname: str) -> bool:
+    return _host_is_allowed(hostname)
+
+
+def validate_web_url(
+    url: str,
+    *,
+    subresource: bool = False,
+    allow_http: bool = False,
+    allow_private_network: bool = False,
+    allow_loopback: bool = False,
+) -> None:
+    """Validate a browser URL against an explicit network access policy."""
     if not isinstance(url, str) or not url.strip():
         raise PluginError("浏览器 URL 必须是非空字符串")
     parsed = urlsplit(url.strip())
-    if subresource and parsed.scheme in {"about", "data", "blob"}:
+    scheme = parsed.scheme.lower()
+    if subresource and scheme in {"about", "data", "blob"}:
         return
     allowed_schemes = {"https", "wss"} if subresource else {"https"}
-    if parsed.scheme.lower() not in allowed_schemes:
-        raise PluginError("浏览器仅允许访问公网 HTTPS 地址")
+    if allow_http:
+        allowed_schemes.update({"http", "ws"} if subresource else {"http"})
+    if scheme not in allowed_schemes:
+        message = "浏览器仅允许访问 HTTP/HTTPS 地址" if allow_http else "浏览器仅允许访问公网 HTTPS 地址"
+        raise PluginError(message)
     if parsed.username is not None or parsed.password is not None:
         raise PluginError("浏览器 URL 不能包含用户名或密码")
-    if not parsed.hostname or not _host_is_public(parsed.hostname):
+    if not parsed.hostname or not _host_is_allowed(
+        parsed.hostname,
+        allow_private_network=allow_private_network,
+        allow_loopback=allow_loopback,
+    ):
+        if allow_private_network or allow_loopback:
+            raise PluginError("浏览器禁止访问链路本地、元数据或其他不安全地址")
         raise PluginError("浏览器禁止访问本机、私网或不可解析的地址")
+
+
+def validate_public_https_url(url: str, *, subresource: bool = False) -> None:
+    """Preserve the existing strict public HTTPS browser policy."""
+    validate_web_url(url, subresource=subresource)
 
 
 class BrowserUnavailableError(PluginError):
@@ -202,12 +270,14 @@ class BrowserSession:
             "没有可启动的浏览器；已尝试：{}".format("；".join(failures))
         )
 
-    @staticmethod
-    def _route_request(route: Any, request: Any) -> None:
+    def _route_request(self, route: Any, request: Any) -> None:
         try:
-            validate_public_https_url(
+            validate_web_url(
                 request.url,
                 subresource=not bool(request.is_navigation_request()),
+                allow_http=self.config.allow_http,
+                allow_private_network=self.config.allow_private_network,
+                allow_loopback=self.config.allow_loopback,
             )
         except PluginError:
             route.abort("blockedbyclient")
@@ -254,7 +324,12 @@ class _AgentPageController:
         self.snapshot_url = ""
 
     def open(self, url: str, wait_until: str) -> Dict[str, Any]:
-        validate_public_https_url(url)
+        validate_web_url(
+            url,
+            allow_http=self.config.allow_http,
+            allow_private_network=self.config.allow_private_network,
+            allow_loopback=self.config.allow_loopback,
+        )
         assert self.session.page is not None
         self.session.page.goto(
             url,
@@ -610,7 +685,12 @@ class BrowserAutomationPlugin:
         wait_until = arguments.get("wait_until", "domcontentloaded")
         if wait_until not in {"commit", "domcontentloaded", "load", "networkidle"}:
             raise PluginError("wait_until 值无效")
-        validate_public_https_url(url)
+        validate_web_url(
+            url,
+            allow_http=self.config.allow_http,
+            allow_private_network=self.config.allow_private_network,
+            allow_loopback=self.config.allow_loopback,
+        )
         self._expire_idle()
         with self._lock:
             active = [item for item in self._sessions.values() if item.tenant_id == tenant_id]

@@ -94,6 +94,12 @@ class PluginManager:
             plugin_id=manifest.id,
             env_resolver=self.context.env_resolver,
             env_allowlist=manifest.env_allowlist,
+            knowledge_service=(
+                self.context.knowledge_service if "knowledge" in manifest.services else None
+            ),
+            model_router=(
+                self.context.model_router if "model" in manifest.services else None
+            ),
         )
 
     def _register(

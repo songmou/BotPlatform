@@ -762,7 +762,7 @@ class WebApiTest(unittest.TestCase):
     def test_unified_shell_versions_global_context_assets(self):
         response = self.client.get("/platform/agent-templates")
         self.assertEqual(response.status_code, 200)
-        self.assertIn('/static/js/common.js?v=20260803b', response.text)
+        self.assertIn('/static/js/common.js?v=20260820a', response.text)
         self.assertIn('/static/js/catalog-api.js?v=20260806a', response.text)
         self.assertNotIn('/static/js/scoped-modules.js', response.text)
         self.assertNotIn('id="organization-switch"', response.text)

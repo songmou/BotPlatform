@@ -675,10 +675,110 @@ function initTools() {
     function switchMcpDetailTab(tab) {
         document.getElementById("mcp-detail-overview").style.display = tab === "overview" ? "" : "none";
         document.getElementById("mcp-detail-tools").style.display = tab === "tools" ? "" : "none";
+        document.getElementById("mcp-detail-logs").style.display = tab === "logs" ? "" : "none";
         document.querySelectorAll(".mcp-detail-subtab").forEach(function (btn) {
             btn.classList.toggle("active", btn.getAttribute("data-detail-tab") === tab);
         });
         if (tab === "tools" && currentMcpServer) loadMcpDetailTools(currentMcpServer.id);
+        if (tab === "logs" && currentMcpServer) loadMcpCallLogs(false);
+    }
+
+    var mcpLogsSeq = 0;
+    var mcpLogsLoaded = 0;
+
+    function fillMcpLogsToolFilter() {
+        if (!currentMcpServer) return;
+        var sel = document.getElementById("mcp-logs-filter-tool");
+        if (!sel || sel.options.length > 1) return;
+        fetch("/api/v2/platform/mcp/" + encodeURIComponent(currentMcpServer.id) + "/tools")
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var tools = data.tools || [];
+                tools.forEach(function (t) {
+                    var opt = document.createElement("option");
+                    opt.value = t.name;
+                    opt.textContent = t.name;
+                    sel.appendChild(opt);
+                });
+            })
+            .catch(function () {});
+    }
+
+    function loadMcpCallLogs(append) {
+        if (!currentMcpServer) return;
+        var seq = ++mcpLogsSeq;
+        var limit = 20;
+        var offset = append ? mcpLogsLoaded : 0;
+        var tool = (document.getElementById("mcp-logs-filter-tool") || {}).value || "";
+        var source = (document.getElementById("mcp-logs-filter-source") || {}).value || "";
+        var status = (document.getElementById("mcp-logs-filter-status") || {}).value || "";
+        var listEl = document.getElementById("mcp-logs-list");
+        var moreWrap = document.getElementById("mcp-logs-more-wrap");
+        if (!append) {
+            listEl.innerHTML = '<p class="text-muted">加载中…</p>';
+            mcpLogsLoaded = 0;
+            fillMcpLogsToolFilter();
+        }
+        var qs = "limit=" + limit + "&offset=" + offset;
+        if (tool) qs += "&tool=" + encodeURIComponent(tool);
+        if (source) qs += "&source=" + encodeURIComponent(source);
+        if (status) qs += "&status=" + encodeURIComponent(status);
+        fetch("/api/v2/platform/mcp/" + encodeURIComponent(currentMcpServer.id) + "/call-logs?" + qs)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (seq !== mcpLogsSeq) return;
+                var items = data.items || [];
+                if (!append) listEl.innerHTML = "";
+                if (!items.length && !append) {
+                    listEl.innerHTML = '<div class="empty-state">暂无调用记录</div>';
+                }
+                items.forEach(function (item) {
+                    listEl.appendChild(renderMcpCallLogEntry(item));
+                });
+                mcpLogsLoaded += items.length;
+                var hasMore = mcpLogsLoaded < (data.total || 0);
+                moreWrap.style.display = hasMore ? "" : "none";
+            })
+            .catch(function () {
+                if (seq === mcpLogsSeq && !append) {
+                    listEl.innerHTML = '<div class="empty-state">加载失败</div>';
+                }
+            });
+    }
+
+    function renderMcpCallLogEntry(item) {
+        var details = document.createElement("details");
+        details.className = "mcp-log-entry";
+        var time = escapeHtml(item.ts || "");
+        var toolName = escapeHtml(item.tool_name || "");
+        var sourceLabel = item.source === "manual" ? "面板调用" : "智能体调用";
+        var sourceClass = item.source === "manual" ? "mcp-log-badge mcp-log-badge-manual" : "mcp-log-badge mcp-log-badge-agent";
+        var statusLabel = item.status === "success" ? "成功" : "失败";
+        var statusClass = item.status === "success" ? "badge badge-success" : "badge badge-danger";
+        var duration = item.duration_ms != null ? item.duration_ms + " ms" : "";
+        var summary = document.createElement("summary");
+        summary.className = "mcp-log-summary";
+        summary.innerHTML =
+            '<span class="mcp-log-time">' + time + "</span>" +
+            '<code class="mcp-log-tool">' + toolName + "</code>" +
+            '<span class="' + sourceClass + '">' + sourceLabel + "</span>" +
+            '<span class="' + statusClass + '">' + statusLabel + "</span>" +
+            '<span class="mcp-log-duration">' + escapeHtml(duration) + "</span>";
+        details.appendChild(summary);
+        var body = document.createElement("div");
+        body.className = "mcp-log-body";
+        if (item.error) {
+            body.innerHTML += '<div class="mcp-log-section"><div class="mcp-log-label">错误</div>' +
+                '<pre class="mcp-log-payload mcp-log-error">' + escapeHtml(item.error) + "</pre></div>";
+        }
+        var inputTrunc = item.input_truncated ? ' <span class="mcp-log-truncated">已截断</span>' : "";
+        body.innerHTML += '<div class="mcp-log-section"><div class="mcp-log-label">输入' + inputTrunc + "</div>" +
+            '<pre class="mcp-log-payload">' + escapeHtml(item.input_json || "") + "</pre></div>";
+        var outputTrunc = item.output_truncated ? ' <span class="mcp-log-truncated">已截断</span>' : "";
+        body.innerHTML += '<div class="mcp-log-section"><div class="mcp-log-label">输出' + outputTrunc + "</div>" +
+            '<pre class="mcp-log-payload">' + escapeHtml(item.output_json || "") + "</pre></div>";
+        details.appendChild(body);
+        return details;
     }
 
     function buildMcpConfigJson(s) {
@@ -719,6 +819,12 @@ function initTools() {
             document.getElementById("mcp-detail-config").textContent = buildMcpConfigJson(s);
             mcpListPane.style.display = "none";
             mcpDetailPane.style.display = "";
+            var toolFilter = document.getElementById("mcp-logs-filter-tool");
+            if (toolFilter) toolFilter.innerHTML = '<option value="">全部工具</option>';
+            var srcFilter = document.getElementById("mcp-logs-filter-source");
+            if (srcFilter) srcFilter.value = "";
+            var stFilter = document.getElementById("mcp-logs-filter-status");
+            if (stFilter) stFilter.value = "";
             switchMcpDetailTab("overview");
         });
     }
@@ -853,6 +959,17 @@ function initTools() {
     document.querySelectorAll(".mcp-detail-subtab").forEach(function (btn) {
         btn.addEventListener("click", function () {
             switchMcpDetailTab(this.getAttribute("data-detail-tab"));
+        });
+    });
+    document.getElementById("mcp-logs-refresh").addEventListener("click", function () {
+        loadMcpCallLogs(false);
+    });
+    document.getElementById("mcp-logs-more").addEventListener("click", function () {
+        loadMcpCallLogs(true);
+    });
+    ["mcp-logs-filter-tool", "mcp-logs-filter-source", "mcp-logs-filter-status"].forEach(function (id) {
+        document.getElementById(id).addEventListener("change", function () {
+            loadMcpCallLogs(false);
         });
     });
     document.getElementById("mcp-detail-edit").addEventListener("click", function () {

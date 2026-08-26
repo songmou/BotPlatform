@@ -7,6 +7,7 @@ import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from src.core.config.loader import PluginConfig
 from src.core.services.resources import ResourceError, ScopedResourceStore
 from src.core.services.knowledge import KnowledgeService
 from src.core.storage.admin_users import AdminRoleStore, AdminUserStore
@@ -137,6 +138,51 @@ class PlatformCatalogStoreTest(unittest.TestCase):
             restarted.get_public("agents", "general")["payload"]["description"],
             original["description"],
         )
+
+    def test_bootstrap_plugin_row_does_not_override_changed_file_config(self):
+        initial = replace(
+            self.config,
+            plugins={
+                "todo": PluginConfig(id="todo", enabled=False, settings={})
+            },
+        )
+        store = ScopedResourceStore(self.organizations, initial)
+        changed = replace(
+            initial,
+            plugins={
+                "todo": PluginConfig(id="todo", enabled=True, settings={})
+            },
+        )
+
+        rebuilt = store.build_project_config(changed)
+
+        self.assertTrue(rebuilt.plugins["todo"].enabled)
+
+    def test_database_plugin_revision_overrides_file_config_after_restart(self):
+        initial = replace(
+            self.config,
+            plugins={
+                "todo": PluginConfig(id="todo", enabled=False, settings={})
+            },
+        )
+        store = ScopedResourceStore(self.organizations, initial)
+        store.upsert_public(
+            "plugins",
+            "todo",
+            {"id": "todo", "enabled": False, "settings": {}},
+            self.user_id,
+        )
+        changed_file = replace(
+            initial,
+            plugins={
+                "todo": PluginConfig(id="todo", enabled=True, settings={})
+            },
+        )
+        restarted = ScopedResourceStore(self.organizations, changed_file)
+
+        rebuilt = restarted.build_project_config(changed_file)
+
+        self.assertFalse(rebuilt.plugins["todo"].enabled)
 
     def test_referenced_platform_model_cannot_be_disabled(self):
         payload = asdict(self.config.models["test_model"])

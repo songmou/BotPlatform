@@ -7,6 +7,8 @@ function initPlugins() {
     var editing = null;
     var packageUpdateId = null;
     var setupTimer = null;
+    var refreshTimer = null;
+    var loadPromise = null;
 
     var SETUP_STEP_LABELS = {
         install_dependencies: "正在安装依赖",
@@ -34,9 +36,10 @@ function initPlugins() {
     }
 
     function load() {
-        return Promise.all([
-            request("/api/plugins"),
-            request("/api/tenants").catch(function () { return []; })
+        if (loadPromise) return loadPromise;
+        loadPromise = Promise.all([
+            request("/api/plugins", {cache: "no-store"}),
+            request("/api/tenants", {cache: "no-store"}).catch(function () { return []; })
         ]).then(function (results) {
             plugins = results[0] || [];
             tenants = results[1] || [];
@@ -44,7 +47,14 @@ function initPlugins() {
         }).catch(function (error) {
             listEl.innerHTML = '<div class="empty-state">加载插件失败：' +
                 escapeHtml(error.message) + "</div>";
+        }).then(function () {
+            loadPromise = null;
         });
+        return loadPromise;
+    }
+
+    function refreshWhenVisible() {
+        if (!document.hidden) load();
     }
 
     function statusLabel(plugin) {
@@ -503,6 +513,16 @@ function initPlugins() {
         var label = input.closest(".switch-label");
         var state = label && label.querySelector(".plugin-setting-state");
         if (state) state.textContent = input.checked ? "已开启" : "已关闭";
+    });
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("pageshow", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    refreshTimer = window.setInterval(refreshWhenVisible, 15000);
+    window.addEventListener("pagehide", function () {
+        if (refreshTimer !== null) {
+            window.clearInterval(refreshTimer);
+            refreshTimer = null;
+        }
     });
     load();
 }

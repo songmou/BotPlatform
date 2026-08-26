@@ -7,7 +7,7 @@
     },
     {
       "id": "browser_automation",
-      "enabled": false,
+      "enabled": true,
       "settings": {
         "headless": true,
         "navigation_timeout_seconds": 30,
@@ -19,11 +19,28 @@
     },
     {
       "id": "web_research",
-      "enabled": false,
+      "enabled": true,
       "settings": {
         "timeout_seconds": 20,
         "max_results": 8,
-        "max_content_chars": 8000
+        "max_content_chars": 8000,
+        "browser": {}
+      }
+    },
+    {
+      "id": "web_crawler",
+      "enabled": true,
+      "settings": {
+        "timeout_seconds": 20,
+        "max_fetch_bytes": 20971520,
+        "max_content_chars": 400000,
+        "max_redirects": 3,
+        "min_host_interval_seconds": 1,
+        "max_workers": 2,
+        "browser": {
+          "headless": true,
+          "navigation_timeout_seconds": 30
+        }
       }
     },
     {
@@ -43,7 +60,7 @@
     },
     {
       "id": "ocr",
-      "enabled": false,
+      "enabled": true,
       "settings": {
         "auto_process_chat_images": true,
         "engine": "paddleocr",

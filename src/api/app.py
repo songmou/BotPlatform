@@ -20,6 +20,7 @@ from src.api.routers import (
     auth,
     chat,
     connections,
+    crawler,
     content_v2,
     datasources,
     drive,
@@ -47,6 +48,7 @@ def create_app(config, model_router, registry, conversation_store,
                plugin_manager=None,
                scheduler=None, tool_audit_store=None,
                model_analytics_store=None,
+               mcp_call_log_store=None,
                admin_auth=None, admin_user_store=None, admin_role_store=None,
                script_service=None, script_registry=None,
                settings_store=None, env_resolver=None,
@@ -171,6 +173,7 @@ def create_app(config, model_router, registry, conversation_store,
     )
     app.state.scheduler = scheduler
     app.state.tool_audit_store = tool_audit_store
+    app.state.mcp_call_log_store = mcp_call_log_store
     app.state.model_analytics_store = model_analytics_store
     app.state.admin_auth = admin_auth
     app.state.admin_user_store = admin_user_store
@@ -378,6 +381,7 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(plugins.tools_router)
     app.include_router(plugins.tenant_tools_router)
     app.include_router(connections.router)
+    app.include_router(crawler.router)
     app.include_router(scripts.router)
     app.include_router(datasources.router)
     app.include_router(tenants.router)

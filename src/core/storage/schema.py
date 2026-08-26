@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_FORMAT_VERSION = 3
+SCHEMA_FORMAT_VERSION = 4
 
 
 MODEL_ANALYTICS_SCHEMA_V3 = r"""
@@ -747,8 +747,11 @@ CREATE TABLE "knowledge_sources" (
     source_id TEXT PRIMARY KEY,
     category_id TEXT NOT NULL REFERENCES knowledge_categories(category_id) ON DELETE RESTRICT,
     tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    source_type TEXT NOT NULL CHECK (source_type IN ('text', 'file')),
+    source_type TEXT NOT NULL CHECK (source_type IN ('text', 'file', 'web')),
     name TEXT NOT NULL,
+    source_url TEXT,
+    crawl_page_id TEXT,
+    fetched_at TEXT,
     relative_path TEXT,
     drive_scope TEXT CHECK (drive_scope IN ('public', 'tenant')),
     drive_tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -802,6 +805,9 @@ CREATE UNIQUE INDEX ux_knowledge_sources_drive_path
     ON knowledge_sources(
         category_id, drive_scope, COALESCE(drive_tenant_id, ''), drive_path
     ) WHERE source_type = 'file';
+
+CREATE UNIQUE INDEX ux_knowledge_sources_web_url
+    ON knowledge_sources(category_id, source_url) WHERE source_type = 'web';
 
 CREATE INDEX ix_knowledge_sources_drive
     ON knowledge_sources(drive_scope, drive_tenant_id, drive_path);
@@ -1211,6 +1217,34 @@ CREATE TABLE "personal_channel_connections" (
 CREATE INDEX ix_personal_connections_user
     ON personal_channel_connections(user_id, created_at DESC);
 
+CREATE TABLE mcp_call_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('manual', 'agent')),
+    status TEXT NOT NULL CHECK (status IN ('success', 'error')),
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    input_json TEXT,
+    output_json TEXT,
+    input_truncated INTEGER NOT NULL DEFAULT 0,
+    output_truncated INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    tenant_id TEXT,
+    agent_id TEXT,
+    session_id TEXT,
+    user_id INTEGER
+);
+
+CREATE INDEX ix_mcp_call_log_server_ts
+    ON mcp_call_log(server_id, ts DESC);
+
+CREATE INDEX ix_mcp_call_log_tool
+    ON mcp_call_log(server_id, tool_name, ts DESC);
+
+CREATE INDEX ix_mcp_call_log_source
+    ON mcp_call_log(server_id, source, ts DESC);
+
 """ + WORKFLOW_SCHEMA_V2 + r"""
 
 INSERT INTO schema_metadata(singleton, format_version)
@@ -1232,4 +1266,172 @@ INSERT INTO knowledge_categories(
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 );
+"""
+
+# Idempotent addenda applied to both fresh and existing databases to add new
+# tables without bumping SCHEMA_FORMAT_VERSION. Each statement must be
+# CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS so it is safe to run
+# repeatedly on databases that already have the objects.
+SCHEMA_ADDENDA = r"""
+CREATE TABLE IF NOT EXISTS mcp_call_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('manual', 'agent')),
+    status TEXT NOT NULL CHECK (status IN ('success', 'error')),
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    input_json TEXT,
+    output_json TEXT,
+    input_truncated INTEGER NOT NULL DEFAULT 0,
+    output_truncated INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    tenant_id TEXT,
+    agent_id TEXT,
+    session_id TEXT,
+    user_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS ix_mcp_call_log_server_ts
+    ON mcp_call_log(server_id, ts DESC);
+
+CREATE INDEX IF NOT EXISTS ix_mcp_call_log_tool
+    ON mcp_call_log(server_id, tool_name, ts DESC);
+
+CREATE INDEX IF NOT EXISTS ix_mcp_call_log_source
+    ON mcp_call_log(server_id, source, ts DESC);
+
+CREATE TABLE IF NOT EXISTS crawl_sources (
+    source_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    schedule_cron TEXT NOT NULL DEFAULT '',
+    next_run_at TEXT,
+    created_by INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (tenant_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_sources_due
+    ON crawl_sources(enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS crawl_runs (
+    run_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES crawl_sources(source_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    trigger_type TEXT NOT NULL CHECK (trigger_type IN ('manual', 'schedule', 'retry')),
+    status TEXT NOT NULL CHECK (
+        status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')
+    ),
+    pages_queued INTEGER NOT NULL DEFAULT 0,
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    pages_changed INTEGER NOT NULL DEFAULT 0,
+    pages_failed INTEGER NOT NULL DEFAULT 0,
+    records_created INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_runs_queue
+    ON crawl_runs(status, lease_expires_at, created_at);
+CREATE INDEX IF NOT EXISTS ix_crawl_runs_tenant
+    ON crawl_runs(tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS crawl_frontier (
+    frontier_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    parent_url TEXT NOT NULL DEFAULT '',
+    depth INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (
+        status IN ('queued', 'processing', 'done', 'failed', 'skipped')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (run_id, canonical_url)
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_frontier_queue
+    ON crawl_frontier(run_id, status, depth, frontier_id);
+
+CREATE TABLE IF NOT EXISTS crawl_pages (
+    page_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES crawl_sources(source_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    canonical_url TEXT NOT NULL,
+    final_url TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content_type TEXT NOT NULL DEFAULT '',
+    etag TEXT NOT NULL DEFAULT '',
+    last_modified TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    current_snapshot_id TEXT,
+    knowledge_source_id TEXT REFERENCES knowledge_sources(source_id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'unchanged', 'failed')),
+    last_error TEXT NOT NULL DEFAULT '',
+    last_fetched_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (source_id, canonical_url)
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_pages_tenant
+    ON crawl_pages(tenant_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS crawl_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    page_id TEXT NOT NULL REFERENCES crawl_pages(page_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    fetched_at TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    text_path TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    rendered INTEGER NOT NULL DEFAULT 0 CHECK (rendered IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_snapshots_page
+    ON crawl_snapshots(page_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS crawl_records (
+    record_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL REFERENCES crawl_snapshots(snapshot_id) ON DELETE CASCADE,
+    page_id TEXT NOT NULL REFERENCES crawl_pages(page_id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL REFERENCES crawl_sources(source_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    template_name TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    extraction_method TEXT NOT NULL CHECK (extraction_method IN ('rules', 'model', 'mixed')),
+    model_run_id TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_records_source
+    ON crawl_records(source_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS crawl_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_crawl_events_run
+    ON crawl_events(run_id, event_id);
 """

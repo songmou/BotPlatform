@@ -46,6 +46,10 @@ def get_tool_audit_store(request: Request):
     return getattr(request.app.state, "tool_audit_store", None)
 
 
+def get_mcp_call_log_store(request: Request):
+    return getattr(request.app.state, "mcp_call_log_store", None)
+
+
 def get_model_analytics_store(request: Request):
     return getattr(request.app.state, "model_analytics_store", None)
 

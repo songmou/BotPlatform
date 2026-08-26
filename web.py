@@ -112,6 +112,7 @@ def _run_combined(args) -> int:
     from src.core.paths import CONFIG_DIR, DATA_DIR, INSTANCE_LOCK_PATH
     from src.core.storage.tenants import TenantStoreError
     from src.core.storage.tool_audit import ToolAuditStore
+    from src.core.storage.mcp_call_log import McpCallLogStore
     from src.core.storage.drive_audit import DriveAuditStore
 
     instance_lock = SingleInstanceLock(INSTANCE_LOCK_PATH)
@@ -163,11 +164,13 @@ def _run_combined(args) -> int:
                 initial_password,
             ) = _build_admin_auth(registry)
             tool_audit_store = ToolAuditStore(registry)
+            mcp_call_log_store = McpCallLogStore(registry)
             drive_audit_store = DriveAuditStore(registry)
             runtime = build_bot_runtime(
                 config,
                 services,
                 tool_audit_store=tool_audit_store,
+                mcp_call_log_store=mcp_call_log_store,
                 tool_states=_load_tool_states(DATA_DIR),
                 drive_audit_store=drive_audit_store,
             )
@@ -192,6 +195,7 @@ def _run_combined(args) -> int:
                 plugin_manager=runtime.plugin_manager,
                 scheduler=runtime.scheduler,
                 tool_audit_store=tool_audit_store,
+                mcp_call_log_store=mcp_call_log_store,
                 model_analytics_store=services.model_analytics_store,
                 organization_store=services.organization_store,
                 resource_store=services.resource_store,
@@ -262,6 +266,7 @@ def _run_panel_only(args) -> int:
     from src.core.services.env_resolver import EnvResolver
     from src.core.storage.tenants import TenantStoreError, SettingsStore
     from src.core.storage.tool_audit import ToolAuditStore
+    from src.core.storage.mcp_call_log import McpCallLogStore
     from src.core.storage.drive_audit import DriveAuditStore
     from src.core.tooling import ToolRuntime
     from src.core.plugins.registry import build_plugin_manager
@@ -347,6 +352,8 @@ def _run_panel_only(args) -> int:
         timezone=config.app.timezone,
         data_root=DATA_DIR / "plugins",
         env_resolver=env_resolver,
+        knowledge_service=knowledge_service,
+        model_router=model_router,
     )
     plugin_manager = build_plugin_manager(
         config.plugins if config.tools.enabled else {},
@@ -354,6 +361,7 @@ def _run_panel_only(args) -> int:
     )
 
     tool_audit_store = ToolAuditStore(registry)
+    mcp_call_log_store = McpCallLogStore(registry)
     drive_audit_store = DriveAuditStore(registry)
     tool_states = _load_tool_states(DATA_DIR)
 
@@ -382,6 +390,7 @@ def _run_panel_only(args) -> int:
             script_service=script_service,
             organization_schedule_service=organization_schedule_service,
             tool_audit_store=tool_audit_store,
+            mcp_call_log_store=mcp_call_log_store,
             tool_states=tool_states,
             mcp_manager=mcp_manager,
             drive_service=services.drive_service,
@@ -433,6 +442,7 @@ def _run_panel_only(args) -> int:
         plugin_manager=plugin_manager,
         scheduler=scheduler,
         tool_audit_store=tool_audit_store,
+        mcp_call_log_store=mcp_call_log_store,
         model_analytics_store=model_analytics_store,
         organization_store=services.organization_store,
         resource_store=services.resource_store,

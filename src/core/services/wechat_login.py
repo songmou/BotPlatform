@@ -55,6 +55,7 @@ class WeChatLoginManager:
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._cancelled = False
+        self._stop_event = threading.Event()
         self._state = "idle"
         self._qr_data_url = ""
         self._error = ""
@@ -71,32 +72,49 @@ class WeChatLoginManager:
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
+            active = self._state in ("pending", "scanned")
             return {
-                "connected": self.is_connected(),
+                # While a QR login session is active, do not report the stale
+                # persisted credential as "connected" — that would make the
+                # panel hide the QR code behind an "已连接" badge.
+                "connected": (not active) and self.is_connected(),
                 "state": self._state,
                 "qr": self._qr_data_url,
                 "error": self._error,
                 "bot_id": self._bot_id,
+                "active_login": active,
             }
 
     def start(self) -> Dict[str, Any]:
         with self._lock:
+            old_thread = None
             if self._thread is not None and self._thread.is_alive():
-                return self.status()
+                # A previous session is still running (the user reopened the
+                # dialog or hit "重新扫码"). Signal it to stop, then start a
+                # fresh session so the polled instance matches the live thread.
+                self._stop_event.set()
+                old_thread = self._thread
+            # Fresh session state. A brand-new stop event decouples this session
+            # from the one we just asked to terminate.
+            self._stop_event = threading.Event()
             self._state = "pending"
             self._qr_data_url = ""
             self._error = ""
             self._cancelled = False
+            self._bot_id = ""
             self._thread = threading.Thread(
                 target=self._run, name="wechat-panel-login", daemon=True
             )
             self._thread.start()
+        if old_thread is not None:
+            old_thread.join(timeout=5.0)
         return self.status()
 
     def cancel(self) -> None:
         """Mark the session cancelled; a blocking login exits without saving."""
         with self._lock:
             self._cancelled = True
+            self._stop_event.set()
 
     def _on_qr(self, content: str) -> None:
         data_url = _qr_png_data_url(content)
@@ -110,13 +128,19 @@ class WeChatLoginManager:
                 self._state = "scanned"
             elif status == "expired":
                 self._state = "pending"
+                self._qr_data_url = ""
 
     def _run(self) -> None:
         client = None
+        stop_event = self._stop_event
         try:
             client = self._client_factory()
-            credentials = client.login(self._on_qr, status_changed=self._on_status)
-            if self._cancelled:
+            credentials = client.login(
+                self._on_qr,
+                status_changed=self._on_status,
+                stop_event=stop_event,
+            )
+            if self._cancelled or credentials is None:
                 return
             self._save(credentials, self.credentials_path)
             with self._lock:
