@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -49,6 +50,7 @@ class FakeNotificationService:
     def __init__(self) -> None:
         self.texts = []
         self.images = []
+        self.image_options = []
 
     def send_text_to(self, recipient, message):
         self.texts.append((recipient, message))
@@ -61,6 +63,7 @@ class FakeNotificationService:
 
     def enqueue_image_to_tenant(self, tenant_id, source, caption="", **_kwargs):
         self.images.append((tenant_id, source, caption))
+        self.image_options.append(_kwargs)
 
 
 class ScriptServiceTests(unittest.TestCase):
@@ -137,6 +140,10 @@ class ScriptServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["summary"], "done ok")
         self.assertEqual(len(result["artifacts"]), 1)
+        self.assertEqual(
+            service.get_artifact(self.tenant, submitted["run_id"], 0),
+            Path(result["artifacts"][0]),
+        )
         with self.registry.database.read() as connection:
             record = connection.execute(
                 "SELECT status FROM script_runs WHERE run_id=?", (submitted["run_id"],)
@@ -160,6 +167,15 @@ class ScriptServiceTests(unittest.TestCase):
         self.assertEqual(self.notifications.texts[0][0], self.tenant.tenant_id)
         self.assertIn("固定脚本结果", self.notifications.texts[0][1])
         self.assertEqual(self.notifications.images[0][0], self.tenant.tenant_id)
+        source_ref = self.notifications.image_options[0]["source_ref"]
+        self.assertEqual(
+            json.loads(source_ref),
+            {
+                "type": "script_artifact",
+                "run_id": submitted["run_id"],
+                "position": 0,
+            },
+        )
 
     @unittest.skipUnless(os.name == "posix", "POSIX process-group SIGTERM cancellation semantics")
     def test_duplicate_is_skipped_without_queueing(self) -> None:

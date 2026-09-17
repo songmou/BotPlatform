@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import logging
+import re
 import sqlite3
 import threading
 import uuid
@@ -631,6 +633,7 @@ class NotificationService:
         *,
         image: bool = False,
         idempotency_key: str = "",
+        endpoint: Optional[DeliveryEndpoint] = None,
     ) -> None:
         if self.conversation_store is None:
             return
@@ -640,11 +643,22 @@ class NotificationService:
             else ""
         )
         try:
+            session_keys = ["direct"]
+            resolver = getattr(
+                self.address_store,
+                "organization_conversation_for_endpoint",
+                None,
+            )
+            if endpoint is not None and callable(resolver):
+                conversation_id = resolver(tenant_id, endpoint)
+                if conversation_id:
+                    session_keys.append("organization:{}".format(conversation_id))
             self.conversation_store.record_outbound_message(
                 tenant_id,
                 content,
                 image=image,
                 delivery_key=delivery_key,
+                session_keys=session_keys,
             )
         except (OSError, sqlite3.Error, TenantStoreError):
             LOGGER.exception("记录已送达主动消息的对话上下文失败 tenant=%s", tenant_id)
@@ -659,6 +673,32 @@ class NotificationService:
         if not base:
             return None
         return base if count == 1 else "{}:{}".format(base, position)
+
+    @staticmethod
+    def _image_history_content(claimed: Mapping[str, Any]) -> str:
+        """Build a same-origin image reference for persisted script artifacts."""
+        if str(claimed.get("source_type") or "") != "script":
+            return ""
+        try:
+            payload = json.loads(str(claimed.get("source_ref") or ""))
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(payload, dict) or payload.get("type") != "script_artifact":
+            return ""
+        run_id = str(payload.get("run_id") or "")
+        position = payload.get("position")
+        tenant_id = str(claimed.get("tenant_id") or "")
+        if (
+            not re.fullmatch(r"[a-z0-9_]+-[0-9]{8}T[0-9]{6}-[0-9a-f]{8}", run_id)
+            or not re.fullmatch(r"[0-9a-f-]{36}", tenant_id)
+            or not isinstance(position, int)
+            or position < 0
+        ):
+            return ""
+        url = "/api/v2/orgs/{}/script-runs/{}/artifacts/{}".format(
+            tenant_id, run_id, position
+        )
+        return "![固定脚本结果图片]({})".format(url)
 
     def _validate_tenant(self, tenant_id: str) -> None:
         try:
@@ -871,6 +911,7 @@ class NotificationService:
                         caption="",
                         endpoint=endpoint,
                         idempotency_key=str(claimed["notification_id"]),
+                        history_content=self._image_history_content(claimed),
                     )
             except NotificationRecipientStaleError as exc:
                 self.outbox.select_endpoint(int(claimed["outbox_id"]), None)
@@ -1009,6 +1050,7 @@ class NotificationService:
         """Send to an explicit tenant; never fall back to a last-active user."""
         if not isinstance(message, str) or not message.strip():
             raise NotificationError("通知内容不能为空")
+        selected: Optional[DeliveryEndpoint] = None
         with self._conversation_lock(tenant_id):
             if self.message_router is not None and self.address_store is not None:
                 selected = endpoint or self.address_store.latest_endpoint(
@@ -1037,6 +1079,7 @@ class NotificationService:
                 tenant_id,
                 message,
                 idempotency_key=idempotency_key,
+                endpoint=selected,
             )
         return result
 
@@ -1059,8 +1102,10 @@ class NotificationService:
         endpoint: Optional[DeliveryEndpoint] = None,
         channel_id: Optional[str] = None,
         idempotency_key: str = "",
+        history_content: str = "",
     ) -> NotificationResult:
         """Send an image to an explicit tenant recipient."""
+        selected: Optional[DeliveryEndpoint] = None
         with self._conversation_lock(tenant_id):
             if self.message_router is not None and self.address_store is not None:
                 selected = endpoint or self.address_store.latest_endpoint(
@@ -1090,14 +1135,15 @@ class NotificationService:
                 if recipient is None:
                     raise NotificationRecipientError("该用户尚无有效的微信收件地址")
                 result = self._deliver_image(credentials, recipient, source, caption)
-            context = "[主动推送图片]"
-            if caption.strip():
+            context = str(history_content or "").strip() or "[主动推送图片]"
+            if caption.strip() and not history_content:
                 context += "\n" + caption
             self._record_delivered_context(
                 tenant_id,
                 context,
                 image=True,
                 idempotency_key=idempotency_key,
+                endpoint=selected,
             )
         return result
 

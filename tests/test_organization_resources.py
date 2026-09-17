@@ -58,6 +58,27 @@ class OrganizationResourceApiTest(WebApiTestBase):
             anonymous,
         )
 
+    def test_script_artifact_is_served_only_to_organization_members(self):
+        organization_id, owner = self._create_owner("script-artifact")
+        _, outsider = self._create_owner("script-artifact-outsider")
+        artifact = self.data_root / "script-result.png"
+        artifact.write_bytes(b"png-result")
+        service = MagicMock()
+        service.get_artifact.return_value = artifact
+        self.app.state.script_service = service
+        run_id = "ctsehr_check-20260907T095210-038a356f"
+        url = "/api/v2/orgs/{}/script-runs/{}/artifacts/0".format(
+            organization_id, run_id
+        )
+
+        response = owner.get(url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, b"png-result")
+        service.get_artifact.assert_called_once_with(
+            self.registry.get(organization_id), run_id, 0
+        )
+        self.assertEqual(outsider.get(url).status_code, 403)
+
     def test_platform_catalog_mcp_headers_stored_in_keychain(self):
         import tempfile
         from pathlib import Path
@@ -633,7 +654,11 @@ class OrganizationResourceApiTest(WebApiTestBase):
         conversation_a = store.ensure_organization_conversation(
             inbound_a, tenant_a
         )
-        store.record_endpoint(tenant_a, inbound_a)
+        endpoint_a = store.record_endpoint(tenant_a, inbound_a)
+        self.assertEqual(
+            store.organization_conversation_for_endpoint(org_a, endpoint_a),
+            conversation_a,
+        )
         inbound_b = message(second["channel_instance_id"], "event-b")
         tenant_b = store.resolve(inbound_b)
         self.assertEqual(tenant_b.tenant_id, org_b)

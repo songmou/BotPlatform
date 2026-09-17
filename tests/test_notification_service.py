@@ -14,6 +14,7 @@ from src.core.integrations.ilink import (
 )
 from src.core.integrations.images import ImageSource, ImageSourceError
 from src.core.modeling import CanonicalMessage
+from src.core.messaging import DeliveryEndpoint, DIRECT
 from src.core.services.notification import (
     NotificationCredentialsError,
     NotificationDeliveryError,
@@ -46,6 +47,22 @@ class FakeILink:
 
     def close(self):
         self.closed = True
+
+
+class FakeMessageRouter:
+    def __init__(self) -> None:
+        self.sent = []
+
+    def send(self, endpoint, message) -> None:
+        self.sent.append((endpoint, message))
+
+
+class FakeAddressStore:
+    def __init__(self, conversation_id: str) -> None:
+        self.conversation_id = conversation_id
+
+    def organization_conversation_for_endpoint(self, _tenant_id, _endpoint):
+        return self.conversation_id
 
 
 class NotificationServiceTests(unittest.TestCase):
@@ -126,6 +143,71 @@ class NotificationServiceTests(unittest.TestCase):
             service.send_text_to_tenant(self.tenant.tenant_id, "未送达")
 
         self.assertEqual(conversations.load_context(self.tenant.tenant_id), [])
+
+    def test_channel_notification_joins_organization_transcript_with_image(self) -> None:
+        conversations = ConversationStore(self.registry, max_messages=4)
+        endpoint = DeliveryEndpoint(
+            channel_id="feishu-main",
+            platform="feishu",
+            account_id="bot",
+            conversation_type=DIRECT,
+            conversation_id="chat",
+            recipient_id="user",
+        )
+        router = FakeMessageRouter()
+        service = NotificationService(
+            credentials_loader=None,
+            recipient_store=self.store,
+            image_loader=FakeImageLoader(),
+            message_router=router,
+            address_store=FakeAddressStore("channel-conversation"),
+            conversation_store=conversations,
+        )
+
+        service.send_text_to_tenant(
+            self.tenant.tenant_id,
+            "【固定脚本结果】",
+            endpoint=endpoint,
+            idempotency_key="script-text",
+        )
+        image_markdown = "![固定脚本结果图片](/api/v2/orgs/org/script-runs/run/artifacts/0)"
+        service.send_image_to_tenant(
+            self.tenant.tenant_id,
+            ImageSource.local(Path("snapshot.png")),
+            endpoint=endpoint,
+            idempotency_key="script-image",
+            history_content=image_markdown,
+        )
+
+        self.assertEqual(
+            conversations.load_transcript(
+                self.tenant.tenant_id,
+                session_key="organization:channel-conversation",
+            ),
+            [
+                CanonicalMessage("assistant", "【固定脚本结果】"),
+                CanonicalMessage("assistant", image_markdown),
+            ],
+        )
+        self.assertEqual(len(router.sent), 2)
+
+    def test_script_image_history_content_uses_authenticated_artifact_route(self) -> None:
+        content = NotificationService._image_history_content(
+            {
+                "tenant_id": "8f2b1353-c3cf-48b5-a35e-2e867013bef7",
+                "source_type": "script",
+                "source_ref": (
+                    '{"type":"script_artifact","run_id":'
+                    '"ctsehr_check-20260907T095210-038a356f","position":0}'
+                ),
+            }
+        )
+        self.assertEqual(
+            content,
+            "![固定脚本结果图片](/api/v2/orgs/"
+            "8f2b1353-c3cf-48b5-a35e-2e867013bef7/script-runs/"
+            "ctsehr_check-20260907T095210-038a356f/artifacts/0)",
+        )
 
     def test_sends_literal_text_to_recent_recipient_and_closes_client(self) -> None:
         self.store.update(self.tenant, "context-token")

@@ -300,10 +300,19 @@ class OAClient:
         raise MonitorError(f"CTS EHR 请求连续失败：{type(last_error).__name__}") from last_error
 
     def login(self, account: str, password: str) -> None:
-        response = self._request("GET", "/frame2021/default.aspx")
+        # The frame entrypoint may redirect anonymous users to Feishu SSO.
+        # The dedicated account endpoint still exposes the password form used
+        # by this non-interactive monitor, so start there directly.
+        response = self._request("GET", "/account/logon.aspx")
         page = response.text
         key_match = re.search(r'var\s+enc2k\s*=\s*"([^"]+)"', page)
         if not key_match:
+            final_url = str(response.url).lower()
+            if "accounts.feishu.cn" in final_url or "/account/feishuplus.ashx" in final_url:
+                raise AuthenticationError(
+                    "CTS EHR 账号密码登录入口已切换为飞书单点登录，"
+                    "当前后台脚本无法完成交互式授权"
+                )
             raise AuthenticationError("登录页结构发生变化：缺少 enc2k")
         parser = LoginFormParser()
         parser.feed(page)

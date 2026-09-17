@@ -2292,6 +2292,31 @@ def get_typed_organization_script_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get(
+    "/orgs/{organization_id}/script-runs/{run_id}/artifacts/{position}"
+)
+def get_typed_organization_script_artifact(
+    organization_id: str,
+    run_id: str,
+    position: int,
+    request: Request,
+    principal=Depends(get_principal),
+):
+    """Serve a verified script image to an authorized organization member."""
+    _organization_context(request, principal, organization_id)
+    service = getattr(request.app.state, "script_service", None)
+    registry = getattr(request.app.state, "registry", None)
+    if service is None or registry is None:
+        raise HTTPException(status_code=503, detail="脚本服务不可用")
+    try:
+        path = service.get_artifact(
+            registry.get(organization_id), run_id, position
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path)
+
+
 @router.post("/orgs/{organization_id}/schedules/{schedule_key}/run")
 def run_typed_organization_schedule_now(
     organization_id: str,

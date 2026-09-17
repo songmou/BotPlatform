@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
-from src.core.messaging.contracts import DeliveryEndpoint, InboundMessage
+from src.core.messaging.contracts import DIRECT, DeliveryEndpoint, InboundMessage
 from src.core.storage.tenants import (
     TenantContext,
     TenantRegistry,
@@ -611,6 +611,33 @@ class ChannelAddressStore:
                 (endpoint_id,),
             ).fetchone()
         return self._endpoint_from_row(row) if row is not None else None
+
+    def organization_conversation_for_endpoint(
+        self, tenant_id: str, endpoint: DeliveryEndpoint
+    ) -> Optional[str]:
+        """Resolve the organization transcript projected from an endpoint."""
+        if not tenant_id or not endpoint.channel_id:
+            return None
+        conversation_ref = (
+            endpoint.recipient_id
+            if endpoint.conversation_type == DIRECT
+            else endpoint.conversation_id
+        )
+        conversation_id = _stable_id(
+            "conversation",
+            tenant_id,
+            endpoint.channel_id,
+            endpoint.conversation_type,
+            conversation_ref,
+        )
+        with self.registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT conversation_id FROM organization_conversations "
+                "WHERE conversation_id=? AND organization_id=? "
+                "AND channel_instance_id=? AND source='channel'",
+                (conversation_id, tenant_id, endpoint.channel_id),
+            ).fetchone()
+        return str(row["conversation_id"]) if row is not None else None
 
     def personal_tenant_for_endpoint(
         self, tenant_id: str, endpoint_id: str

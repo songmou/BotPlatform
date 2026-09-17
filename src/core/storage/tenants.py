@@ -348,7 +348,7 @@ class ConversationStore:
         for row in rows:
             if row["event_id"] <= last_clear:
                 continue
-            if row["event_type"] != "message":
+            if row["event_type"] not in {"message", "notification"}:
                 continue
             messages.append(
                 CanonicalMessage(str(row["role"]), str(row["content"]))
@@ -402,10 +402,20 @@ class ConversationStore:
         *,
         image: bool = False,
         delivery_key: str = "",
+        session_keys: Optional[Iterable[str]] = None,
     ) -> bool:
         """Add a delivered proactive message to short-term and durable history."""
         if not isinstance(content, str) or not content.strip():
             raise TenantStoreError("主动消息上下文格式无效")
+        resolved_session_keys = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (session_keys or ("direct",))
+                if str(item).strip()
+            )
+        )
+        if not resolved_session_keys:
+            raise TenantStoreError("主动消息会话标识不能为空")
         now = _utc_now()
         with self.lock_for(tenant_id):
             with self.registry.database.transaction(immediate=True) as connection:
@@ -417,29 +427,46 @@ class ConversationStore:
                     )
                     if inserted.rowcount == 0:
                         return False
-                connection.execute(
-                    "INSERT INTO conversation_context_messages"
-                    "(tenant_id, role, content, created_at, session_key) "
-                    "VALUES (?, 'assistant', ?, ?, 'direct')",
-                    (tenant_id, content, now),
-                )
-                connection.execute(
-                    "DELETE FROM conversation_context_messages "
-                    "WHERE tenant_id=? AND session_key='direct' "
-                    "AND message_id NOT IN ("
-                    "SELECT message_id FROM conversation_context_messages "
-                    "WHERE tenant_id=? AND session_key='direct' "
-                    "ORDER BY message_id DESC LIMIT ?"
-                    ")",
-                    (tenant_id, tenant_id, self.max_messages),
-                )
-                connection.execute(
-                    "INSERT INTO conversation_events"
-                    "(tenant_id, role, content, image, event_type, created_at, "
-                    "session_key) VALUES (?, 'assistant', ?, ?, 'notification', "
-                    "?, 'direct')",
-                    (tenant_id, content, int(image), now),
-                )
+                for session_key in resolved_session_keys:
+                    connection.execute(
+                        "INSERT INTO conversation_context_messages"
+                        "(tenant_id, role, content, created_at, session_key) "
+                        "VALUES (?, 'assistant', ?, ?, ?)",
+                        (tenant_id, content, now, session_key),
+                    )
+                    connection.execute(
+                        "DELETE FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=? "
+                        "AND message_id NOT IN ("
+                        "SELECT message_id FROM conversation_context_messages "
+                        "WHERE tenant_id=? AND session_key=? "
+                        "ORDER BY message_id DESC LIMIT ?"
+                        ")",
+                        (
+                            tenant_id,
+                            session_key,
+                            tenant_id,
+                            session_key,
+                            self.max_messages,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO conversation_events"
+                        "(tenant_id, role, content, image, event_type, created_at, "
+                        "session_key) VALUES (?, 'assistant', ?, ?, "
+                        "'notification', ?, ?)",
+                        (tenant_id, content, int(image), now, session_key),
+                    )
+                    if session_key.startswith("organization:"):
+                        connection.execute(
+                            "UPDATE organization_conversations SET updated_at=? "
+                            "WHERE conversation_id=? AND organization_id=?",
+                            (
+                                now,
+                                session_key.split(":", 1)[1],
+                                tenant_id,
+                            ),
+                        )
         return True
 
     def record_user_message(self, tenant_id: str, content: str) -> None:

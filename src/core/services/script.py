@@ -601,6 +601,40 @@ class ScriptService:
             "log_tail": log_tail,
         }
 
+    def get_artifact(
+        self, tenant: TenantContext, run_id: str, position: int
+    ) -> Path:
+        """Return one verified image artifact owned by the requested tenant."""
+        if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
+            raise ValueError("任务编号格式无效")
+        if not isinstance(position, int) or isinstance(position, bool) or position < 0:
+            raise ValueError("产物序号无效")
+        if self.tenant_registry.get(tenant.tenant_id) != tenant:
+            raise ValueError("租户身份不匹配")
+        with self.tenant_registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT artifact.relative_path, artifact.content_hash "
+                "FROM script_run_artifacts artifact "
+                "JOIN script_runs run ON run.run_id=artifact.run_id "
+                "WHERE artifact.run_id=? AND artifact.position=? "
+                "AND run.tenant_id=?",
+                (run_id, position, tenant.tenant_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("未找到脚本图片产物")
+        root = self.tenant_registry.tenant_root(tenant.tenant_id).resolve()
+        path = (root / str(row["relative_path"])).resolve()
+        if root not in path.parents or not path.is_file():
+            raise ValueError("脚本图片产物不存在或路径无效")
+        expected_hash = str(row["content_hash"] or "")
+        if expected_hash and file_sha256(path) != expected_hash:
+            raise ValueError("脚本图片产物校验失败")
+        try:
+            self.image_loader.load(ImageSource.local(path))
+        except ImageSourceError as exc:
+            raise ValueError("脚本图片产物格式无效") from exc
+        return path
+
     def list_runs(
         self,
         tenant: TenantContext,
@@ -1090,6 +1124,15 @@ class ScriptService:
                         caption="",
                         source_type="script",
                         source_key="{}:image:{}".format(run.run_id, index),
+                        source_ref=json.dumps(
+                            {
+                                "type": "script_artifact",
+                                "run_id": run.run_id,
+                                "position": index,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                         selected_endpoint_id=run.trigger_endpoint_id,
                         channel_id=trigger_channel_id,
                     )
