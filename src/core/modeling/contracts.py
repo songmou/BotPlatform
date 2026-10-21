@@ -52,6 +52,7 @@ class ModelCallContext:
     operation: str = "answer"
     agent_id: Optional[str] = None
     conversation_id: Optional[str] = None
+    managed_run: bool = False
 
 
 @dataclass(frozen=True)

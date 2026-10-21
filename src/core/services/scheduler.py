@@ -310,6 +310,19 @@ class SchedulerService:
             elif action_type == "agent_prompt":
                 if self.agent_service is None:
                     raise ValueError("智能体服务不可用")
+                runs = getattr(self.agent_service, "runs", None)
+                if runs is not None:
+                    runs.submit(
+                        tenant,
+                        str(action.get("prompt") or ""),
+                        str(action.get("agent_id") or "") or None,
+                        "schedule:" + run_id,
+                        "schedule",
+                        allow_private_context=False,
+                        notify=True,
+                        schedule_run_id=run_id,
+                    )
+                    return True
                 outcome = self.agent_service.chat(
                     tenant,
                     str(action.get("prompt") or ""),
@@ -551,6 +564,19 @@ class SchedulerService:
             return self.agent_service.generate(
                 task.action.agent_id or "", task.action.prompt or ""
             ) if self.agent_service else ""
+        runs = getattr(self.agent_service, "runs", None)
+        if runs is not None:
+            import uuid
+            run = runs.submit(
+                tenant,
+                task.action.prompt or "",
+                task.action.agent_id or None,
+                "schedule:{}:{}".format(task.id, uuid.uuid4().hex),
+                "schedule",
+                allow_private_context=False,
+                notify=True,
+            )
+            return "定时智能体任务已启动，完成或需要处理时会发送通知。任务编号：" + run["run_id"]
         chat_options: Dict[str, Any] = {"agent_id": task.action.agent_id or None}
         if hasattr(self.agent_service, "model_analytics_store"):
             chat_options["source"] = "schedule"

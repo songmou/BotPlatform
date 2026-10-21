@@ -9,7 +9,7 @@ from pathlib import Path
 from src.core.config.loader import ScriptDefinition, ScriptParameter
 from src.core.services.notification import TenantRecipientStore
 from src.core.services.script import ScriptRun, ScriptService
-from src.core.services.script_input import PendingScriptInput
+from src.core.services.script_input import PendingScriptInput, ScriptInputRegistry
 from src.core.storage.tenants import TenantRegistry
 
 
@@ -187,6 +187,54 @@ class ScriptPendingInputTests(unittest.TestCase):
         updated = self.scripts.get_run(self.tenant, original.run_id)
         self.assertEqual(updated["status"], "success")
         self.assertIn(successor, updated["summary"])
+        self.assertEqual(updated["successor"]["run_id"], successor)
+
+    def test_pending_input_survives_registry_restart(self) -> None:
+        run = self._run_result({
+            "status": "awaiting_input", "summary": "需要验证码",
+            "await_input": {"param": "validate_code", "ttl_seconds": 300},
+        })
+        self.scripts.input_registry = ScriptInputRegistry()
+        pending = self.scripts.peek_pending_input(self.tenant)
+        self.assertEqual(pending.run_id, run.run_id)
+        self.scripts.clear_pending_input(self.tenant)
+        self.assertIsNone(self.scripts.peek_pending_input(self.tenant))
+
+    def test_resumed_input_is_not_submitted_twice(self) -> None:
+        run = self._run_result({
+            "status": "awaiting_input", "summary": "需要验证码",
+            "await_input": {"param": "validate_code"},
+        })
+        pending = self.scripts.pending_input_for_run(self.tenant, run.run_id)
+        calls = []
+        self.scripts.submit_for_tenant = lambda *_args: (
+            calls.append(_args) or {"run_id": "successor", "status": "running"}
+        )
+        first = self.scripts.resume_pending_input(self.tenant, pending, "secret-code")
+        self.assertEqual(self.scripts.resume_pending_input(self.tenant, pending, "secret-code"), first)
+        self.assertEqual(len(calls), 1)
+        with self.registry.database.read() as con:
+            row = con.execute("SELECT * FROM script_input_links").fetchone()
+        self.assertNotIn("secret-code", str(dict(row)))
+
+    def test_uncertain_resume_is_not_replayed(self) -> None:
+        run = self._run_result({
+            "status": "awaiting_input", "summary": "需要验证码",
+            "await_input": {"param": "validate_code"},
+        })
+        pending = self.scripts.pending_input_for_run(self.tenant, run.run_id)
+        calls = []
+
+        def crash(*_args):
+            calls.append(_args)
+            raise RuntimeError("simulated crash after submission")
+
+        self.scripts.submit_for_tenant = crash
+        with self.assertRaises(RuntimeError):
+            self.scripts.resume_pending_input(self.tenant, pending, "code")
+        with self.assertRaisesRegex(ValueError, "结果不确定"):
+            self.scripts.resume_pending_input(self.tenant, pending, "code")
+        self.assertEqual(len(calls), 1)
 
     def test_notify_shows_awaiting_input_label(self) -> None:
         self.scripts.notification_service = FakeNotification()

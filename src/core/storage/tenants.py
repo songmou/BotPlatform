@@ -395,6 +395,56 @@ class ConversationStore:
                     ],
                 )
 
+    def save_agent_result(self, run: Dict[str, Any], history: List[CanonicalMessage], answer: str) -> bool:
+        """Atomically publish a durable run once, even after a worker restart."""
+        state = run["state"]
+        tenant_id = state.get("subject_key") or run["tenant_id"]
+        session_key = run["conversation_id"]
+        user_id = state["tenant"].get("member_user_id")
+        now = _utc_now()
+        with self.lock_for(tenant_id, session_key):
+            with self.registry.database.transaction(immediate=True) as con:
+                if not con.execute(
+                    "INSERT OR IGNORE INTO agent_run_publications(run_id) VALUES (?)", (run["run_id"],)
+                ).rowcount:
+                    return False
+                con.execute(
+                    "DELETE FROM conversation_context_messages WHERE tenant_id=? AND session_key=?",
+                    (tenant_id, session_key),
+                )
+                con.executemany(
+                    "INSERT INTO conversation_context_messages(tenant_id,role,content,created_at,session_key,user_id) "
+                    "VALUES (?,?,?,?,?,?)",
+                    [
+                        (tenant_id, message.role, message.content, now, session_key, user_id)
+                        for message in history[-self.max_messages :]
+                    ],
+                )
+                transcript = []
+                if run["source"] == "web":
+                    if not state.get("regenerate"):
+                        transcript.append(("user", state["question"]))
+                    transcript.append(("assistant", answer))
+                con.executemany(
+                    "INSERT INTO conversation_events(tenant_id,role,content,image,event_type,created_at,"
+                    "session_key,user_id,actor_type,actor_account) "
+                    "VALUES (?,?,?,0,'message',?,?,?,?,?)",
+                    [
+                        (
+                            tenant_id,
+                            role,
+                            text,
+                            now,
+                            session_key,
+                            user_id,
+                            "agent" if role == "assistant" else ("member" if user_id else "channel_user"),
+                            run["agent_id"] if role == "assistant" else str(user_id or state["tenant"]["user_id"]),
+                        )
+                        for role, text in transcript
+                    ],
+                )
+        return True
+
     def record_outbound_message(
         self,
         tenant_id: str,

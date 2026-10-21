@@ -484,7 +484,8 @@ class MessageBot:
             return True
         if self.conversation_store is not None:
             self.conversation_store.record_user_message(
-                tenant.personal_tenant_id or tenant.tenant_id, normalized_text
+                tenant.personal_tenant_id or tenant.tenant_id,
+                "已提供 {} 所需的脚本输入。".format(pending.script_name),
             )
         reply = "正在用你提供的内容继续 {}…".format(pending.script_name)
         self._reply(endpoint, reply, tenant, record=False)
@@ -704,6 +705,16 @@ class MessageBot:
             self._reply(endpoint, reply, tenant)
             self._log(self._direction("输出", endpoint), user_id, reply)
             return
+
+        if not image_item and (lowered_text in {"/stop", "/task"} or lowered_text.startswith("/resume")):
+            handler = getattr(self.agent_service, "task_command", None)
+            if callable(handler):
+                try:
+                    reply = handler(subject, normalized_text, self._session_key(message))
+                except Exception as exc:
+                    reply = str(exc)
+                self._reply(endpoint, reply, tenant)
+                return
 
         if not image_item and (
             lowered_text.startswith("/approve") or lowered_text.startswith("/deny")
@@ -1156,6 +1167,7 @@ class MessageBot:
                     conversation_id=self._session_key(message),
                     allow_tools=message.conversation_type == DIRECT,
                     allow_private_context=message.conversation_type == DIRECT,
+                    notification_endpoint_id=endpoint.endpoint_id,
                 )
             answer = self._outcome_text(outcome)
         except SessionExpired:

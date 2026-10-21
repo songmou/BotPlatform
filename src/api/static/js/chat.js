@@ -15,6 +15,87 @@ function initChat() {
     var conversations = [];
     var currentConvId = null;
 
+    var taskPanel = document.createElement("div");
+    taskPanel.className = "agent-run-panel";
+    taskPanel.hidden = true;
+    form.parentNode.insertBefore(taskPanel, form);
+    var taskSignature = "";
+    var observedRunId = null;
+    var observedStatus = null;
+    var eventCursor = 0;
+    var streamInFlight = false;
+
+    function taskRequest(url, body) {
+        return fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) })
+            .then(function (r) { return r.json().then(function (data) { if (!r.ok) throw new Error(data.detail || "任务操作失败"); return data; }); })
+            .catch(function (error) { showToast(error.message, "error"); throw error; });
+    }
+
+    function renderTask(run) {
+        var labels = { queued: "等待执行", running: "正在执行", stopping: "正在停止", waiting_approval: "等待确认", waiting_input: "需要补充信息", paused: "已暂停", succeeded: "已完成", failed: "执行失败", cancelled: "已停止" };
+        var signature = JSON.stringify([run.run_id, run.status, run.reason, run.approval, run.input_question]);
+        if (signature === taskSignature) return;
+        taskSignature = signature;
+        taskPanel.replaceChildren();
+        taskPanel.hidden = false;
+        var title = document.createElement("strong");
+        title.textContent = labels[run.status] || run.status;
+        taskPanel.appendChild(title);
+        var note = document.createElement("span");
+        note.textContent = run.reason || run.input_question || "关闭页面后任务仍会继续，可随时回来查看。";
+        taskPanel.appendChild(note);
+        var actions = document.createElement("div");
+        actions.className = "agent-run-actions";
+        function button(label, action) {
+            var btn = document.createElement("button");
+            btn.type = "button"; btn.className = "btn btn-sm"; btn.textContent = label;
+            btn.addEventListener("click", function () { btn.disabled = true; Promise.resolve(action()).finally(function () { btn.disabled = false; taskSignature = ""; refreshTask(); }); });
+            actions.appendChild(btn);
+        }
+        var base = "/api/agent-runs/" + encodeURIComponent(run.run_id);
+        if (run.status === "waiting_approval" && run.approval) {
+            var preview = document.createElement("pre");
+            preview.className = "agent-run-preview";
+            preview.textContent = run.approval.calls.map(function (call) { return call.preview; }).join("\n\n");
+            taskPanel.appendChild(preview);
+            button("同意执行", function () { return taskRequest(base + "/approvals", { approval_id: run.approval.approval_id, approved: true }); });
+            button("拒绝", function () { return taskRequest(base + "/approvals", { approval_id: run.approval.approval_id, approved: false }); });
+        }
+        if (run.status === "waiting_input" || run.status === "paused") {
+            if (run.reason_code === "execution_unknown") {
+                note.textContent = "有操作的执行结果尚未确认，请管理员核对后处理，任务不会重复执行该操作。";
+            } else {
+                var reply = document.createElement("textarea");
+                reply.rows = 2; reply.placeholder = "补充信息或调整执行要求";
+                actions.appendChild(reply);
+                button("继续任务", function () { return taskRequest(base + "/resume", { user_input: reply.value }); });
+            }
+        }
+        if (["succeeded", "failed", "cancelled"].indexOf(run.status) === -1) {
+            button("停止任务", function () { return taskRequest(base + "/cancel"); });
+        }
+        taskPanel.appendChild(actions);
+    }
+
+    function refreshTask() {
+        if (!currentConvId || document.hidden) return;
+        var conversation = currentConvId;
+        fetch("/api/agent-runs?conversation_id=" + encodeURIComponent(conversation))
+            .then(function (r) { if (!r.ok) return null; return r.json(); })
+            .then(function (data) {
+                if (!data || conversation !== currentConvId) return;
+                var run = (data.items || [])[0];
+                if (!run) { taskPanel.hidden = true; return; }
+                if (observedRunId === run.run_id && observedStatus !== run.status && ["succeeded", "failed", "cancelled"].indexOf(run.status) !== -1 && !streamInFlight) {
+                    clearMessages(); loadCurrentHistory();
+                }
+                observedRunId = run.run_id; observedStatus = run.status;
+                renderTask(run);
+            }).catch(function () {});
+    }
+    var taskRefreshTimer = window.setInterval(refreshTask, 1500);
+    window.addEventListener("pagehide", function () { window.clearInterval(taskRefreshTimer); });
+
     (window.BP_CONTEXT_READY || Promise.resolve()).then(function () {
         if (!activeOrganizationId()) return;
         loadAgentSelector();
@@ -358,6 +439,8 @@ function initChat() {
     }
 
     function clearMessages() {
+        taskPanel.hidden = true;
+        taskSignature = "";
         messagesEl.innerHTML = "";
         activeRegenBtn = null;
         if (welcome) {
@@ -645,6 +728,8 @@ function initChat() {
     }
 
     function streamAssistant(userText, regenerate) {
+        streamInFlight = true;
+        eventCursor = 0;
         sendBtn.disabled = true;
         agentSelectBtn.disabled = true;
         var ids = getSelectedAgentIds();
@@ -694,39 +779,59 @@ function initChat() {
         var chatUrl = organizationMode()
             ? organizationApi("/conversations/" + encodeURIComponent(currentConvId) + "/chat")
             : "/api/chat";
-        fetch(chatUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(requestBody),
-        }).then(function (response) {
+        var activeTaskId = null;
+        var subscriptionPaused = false;
+        var requestConversationId = currentConvId;
+        function networkFailure(error) {
+            if (streamFinished) return;
+            if (activeTaskId && currentConvId === requestConversationId) {
+                window.setTimeout(function () {
+                    fetch("/api/agent-runs/" + encodeURIComponent(activeTaskId) + "/events?after=" + eventCursor)
+                        .then(consumeResponse).catch(networkFailure);
+                }, 1200);
+                return;
+            }
+            fullText = "网络连接中断，已提交的任务会在后台继续。请查看任务进度。";
+            if (streamContentEl) renderMarkdown(streamContentEl, fullText);
+            finishStream();
+        }
+        function consumeResponse(response) {
+            if (!response.ok) return response.json().then(function (data) {
+                fullText = data.detail || "任务提交失败";
+                if (streamContentEl) renderMarkdown(streamContentEl, fullText);
+                finishStream();
+            });
             var reader = response.body.getReader();
             var decoder = new TextDecoder();
             var buffer = "";
             function read() {
-                reader.read().then(function (result) {
-                    if (result.done) { finishStream(); return; }
+                return reader.read().then(function (result) {
+                    if (currentConvId !== requestConversationId) { reader.cancel(); finishStream(); return; }
+                    if (result.done) {
+                        if (!streamFinished && activeTaskId && !subscriptionPaused) networkFailure(new Error("进度连接已断开"));
+                        else finishStream();
+                        return;
+                    }
                     buffer += decoder.decode(result.value, { stream: true });
-                    var lines = buffer.split("\n");
-                    buffer = lines.pop();
+                    var lines = buffer.split("\n"); buffer = lines.pop();
                     lines.forEach(function (line) {
                         if (!line.startsWith("data: ")) return;
                         try {
                             var ev = JSON.parse(line.slice(6));
+                            if (ev.event_id && ev.event_id <= eventCursor) return;
+                            if (ev.type === "run_state" && ev.run_id) activeTaskId = ev.run_id;
+                            if (ev.type === "run_state" && ["paused", "waiting_input", "waiting_approval", "cancelled"].indexOf(ev.status) !== -1) subscriptionPaused = true;
                             handleSSEEvent(ev);
                         } catch (e) {}
                     });
-                    read();
-                });
+                    return read();
+                }).catch(networkFailure);
             }
-            read();
-        }).catch(function (err) {
-            fullText = "⚠️ 网络错误：" + err.message;
-            if (streamContentEl) {
-                renderMarkdown(streamContentEl, fullText);
-            }
-            showToast("网络错误：" + err.message, "error");
-            finishStream();
-        });
+            return read();
+        }
+        fetch(chatUrl, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody)
+        }).then(consumeResponse).catch(networkFailure);
 
         var traceContainer = null;
         var sourcesData = [];
@@ -788,7 +893,14 @@ function initChat() {
         }
 
         function handleSSEEvent(ev) {
-            if (ev.type === "thinking") {
+            if (ev.event_id) eventCursor = ev.event_id;
+            if (ev.agent_run_id) observedRunId = ev.agent_run_id;
+            if (ev.type === "run_state" || ev.type === "approval" || ev.type === "input_required" || ev.type === "child_wait") {
+                refreshTask();
+                if (ev.status === "paused" || ev.status === "waiting_input" || ev.status === "waiting_approval" || ev.status === "cancelled") {
+                    fullText = ev.reason || ev.input_question || "任务正在等待处理，请使用下方任务操作继续。";
+                }
+            } else if (ev.type === "thinking") {
                 var container = getTraceContainer();
                 var card = document.createElement("div");
                 card.className = "trace-card thinking-card";
@@ -906,6 +1018,8 @@ function initChat() {
         function finishStream() {
             if (streamFinished) return;
             streamFinished = true;
+            streamInFlight = false;
+            refreshTask();
             clearStatus();
             if (streamContentEl && !fullText.trim()) {
                 streamContentEl.innerHTML =

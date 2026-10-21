@@ -64,6 +64,7 @@ class WebApiTestBase(unittest.TestCase):
             admin_role_store=self.admin_roles,
             **self.app_kwargs(),
         )
+        self.addCleanup(self.app.state.agent_service.runs.shutdown)
         # Retired endpoint modules remain unit-testable, but normal app
         # construction never enables their mutating routes.
         self.app.state.allow_legacy_config_writes = True

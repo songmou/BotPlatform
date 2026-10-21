@@ -37,6 +37,7 @@ from src.core.services.script_registry import ExternalScriptRegistry, file_sha25
 from src.core.services.env_resolver import EnvResolver
 from src.core.services.script_input import PendingScriptInput, ScriptInputRegistry
 from src.core.storage.tenants import IntegrationStore, TenantContext, TenantRegistry
+from src.core.tooling.models import ToolError
 
 
 FINAL_STATUSES = {"success", "failed", "skipped", "timed_out", "cancelled"}
@@ -574,6 +575,10 @@ class ScriptService:
                 "WHERE run_id=? ORDER BY position",
                 (run_id,),
             ).fetchall()
+            predecessor = connection.execute(
+                "SELECT pending_json FROM script_input_links WHERE tenant_id=? AND successor_id=?",
+                (tenant.tenant_id, run_id),
+            ).fetchone()
         root = self.tenant_registry.tenant_root(tenant.tenant_id)
         log_path = root / "scripts" / "logs" / (run_id + ".log")
         log_tail = ""
@@ -582,7 +587,7 @@ class ScriptService:
                 log_tail = log_path.read_text(encoding="utf-8")[-8192:]
             except OSError:
                 log_tail = ""
-        return {
+        result = {
             "run_id": str(row["run_id"]),
             "script_id": str(row["script_id"]),
             "script_name": str(row["script_name"]),
@@ -600,6 +605,12 @@ class ScriptService:
             "notification_error": row["notification_error"],
             "log_tail": log_tail,
         }
+        if predecessor:
+            result["parameters"].pop(json.loads(predecessor["pending_json"])["param"], None)
+        successor = self.input_resume_result(tenant, run_id)
+        if successor:
+            result["successor"] = successor
+        return result
 
     def get_artifact(
         self, tenant: TenantContext, run_id: str, position: int
@@ -892,19 +903,62 @@ class ScriptService:
         self, run: ScriptRun, await_input: Dict[str, Any]
     ) -> Optional[PendingScriptInput]:
         """Register a paused script from its ``await_input`` result payload."""
-        return self.input_registry.register(
+        pending = self.input_registry.register(
             run.tenant_id,
             run.run_id,
             run.script_id,
             run.script_name,
             await_input,
         )
+        if pending:
+            with self.tenant_registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT OR IGNORE INTO script_input_links(tenant_id,run_id,pending_json) VALUES (?,?,?)",
+                    (run.tenant_id, run.run_id, json.dumps(asdict(pending), ensure_ascii=False)),
+                )
+        return pending
+
+    def pending_input_for_run(self, tenant: TenantContext, run_id: str) -> Optional[PendingScriptInput]:
+        """Read the exact challenge without mixing concurrent script sessions."""
+        pending = self.input_registry.peek(tenant.tenant_id)
+        if pending and pending.run_id == run_id:
+            return pending
+        with self.tenant_registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT pending_json FROM script_input_links WHERE tenant_id=? AND run_id=? AND status='pending'",
+                (tenant.tenant_id, run_id),
+            ).fetchone()
+        if row:
+            pending = PendingScriptInput(**json.loads(row["pending_json"]))
+            if pending.expires_at > time.time():
+                return pending
+        return None
+
+    def input_resume_result(self, tenant: TenantContext, run_id: str) -> Optional[Dict[str, Any]]:
+        with self.tenant_registry.database.read() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM script_input_links WHERE tenant_id=? AND run_id=? AND status='resumed'",
+                (tenant.tenant_id, run_id),
+            ).fetchone()
+        return json.loads(row["result_json"]) if row and row["result_json"] else None
 
     def peek_pending_input(
         self, tenant: TenantContext
     ) -> Optional[PendingScriptInput]:
         """Return the active pending input for the session without consuming it."""
-        return self.input_registry.peek(tenant.tenant_id)
+        pending = self.input_registry.peek(tenant.tenant_id)
+        if pending:
+            return pending
+        with self.tenant_registry.database.read() as connection:
+            rows = connection.execute(
+                "SELECT run_id FROM script_input_links WHERE tenant_id=? AND status='pending' ORDER BY rowid DESC",
+                (tenant.tenant_id,),
+            ).fetchall()
+        for row in rows:
+            pending = self.pending_input_for_run(tenant, row["run_id"])
+            if pending:
+                return pending
+        return None
 
     def consume_pending_input(
         self, tenant: TenantContext
@@ -915,20 +969,72 @@ class ScriptService:
     def clear_pending_input(self, tenant: TenantContext) -> None:
         """Drop any pending input for the session."""
         self.input_registry.clear(tenant.tenant_id)
+        with self.tenant_registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE script_input_links SET status='cancelled' WHERE tenant_id=? AND status='pending'",
+                (tenant.tenant_id,),
+            )
+
+    def cancel_pending_input(self, tenant: TenantContext, run_id: str) -> None:
+        """Cancel only the challenge owned by the stopped agent task."""
+        self.input_registry.consume(tenant.tenant_id, expected_run_id=run_id)
+        with self.tenant_registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE script_input_links SET status='cancelled' WHERE tenant_id=? AND run_id=? AND status='pending'",
+                (tenant.tenant_id, run_id),
+            )
 
     def resume_pending_input(
         self, tenant: TenantContext, pending: PendingScriptInput, text: str
     ) -> Dict[str, Any]:
         """Re-submit the script with the user's reply mapped to ``pending.param``."""
-        result = self.submit_for_tenant(
-            tenant, pending.script_id, {pending.param: text}
-        )
+        if pending.tenant_id != tenant.tenant_id:
+            raise ValueError("脚本输入不属于当前租户")
+        with self.tenant_registry.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT status,result_json FROM script_input_links WHERE tenant_id=? AND run_id=?",
+                (tenant.tenant_id, pending.run_id),
+            ).fetchone()
+            if row and row["status"] == "resumed":
+                return json.loads(row["result_json"])
+            if row and row["status"] == "started":
+                raise ValueError("上次脚本续跑结果不确定，请核对后处理，禁止重复提交")
+            if pending.expires_at <= time.time() or (row and row["status"] == "cancelled"):
+                raise ValueError("脚本输入已过期或已取消，请重新发起脚本")
+            connection.execute(
+                "INSERT INTO script_input_links(tenant_id,run_id,pending_json,status) VALUES (?,?,?,'started') "
+                "ON CONFLICT(tenant_id,run_id) DO UPDATE SET status='started'",
+                (tenant.tenant_id, pending.run_id, json.dumps(asdict(pending), ensure_ascii=False)),
+            )
+        try:
+            result = self.submit_for_tenant(tenant, pending.script_id, {pending.param: text})
+        except (ValueError, ToolError):
+            # Submission validation failures have no successor to replay.
+            with self.tenant_registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "UPDATE script_input_links SET status='pending' WHERE tenant_id=? AND run_id=?",
+                    (tenant.tenant_id, pending.run_id),
+                )
+            raise
         successor_run_id = str(result.get("run_id", "")).strip()
         if not successor_run_id or result.get("status") != "running":
+            with self.tenant_registry.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "UPDATE script_input_links SET status='pending' WHERE tenant_id=? AND run_id=?",
+                    (tenant.tenant_id, pending.run_id),
+                )
             raise ValueError(
                 str(result.get("summary", "")).strip()
                 or "脚本续跑未成功提交"
             )
+        # Never forward input values (for example CAPTCHA text) to the agent
+        # transcript or the durable hand-off record.
+        result = {
+            "run_id": successor_run_id,
+            "status": "running",
+            "script_id": pending.script_id,
+            "summary": _redact_values(result.get("summary", "脚本已续跑"), [text]),
+        }
         # Consume only the entry that was resumed. A very fast successor may
         # already have registered a fresh challenge for the same session.
         self.input_registry.consume(
@@ -937,6 +1043,11 @@ class ScriptService:
             expected_run_id=pending.run_id,
         )
         with self.tenant_registry.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE script_input_links SET status='resumed',result_json=?,successor_id=? "
+                "WHERE tenant_id=? AND run_id=?",
+                (json.dumps(result, ensure_ascii=False), successor_run_id, tenant.tenant_id, pending.run_id),
+            )
             connection.execute(
                 "UPDATE script_runs SET status='success', summary=? "
                 "WHERE run_id=? AND tenant_id=? AND status='awaiting_input'",

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}执行任务 - BotPlatform{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/chat.css?v=20261021a">{% endblock %}
+{% block content %}
+<div class="page-container">
+    <div class="page-header"><div><h2>执行任务</h2><p class="page-desc">查看后台进度，处理审批、补充信息或停止任务。</p></div><button id="runs-refresh" class="btn-secondary">刷新</button></div>
+    <div id="agent-runs-list" aria-live="polite"></div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/agent-runs.js?v=20261021"></script>{% endblock %}

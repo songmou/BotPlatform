@@ -94,7 +94,7 @@ class PendingScriptRoutingTests(unittest.TestCase):
         message.conversation_type = conv_type
         return message
 
-    def test_routes_reply_to_resume_and_records_user_message(self) -> None:
+    def test_routes_reply_to_resume_and_records_redacted_user_message(self) -> None:
         self.script_service.set_pending()
         handled = self.bot._route_pending_script_input(
             self._msg(), self.tenant, self.endpoint, "member", "6841", False
@@ -106,8 +106,9 @@ class PendingScriptRoutingTests(unittest.TestCase):
             self.tenant.personal_tenant_id or self.tenant.tenant_id
         )
         self.assertTrue(
-            any(msg.role == "user" and "6841" in msg.content for msg in context)
+            any(msg.role == "user" and "脚本输入" in msg.content for msg in context)
         )
+        self.assertFalse(any("6841" in msg.content for msg in context))
 
     def test_cancel_clears_pending(self) -> None:
         self.script_service.set_pending()

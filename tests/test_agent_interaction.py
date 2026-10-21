@@ -67,6 +67,10 @@ class FakeToolOllama:
     capabilities = ModelCapabilities(tools=True, vision=True, reasoning=True)
 
     def complete(self, request):
+        if request.context.operation == "completion_check":
+            return ModelResponse(
+                CanonicalMessage("assistant", '{"complete":true,"reason":"证据已确认","remaining_steps":[]}')
+            )
         self.calls.append(request)
         if not self.responses:
             return ModelResponse(
@@ -1012,6 +1016,7 @@ class KnowledgeInteractionTests(InteractionTestBase):
     def test_search_and_list_via_chat(self) -> None:
         runtime, _registry, tenant, kb = self.knowledge_runtime()
         kb.add_text(tenant.tenant_id, "机密笔记", "内部密码是 PROJECT-SECRET-XYZ")
+        kb.set_agent_bindings("kb_agent", [kb.ensure_default_category(tenant.tenant_id)])
         # list
         service, ollama = self.agent_service(
             FakeToolOllama(

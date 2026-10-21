@@ -294,6 +294,12 @@ class WorkflowService:
         }
 
     def _execute_run(self, run: Dict[str, Any], owner: str) -> None:
+        heartbeat_stop = threading.Event()
+        def heartbeat():
+            while not heartbeat_stop.wait(30):
+                if not self.store.renew_lease(run["run_id"], owner):
+                    return
+        threading.Thread(target=heartbeat, name="workflow-lease", daemon=True).start()
         try:
             definition, dependencies = self._definition_and_dependencies(run)
             nodes = {node["id"]: node for node in definition["nodes"]}
@@ -385,6 +391,8 @@ class WorkflowService:
                 self.store.finish_run(run["run_id"], "failed", error={"message": str(exc)})
             except Exception:
                 pass
+        finally:
+            heartbeat_stop.set()
 
     @staticmethod
     def _next_nodes(definition: Mapping[str, Any], node_id: str, port: str) -> List[str]:
@@ -482,14 +490,78 @@ class WorkflowService:
         if node_type in {"llm", "extract", "classifier"}:
             return NodeOutcome(self._llm(run, node_type, config))
         if node_type == "agent":
+            if run.get("test_mode") and not run.get("allow_side_effects"):
+                return NodeOutcome({"text": "【预览】智能体任务：" + str(config.get("prompt") or ""), "preview": True})
             if self.agent_service is None:
                 raise WorkflowError("智能体服务不可用")
-            return NodeOutcome({
-                "text": self.agent_service.generate(
-                    str(config.get("agent_id") or ""),
-                    str(config.get("prompt") or ""),
+            runs = getattr(self.agent_service, "runs", None)
+            from src.core.services.agent_runs import AgentRunService
+            if not isinstance(runs, AgentRunService):
+                return NodeOutcome(
+                    {
+                        "text": self.agent_service.generate(
+                            str(config.get("agent_id") or ""), str(config.get("prompt") or "")
+                        )
+                    }
                 )
-            })
+            tenant = self._tenant(run)
+            session = "workflow:{}:{}".format(run["run_id"], node_id)
+            previous = runs.store.list(tenant.tenant_id, session)
+            definition, _ = self._definition_and_dependencies(run)
+            deadline = datetime.fromisoformat(str(run["created_at"])).timestamp() + int(
+                definition["settings"]["timeout_seconds"]
+            )
+            child = previous[0] if previous else runs.submit(tenant, str(config.get("prompt") or ""),
+                str(config.get("agent_id") or "") or None, session, "workflow", history=[],
+                allow_tools=not (run.get("test_mode") and not run.get("allow_side_effects")),
+                allow_private_context=False, parent_workflow_id=run["run_id"], parent_deadline=deadline)
+            wait = self.store.pending_wait_for_node(run["run_id"], node_id + ":agent")
+            token = child["state"].get("approval", {}).get("approval_id") or "{}:{}:{}".format(
+                child["status"], child["state"].get("rounds", 0), child["state"].get("queue_index", 0))
+            matching_wait = wait and wait.get("payload", {}).get("agent_wait_ref") == token
+            if (
+                matching_wait
+                and wait["status"] != "pending"
+                and child["status"] in {"waiting_approval", "waiting_input", "paused"}
+            ):
+                if wait["status"] in {"expired", "rejected"}:
+                    runs.store.cancel(child["run_id"], tenant.tenant_id)
+                    raise WorkflowError("智能体等待输入或审批已过期或被拒绝")
+                response = wait.get("response") or {}
+                input_response = response.get("response", response)
+                if isinstance(input_response, dict):
+                    input_response = input_response.get("text", "")
+                if child["status"] == "waiting_approval":
+                    runs.resolve_approval(
+                        child["run_id"],
+                        tenant.tenant_id,
+                        child["state"]["approval"]["approval_id"],
+                        wait["status"] == "approved",
+                    )
+                else:
+                    runs.resume(
+                        child["run_id"], tenant.tenant_id, str(input_response or "")
+                    )
+
+            def stopped():
+                current = self.store.get_run(run["organization_id"], run["run_id"])
+                return self._stop.is_set() or current["status"] == "canceled" or time.time() >= deadline
+            child = runs.wait(child["run_id"], stopped=stopped)
+            if child["status"] in {"waiting_approval", "waiting_input", "paused"}:
+                if wait is None or wait["status"] != "pending":
+                    kind = "approval" if child["status"] == "waiting_approval" else "input"
+                    wait = self._create_wait(run, node_id + ":agent", kind,
+                        {"title": "智能体需要处理", "agent_run_id": child["run_id"],
+                         "agent_wait_ref": child["state"].get("approval", {}).get("approval_id") or "{}:{}:{}".format(
+                             child["status"], child["state"].get("rounds", 0), child["state"].get("queue_index", 0)),
+                         "message": child["state"].get("input_question") or child["state"].get("reason", ""),
+                         "approval": child["state"].get("approval"),
+                         "fields": [{"key": "text", "type": "string", "label": "补充信息"}] if kind == "input" else []},
+                        {"roles": ["owner", "admin"]}, max(1, int(deadline - time.time())))
+                return NodeOutcome({}, wait=wait)
+            if child["status"] != "succeeded":
+                raise WorkflowError(child["state"].get("answer") or child["state"].get("reason") or "智能体执行失败")
+            return NodeOutcome({"text": child["state"]["answer"]})
         if node_type == "knowledge":
             if self.knowledge_service is None:
                 raise WorkflowError("知识库服务不可用")

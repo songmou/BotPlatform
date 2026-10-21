@@ -115,7 +115,8 @@ class WorkflowEditorE2ETests(unittest.TestCase):
             raise unittest.SkipTest("当前环境不允许启动本地工作流 E2E 临时服务")
         cls.playwright = sync_playwright().start()
         try:
-            cls.browser = cls.playwright.chromium.launch(headless=True)
+            executable = os.environ.get("BOTPLATFORM_CHROMIUM_EXECUTABLE")
+            cls.browser = cls.playwright.chromium.launch(headless=True, executable_path=executable)
         except Exception as exc:  # pragma: no cover - environment guard
             cls.playwright.stop()
             cls.server.should_exit = True
@@ -183,6 +184,37 @@ class WorkflowEditorE2ETests(unittest.TestCase):
         self.page.mouse.down()
         self.page.mouse.move(target["x"] + target["width"] / 2, target["y"] + target["height"] / 2, steps=8)
         self.page.mouse.up()
+
+    def test_agent_task_input_can_resume_from_organization_task_page(self):
+        from src.core.modeling import CanonicalToolCall
+        model = self.app.state.model_router.clients["test_model"]
+        original = model.complete
+        def complete(request):
+            if any(message.role == "user" and message.content == "蓝色" for message in request.messages):
+                return ModelResponse(CanonicalMessage("assistant", "已按蓝色完成"))
+            return ModelResponse(CanonicalMessage("assistant", tool_calls=[
+                CanonicalToolCall("input", "agent__request_input", {"question": "请选择颜色"})]))
+        model.complete = complete
+        self.addCleanup(setattr, model, "complete", original)
+        prepared = self.page.evaluate("""async () => {
+            const conversation = await (await fetch('/api/chat/conversations', {method: 'POST'})).json();
+            const response = await fetch('/api/agent-runs', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({conversation_id: conversation.id, message: '请选择颜色并完成任务'})});
+            if (!response.ok) throw new Error(await response.text());
+            return {conversation, run: await response.json()};
+        }""")
+        organization_id = prepared["conversation"]["organization_id"]
+        self.page.goto(self.base + "/organization/agent-runs?organization_id=" + organization_id)
+        card = self.page.locator(".agent-run-panel").filter(has_text=prepared["run"]["run_id"])
+        card.get_by_role("button", name="继续任务").wait_for(state="visible")
+        card.get_by_placeholder("补充信息或调整要求").fill("蓝色")
+        card.get_by_role("button", name="继续任务").click()
+        self.page.wait_for_function(
+            "() => document.querySelector('#agent-runs-list').textContent.includes('已按蓝色完成')"
+        )
+        self.assertIn("已完成", card.inner_text())
+        self.assertEqual(self.errors, [])
 
     def test_buttons_canvas_keyboard_and_ai_error_feedback(self):
         self._new_workflow()

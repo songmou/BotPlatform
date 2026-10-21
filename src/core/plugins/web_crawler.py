@@ -29,7 +29,7 @@ from src.core.services.document_extract import extract_document_text
 
 from .base import PluginContext, PluginError, PluginJobDefinition, PluginToolDefinition
 from .browser_automation import BrowserAutomation, BrowserAutomationConfig, validate_web_url
-from .web_research import DEFAULT_USER_AGENT, extract_readable_text
+from .web_research import DEFAULT_USER_AGENT as DEFAULT_USER_AGENT, extract_readable_text
 
 
 logger = logging.getLogger(__name__)
@@ -491,7 +491,8 @@ class CrawlStore:
             if count >= max_pages:
                 return False
             result = connection.execute(
-                "INSERT OR IGNORE INTO crawl_frontier(run_id, url, canonical_url, parent_url, depth, created_at, updated_at) "
+                "INSERT OR IGNORE INTO crawl_frontier(run_id, url, canonical_url, parent_url, depth, "
+                "created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (run_id, url, canonical, parent, depth, _now(), _now()),
             )
@@ -569,7 +570,8 @@ class CrawlStore:
                 connection.execute(
                     "INSERT INTO crawl_pages(page_id, source_id, tenant_id, canonical_url, final_url, "
                     "title, content_type, etag, last_modified, content_hash, current_snapshot_id, status, "
-                    "last_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)",
+                    "last_fetched_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)",
                     (
                         page_id, run["source_id"], run["tenant_id"], page["canonical_url"],
                         page["final_url"], page["title"], page["content_type"], page.get("etag", ""),
@@ -699,7 +701,9 @@ class CrawlStore:
         except (OSError, UnicodeError) as exc:
             raise PluginError("页面正文快照已损坏") from exc
 
-    def query_records(self, tenant_id: str, source_id: str = "", template_name: str = "", limit: int = 100) -> List[Dict[str, Any]]:
+    def query_records(
+        self, tenant_id: str, source_id: str = "", template_name: str = "", limit: int = 100
+    ) -> List[Dict[str, Any]]:
         clauses = ["r.tenant_id=?"]
         values: List[Any] = [tenant_id]
         if source_id:

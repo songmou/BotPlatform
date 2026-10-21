@@ -940,6 +940,14 @@ class WorkflowStore:
             self._event(connection, run_id, organization_id, "run.running", "", {"source": "subworkflow"})
         return self.get_run(organization_id, run_id)
 
+    def renew_lease(self, run_id: str, lease_owner: str, lease_seconds: int = 600) -> bool:
+        """Keep long-running agent nodes owned without rewriting their state."""
+        expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+        with self.database.transaction() as con:
+            return con.execute("UPDATE workflow_runs SET lease_expires_at=? "
+                               "WHERE run_id=? AND status='running' AND lease_owner=?",
+                               (expires, run_id, lease_owner)).rowcount == 1
+
     def checkpoint_run(self, run_id: str, state: Mapping[str, Any], lease_owner: str, lease_seconds: int = 600) -> None:
         expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
         with self.database.transaction() as connection:

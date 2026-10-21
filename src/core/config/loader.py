@@ -231,6 +231,8 @@ class AgentPreset:
     greeting_hints: List[str] = field(default_factory=list)
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    context_window_tokens: int = 32768
+    automatic_tools: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1019,12 +1021,33 @@ def _load_models(path: Path) -> Dict[str, ModelProfile]:
     return profiles
 
 
+def validate_agent_execution_options(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate shared execution options for files and organization resources."""
+    capacity = data.get("context_window_tokens", 32768)
+    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 4096:
+        raise ConfigError("上下文容量必须是大于等于 4096 的整数")
+    output = data.get("max_tokens") or 2048
+    if not isinstance(output, int) or isinstance(output, bool) or output <= 0 or output >= capacity:
+        raise ConfigError("输出 Token 上限必须为正整数且小于上下文容量")
+    rules = data.get("automatic_tools", {})
+    if not isinstance(rules, dict):
+        raise ConfigError("自动执行授权必须是 JSON 对象")
+    for name, matches in rules.items():
+        if not isinstance(name, str) or not name or not isinstance(matches, list):
+            raise ConfigError("自动执行授权必须包含工具名称和参数匹配规则数组")
+        for match in matches:
+            if not isinstance(match, dict) or any(not isinstance(key, str) for key in match):
+                raise ConfigError("自动执行参数匹配规则必须是 JSON 对象")
+    return {"context_window_tokens": capacity, "automatic_tools": rules}
+
+
 def _load_agent(path: Path) -> AgentPreset:
     data = _load_json(path)
     _reject_unknown(data, {
         "id", "name", "role", "description", "system_prompt", "image_prompt",
         "capabilities", "tools", "plugin_tools", "skills", "mcp_servers", "datasources", "model", "greeting",
         "greeting_hints", "temperature", "max_tokens", "enabled",
+        "context_window_tokens", "automatic_tools",
     }, path)
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -1159,6 +1182,7 @@ def _load_agent(path: Path) -> AgentPreset:
         if not isinstance(max_tokens, int) or max_tokens <= 0:
             raise _error(path, "max_tokens", "必须是正整数")
 
+    execution_options = validate_agent_execution_options(data)
     return AgentPreset(
         id=_required_string(data, "id", path),
         name=_required_string(data, "name", path),
@@ -1178,6 +1202,7 @@ def _load_agent(path: Path) -> AgentPreset:
         greeting_hints=greeting_hints,
         temperature=temperature,
         max_tokens=max_tokens,
+        **execution_options,
     )
 
 

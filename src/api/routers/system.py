@@ -205,6 +205,11 @@ def page_organization_chat(request: Request):
     )
 
 
+@router.get("/organization/agent-runs", response_class=HTMLResponse)
+def page_organization_agent_runs(request: Request):
+    return _organization_page(request, "agent-runs", template="agent_runs.html")
+
+
 @router.get("/organization/agents", response_class=HTMLResponse)
 def page_organization_agents(request: Request):
     return _organization_page(request, "agents")

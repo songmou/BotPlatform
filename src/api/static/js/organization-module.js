@@ -163,6 +163,21 @@ function initOrganizationModule(requestedModule) {
         });
     }
 
+    function renderAgentAutomaticTools() {
+        var form = document.getElementById("organization-agent-form");
+        var host = document.getElementById("organization-agent-automatic-tools");
+        if (!form || !host) return;
+        var rules = form._automaticRules || {};
+        host.replaceChildren();
+        document.querySelectorAll('#organization-agent-builtin-tools input:checked, #organization-agent-plugin-tools input:checked').forEach(function (box) {
+            var label = document.createElement("label"); label.style.display = "block";
+            var option = document.createElement("input"); option.type = "checkbox"; option.checked = !!rules[box.value];
+            option.onchange = function () { if (option.checked) rules[box.value] = rules[box.value] || [{}]; else delete rules[box.value]; form._automaticRules = rules; };
+            label.appendChild(option); label.appendChild(document.createTextNode(" " + box.value)); host.appendChild(label);
+        });
+        if (!host.children.length) host.textContent = "请先绑定需要使用的工具。";
+    }
+
     function agentDialog(current, creating) {
         current = current || {};
         var modal = document.getElementById("organization-agent-modal");
@@ -171,6 +186,9 @@ function initOrganizationModule(requestedModule) {
         return loadAgentOptions().then(function (data) {
             options = data;
             var payload = current.payload || current;
+            form._automaticRules = payload.automatic_tools || {};
+            form.onchange = function (event) { if (!event.target.closest("#organization-agent-automatic-tools")) renderAgentAutomaticTools(); };
+            document.getElementById("organization-agent-context-window").value = payload.context_window_tokens || 32768;
             var templateSelect = document.getElementById("organization-agent-template");
             var templateGroup = document.getElementById("organization-agent-template-group");
             templateSelect.innerHTML = '<option value="">空白智能体</option>' + (data.templates || []).map(function (item) {
@@ -210,6 +228,7 @@ function initOrganizationModule(requestedModule) {
             agentCheckboxes(document.getElementById("organization-agent-skills"), (data.skills || []).map(function (item) { var p = item.payload || {}; return { value: item.resource_id, label: p.name || item.resource_id, description: p.description }; }), "skill", skills);
             agentCheckboxes(document.getElementById("organization-agent-mcp"), (data.mcp || []).map(function (item) { var p = item.payload || {}; return { value: item.resource_id, label: p.name || item.resource_id, description: p.description }; }), "mcp", mcp);
             renderAgentDatasources(data.datasources, payload.datasources || []);
+            renderAgentAutomaticTools();
             var knowledge = {}; (current.knowledge_category_ids || []).forEach(function (value) { knowledge[value] = true; });
             var knowledgeRequest = creating ? Promise.resolve({ category_ids: [] }) : request(organizationApi("/agents/" + encodeURIComponent(payload.id || current.resource_id) + "/knowledge-categories"));
             return knowledgeRequest.then(function (bindings) {
@@ -258,6 +277,8 @@ function initOrganizationModule(requestedModule) {
                                 greeting_hints: hints ? hints.split(/[;；]/).map(function (item) { return item.trim(); }).filter(Boolean) : [],
                                 temperature: temperature === "" ? null : parseFloat(temperature),
                                 max_tokens: maxTokens === "" ? null : parseInt(maxTokens, 10),
+                                context_window_tokens: parseInt(document.getElementById("organization-agent-context-window").value || "32768", 10),
+                                automatic_tools: form._automaticRules || {},
                                 capabilities: payload.capabilities || [],
                                 tools: selectedAgentValues(document.getElementById("organization-agent-builtin-tools")),
                                 plugin_tools: pluginTools,
@@ -291,6 +312,9 @@ function initOrganizationModule(requestedModule) {
         document.querySelectorAll('#organization-agent-mcp input').forEach(function (box) { box.checked = (payload.mcp_servers || []).indexOf(box.value) >= 0; });
         document.querySelectorAll('#organization-agent-plugin-tools input').forEach(function (box) { box.checked = ((payload.plugin_tools || {})[box.getAttribute("data-plugin-id")] || []).indexOf(box.value) >= 0; });
         renderAgentDatasources((options || {}).datasources, payload.datasources || []);
+        document.getElementById("organization-agent-context-window").value = payload.context_window_tokens || 32768;
+        document.getElementById("organization-agent-form")._automaticRules = payload.automatic_tools || {};
+        renderAgentAutomaticTools();
     }
 
     function suggestChannelId(type) {

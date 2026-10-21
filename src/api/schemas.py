@@ -49,6 +49,8 @@ class AgentOut(BaseModel):
     greeting_hints: List[str] = []
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    context_window_tokens: int = 32768
+    automatic_tools: Dict[str, List[Dict[str, Any]]] = {}
     enabled: bool = True
 
 

@@ -239,7 +239,7 @@ class CommandRunner:
             )
         return "\n".join(lines)
 
-    def execute(self, prepared: PreparedCommand) -> Dict[str, Any]:
+    def execute(self, prepared: PreparedCommand, cancelled=None) -> Dict[str, Any]:
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="ilinkbot-tool-") as temp_name:
             temp_directory = Path(temp_name).resolve()
@@ -269,10 +269,26 @@ class CommandRunner:
             except OSError as exc:
                 raise ToolError("启动命令失败：{}".format(exc)) from exc
             timed_out = False
+            was_cancelled = False
+            deadline = time.monotonic() + prepared.timeout_seconds
             try:
-                stdout, stderr = process.communicate(timeout=prepared.timeout_seconds)
+                if cancelled is None:
+                    stdout, stderr = process.communicate(timeout=prepared.timeout_seconds)
+                else:
+                    while True:
+                        if cancelled():
+                            was_cancelled = True
+                            raise subprocess.TimeoutExpired(command, 0)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, prepared.timeout_seconds)
+                        try:
+                            stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
             except subprocess.TimeoutExpired:
-                timed_out = True
+                timed_out = not was_cancelled
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -286,6 +302,7 @@ class CommandRunner:
             "profile": prepared.profile,
             "exit_code": process.returncode,
             "timed_out": timed_out,
+            "cancelled": was_cancelled,
             "duration_seconds": round(time.monotonic() - started, 3),
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr": stderr.decode("utf-8", errors="replace"),

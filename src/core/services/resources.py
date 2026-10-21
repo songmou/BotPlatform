@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 from src.core.config.loader import (
     AgentPreset,
+    ConfigError,
+    validate_agent_execution_options,
     AppConfig,
     Capability,
     ModelPricing,
@@ -152,6 +154,7 @@ def _agent_from_payload(resource_id: str, payload: Dict[str, Any]) -> AgentPrese
         greeting_hints=list(payload.get("greeting_hints") or []),
         temperature=payload.get("temperature"),
         max_tokens=payload.get("max_tokens"),
+        **validate_agent_execution_options(payload),
     )
 
 
@@ -930,6 +933,10 @@ class ScopedResourceStore:
         return {**item, "effective_scope": "public", "organization_id": organization_id}
 
     def _validate_agent_payload(self, payload: Dict[str, Any]) -> None:
+        try:
+            validate_agent_execution_options(payload)
+        except ConfigError as exc:
+            raise ResourceError(str(exc)) from exc
         if not str(payload.get("name") or "").strip():
             raise ResourceError("智能体名称不能为空")
         model_id = str(payload.get("model") or "")

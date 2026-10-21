@@ -6,6 +6,25 @@ function initAgents() {
     var form = document.getElementById("agent-form");
     var idGroup = document.getElementById("form-id-group");
     var editingId = null;
+    var automaticRules = {};
+
+    function renderAutomaticOptions() {
+        var host = document.getElementById("agent-automatic-options");
+        var selection = collectSelection();
+        var names = (selection.tools || []).slice();
+        Object.keys(selection.plugin_tools || {}).forEach(function (plugin) { names = names.concat(selection.plugin_tools[plugin]); });
+        host.replaceChildren();
+        names.forEach(function (name) {
+            var label = document.createElement("label");
+            label.style.display = "block";
+            var checkbox = document.createElement("input");
+            checkbox.type = "checkbox"; checkbox.checked = !!automaticRules[name];
+            checkbox.addEventListener("change", function () { if (checkbox.checked) automaticRules[name] = automaticRules[name] || [{}]; else delete automaticRules[name]; });
+            label.appendChild(checkbox); label.appendChild(document.createTextNode(" " + name)); host.appendChild(label);
+        });
+        if (!names.length) host.textContent = "请先绑定需要使用的工具。";
+    }
+    form.addEventListener("change", function (event) { if (!event.target.closest("#agent-automatic-options")) renderAutomaticOptions(); });
 
     loadAgents();
     loadModelOptions();
@@ -403,6 +422,8 @@ function initAgents() {
 
     document.getElementById("create-agent-btn").addEventListener("click", function () {
         editingId = null;
+        automaticRules = {};
+        renderAutomaticOptions();
         modalTitle.textContent = "新建智能体";
         idGroup.style.display = "";
         form.reset();
@@ -414,7 +435,7 @@ function initAgents() {
         document.getElementById("agent-enabled").checked = true;
         resetTempSlider();
         loadModelOptions();
-        loadToolOptions();
+        loadToolOptions().then(renderAutomaticOptions);
         openModal();
     });
 
@@ -540,6 +561,9 @@ function initAgents() {
                         resetTempSlider();
                     }
                     document.getElementById("agent-max-tokens").value = a.max_tokens || "";
+                    document.getElementById("agent-context-window").value = a.context_window_tokens || 32768;
+                    automaticRules = a.automatic_tools || {};
+                    renderAutomaticOptions();
                     document.getElementById("agent-enabled").checked = a.enabled !== false;
                     loadModelOptions().then(function () {
                         document.getElementById("agent-model").value = a.model || "";
@@ -550,6 +574,7 @@ function initAgents() {
                             .then(function (r) { return r.ok ? r.json() : { category_ids: [] }; })
                     ]).then(function (results) {
                         setToolSelection(a, results[1].category_ids || []);
+                        renderAutomaticOptions();
                     });
                     openModal();
                 });
@@ -583,6 +608,8 @@ function initAgents() {
             greeting_hints: hints,
             temperature: tempVal !== "" ? parseFloat(tempVal) : null,
             max_tokens: maxTokVal ? parseInt(maxTokVal, 10) : null,
+            context_window_tokens: parseInt(document.getElementById("agent-context-window").value || "32768", 10),
+            automatic_tools: automaticRules,
             enabled: document.getElementById("agent-enabled").checked,
             tools: selection.tools,
             plugin_tools: selection.plugin_tools,

@@ -97,6 +97,7 @@
                 <div class="nav-section-label">组织工作台</div>
                 <a href="/organization/overview" data-organization-link class="nav-item {% if active == 'organization-overview' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></svg><span>组织概览</span></a>
                 <a href="/organization/chat" data-organization-link class="nav-item {% if active == 'organization-chat' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3z"/></svg><span>对话</span></a>
+                <a href="/organization/agent-runs" data-organization-link class="nav-item {% if active == 'organization-agent-runs' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 9h8M8 13h8M8 17h5"/></svg><span>执行任务</span></a>
                 <a href="/organization/agents" data-organization-link class="nav-item {% if active == 'organization-agents' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="4"/><path d="M8 10h8M8 14h5M9 3v3M15 3v3"/></svg><span>智能体</span></a>
                 <a href="/organization/workflows" data-organization-link class="nav-item {% if active == 'organization-workflows' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8M18 8l-5 8"/></svg><span>工作流</span></a>
                 <a href="/organization/knowledge" data-organization-link class="nav-item {% if active == 'organization-knowledge' %}active{% endif %}"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5a3 3 0 0 1 3-3h13v17H7a3 3 0 0 0-3 3z"/><path d="M4 5v16a3 3 0 0 1 3-3h13"/></svg><span>知识库</span></a>
@@ -145,7 +146,7 @@
         </main>
     </div>
     <script src="/static/js/common.js?v=20260820a"></script>
-    <script src="/static/js/organization-module.js?v=20260814a"></script>
+    <script src="/static/js/organization-module.js?v=20261021a"></script>
     <script src="/static/js/catalog-api.js?v=20260806a"></script>
     {% block scripts %}{% endblock %}
 </body>

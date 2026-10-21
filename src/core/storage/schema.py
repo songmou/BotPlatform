@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.core.storage.agent_run_schema import AGENT_RUN_SCHEMA
+
 SCHEMA_FORMAT_VERSION = 4
 
 
@@ -1435,3 +1437,8 @@ CREATE TABLE IF NOT EXISTS crawl_events (
 CREATE INDEX IF NOT EXISTS ix_crawl_events_run
     ON crawl_events(run_id, event_id);
 """
+
+
+# Agent state is additive and does not change existing conversation records.
+
+SCHEMA_ADDENDA += AGENT_RUN_SCHEMA

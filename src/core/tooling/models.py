@@ -17,6 +17,8 @@ class ToolError(RuntimeError):
 class FinalAnswer:
     text: str
     thinking: str = ""
+    run_id: Optional[str] = None
+    status: str = "succeeded"
 
 
 @dataclass(frozen=True)
@@ -87,3 +89,5 @@ class PendingApproval:
     #: db_* grant can be restored when the approval is resolved on another
     #: request (and possibly another thread).
     datasource_ids: List[str] = field(default_factory=list)
+    run_state: Dict[str, Any] = field(default_factory=dict)
+    agent_id: str = ""

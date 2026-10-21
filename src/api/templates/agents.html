@@ -87,6 +87,16 @@
                     </div>
                 </div>
                 <div class="form-group">
+                    <label for="agent-context-window">上下文容量</label>
+                    <input type="number" id="agent-context-window" min="4096" value="32768">
+                    <small>应与所选模型支持的容量一致；长任务会自动整理已完成步骤。</small>
+                </div>
+                <div class="form-group">
+                    <label>自动执行授权</label>
+                    <div id="agent-automatic-options"></div>
+                    <small>仅对已绑定工具生效，工作区范围和强制审批要求继续生效。</small>
+                </div>
+                <div class="form-group">
                     <label for="agent-prompt">系统提示词</label>
                     <textarea id="agent-prompt" rows="6" placeholder="定义智能体的行为和规则..."></textarea>
                 </div>
@@ -149,6 +159,6 @@
 
 {% endblock %}
 {% block scripts %}
-<script src="/static/js/agents.js?v=20260806b"></script>
+<script src="/static/js/agents.js?v=20261021a"></script>
 <script>initAgents();</script>
 {% endblock %}

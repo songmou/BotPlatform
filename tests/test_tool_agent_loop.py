@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -37,6 +38,13 @@ class FakeToolOllama:
     capabilities = ModelCapabilities(tools=True, vision=True, reasoning=True)
 
     def complete(self, request):
+        if request.context.operation == "completion_check":
+            return ModelResponse(
+                CanonicalMessage(
+                    "assistant", json.dumps({"complete": True, "reason": "测试证据已确认", "remaining_steps": []})
+                ),
+                actual_model="fake-model",
+            )
         self.calls.append(replace(request, messages=list(request.messages)))
         if not self.responses:
             return ModelResponse(

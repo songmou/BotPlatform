@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import secrets
@@ -16,12 +15,10 @@ from src.core.config.loader import AgentPreset, AppConfig
 from src.core.services.agent_tools import (
     build_system_prompt,
     resolve_tool_names,
-    sanitize_tool_call_text,
 )
 from src.core.services.approvals import ApprovalStore, build_approval_request
 from src.core.modeling import (
     CanonicalMessage,
-    CanonicalToolCall,
     GenerationOptions,
     ModelCallContext,
     ModelClient,
@@ -38,7 +35,7 @@ from src.core.tooling import (
     ToolError,
     ToolRuntime,
 )
-from src.core.tooling.models import PendingApproval, PreparedToolCall, ToolResult
+from src.core.tooling.models import PendingApproval, PreparedToolCall
 from src.core.storage.tenants import ConversationStore, SettingsStore, TenantContext
 from src.core.services.knowledge import KnowledgeService
 from src.core.services.memory import MemoryService
@@ -91,6 +88,19 @@ class AgentService:
         self._tenant_locks_guard = threading.Lock()
         self._analytics_context = threading.local()
         self._knowledge_context = threading.local()
+        self.runs = None
+
+    def enable_runs(self, registry, organizations=None, notification_service=None):
+        from src.core.services.agent_runs import AgentRunService
+        from src.core.storage.database import Database
+        if not isinstance(getattr(registry, "database", None), Database):
+            return None
+        if self.runs is None:
+            self.runs = AgentRunService(self, registry, organizations, notification_service)
+        else:
+            self.runs.organizations = organizations or self.runs.organizations
+            self.runs.notifications = notification_service or self.runs.notifications
+        return self.runs
 
     @property
     def _pending(self) -> Dict[str, PendingApproval]:
@@ -552,6 +562,7 @@ class AgentService:
         thinking_parts: Optional[List[str]] = None,
         session_key: str = "direct",
         allow_private_context: bool = True,
+        outcome_status: str = "succeeded",
     ) -> FinalAnswer:
         knowledge = getattr(self._knowledge_context, "value", [])
         renderer = getattr(self.knowledge_service, "append_citations", None)
@@ -570,10 +581,12 @@ class AgentService:
         )
         context = getattr(self._analytics_context, "value", None)
         if self.model_analytics_store is not None and context is not None:
-            self.model_analytics_store.finish_run(context.run_id, "success")
+            self.model_analytics_store.finish_run(
+                context.run_id, "success" if outcome_status == "succeeded" else "failed"
+            )
         self._analytics_context.value = None
         self._knowledge_context.value = []
-        return FinalAnswer(answer, thinking=thinking)
+        return FinalAnswer(answer, thinking=thinking, status=outcome_status)
 
     def _response_thinking(
         self, response: ModelResponse, model: ModelSession
@@ -598,7 +611,8 @@ class AgentService:
                 request,
                 context=replace(
                     context,
-                    operation="tool_loop" if request.tools else "answer",
+                    operation=(request.context.operation if request.context.operation not in {"answer", "tool_loop"}
+                               else "tool_loop" if request.tools else "answer"),
                 ),
             )
         response = model.complete(request)
@@ -619,7 +633,8 @@ class AgentService:
             ]
         )
         fallback = model.complete(
-            ModelRequest(
+            replace(
+                request,
                 messages=fallback_messages,
                 generation=GenerationOptions(
                     temperature=request.generation.temperature,
@@ -646,6 +661,8 @@ class AgentService:
 
     def has_pending_approval(self, user_id: Union[str, TenantContext]) -> bool:
         """Return whether the user currently has an unexpired approval request."""
+        if self.runs is not None and isinstance(user_id, TenantContext):
+            return self.runs.pending_for_subject(user_id) is not None
         with self._lock_for(user_id):
             return self._active_pending(user_id) is not None
 
@@ -692,7 +709,38 @@ class AgentService:
         conversation_id: Optional[str] = None,
         allow_tools: bool = True,
         allow_private_context: bool = True,
+        notification_endpoint_id: Optional[str] = None,
     ) -> AgentOutcome:
+        if self.runs is not None and isinstance(user_id, TenantContext):
+            pending = self.runs.pending_for_subject(user_id, conversation_id or "direct")
+            if pending:
+                return self.runs.approval_outcome(pending)
+            active = [
+                item
+                for item in self.runs.store.list(user_id.tenant_id, conversation_id or "direct")
+                if item["state"].get("subject_key") == self._subject_key(user_id)
+                and item["status"] not in {"succeeded", "failed", "cancelled"}
+            ]
+            if active:
+                run = active[0]
+                if run["status"] == "waiting_input":
+                    self.runs.resume(run["run_id"], user_id.tenant_id, question)
+                    return self.runs.outcome(self.runs.wait(run["run_id"], timeout=2))
+                return self.runs.outcome(run)
+            run = self.runs.submit(user_id, question, agent_id, conversation_id or "direct", source,
+                allow_tools=allow_tools, allow_private_context=allow_private_context, image_bytes=image_bytes,
+                notification_endpoint_id=notification_endpoint_id)
+            result = self.runs.wait(run["run_id"], timeout=2)
+            if result["status"] not in {
+                "succeeded",
+                "failed",
+                "cancelled",
+                "paused",
+                "waiting_approval",
+                "waiting_input",
+            }:
+                self.runs.enable_notifications(run["run_id"])
+            return self.runs.outcome(result)
         key = self._subject_key(user_id)
         effective_agents = self.agents
         effective_skills = self.skills
@@ -733,8 +781,8 @@ class AgentService:
                     )
                     for resource_id, preset in effective_agents.items()
                 }
-            except Exception:
-                logger.warning("读取组织智能体目录失败，回退到平台配置", exc_info=True)
+            except Exception as exc:
+                raise ToolError("无法读取组织智能体授权，已暂停执行") from exc
         session_key = conversation_id or "direct"
         self._knowledge_context.value = []
         preset_id = agent_id or self.active_agent.id
@@ -769,6 +817,7 @@ class AgentService:
                 operation="answer",
                 agent_id=preset_id,
                 conversation_id=session_key,
+                managed_run=True,
             )
         if allow_tools:
             self._bind_tool_runtime(user_id)
@@ -878,209 +927,62 @@ class AgentService:
                 model=model,
                 datasource_ids=list(getattr(preset, "datasources", []) or []),
                 session_key=session_key,
+                preset=preset,
             )
-
-    def _parse_call(
-        self,
-        index: int,
-        raw_call: CanonicalToolCall,
-        allowed_tools: List[str],
-        audit_context: ToolAuditContext,
-    ) -> PreparedToolCall:
-        name = raw_call.name or "invalid_tool_call"
-        arguments = raw_call.arguments
-        if not isinstance(arguments, dict):
-            return PreparedToolCall(
-                index,
-                raw_call.call_id,
-                name,
-                {},
-                False,
-                "",
-                ToolResult(False, error="工具参数必须是 JSON 对象"),
-                audit_context,
-            )
-        if name not in allowed_tools:
-            return PreparedToolCall(
-                index,
-                raw_call.call_id,
-                name,
-                arguments,
-                False,
-                "",
-                ToolResult(False, error="当前 Agent 未授权工具：{}".format(name)),
-                audit_context,
-            )
-        assert self.tool_runtime is not None
-        if self.tool_runtime.requires_approval(name, arguments):
-            try:
-                preview = self.tool_runtime.preview(name, arguments)
-            except ToolError as exc:
-                return PreparedToolCall(
-                    index,
-                    raw_call.call_id,
-                    name,
-                    arguments,
-                    False,
-                    "",
-                    ToolResult(False, error=str(exc)),
-                    audit_context,
-                )
-            return PreparedToolCall(
-                index,
-                raw_call.call_id,
-                name,
-                arguments,
-                True,
-                preview,
-                audit_context=audit_context,
-            )
-        result = self.tool_runtime.execute(name, arguments, audit_context)
-        return PreparedToolCall(
-            index,
-            raw_call.call_id,
-            name,
-            arguments,
-            False,
-            "",
-            result,
-            audit_context,
-        )
-
-    @staticmethod
-    def _tool_message(call: PreparedToolCall) -> CanonicalMessage:
-        result = call.result or ToolResult(False, error="工具没有产生结果")
-        return CanonicalMessage(
-            role="tool",
-            content=json.dumps(result.payload(), ensure_ascii=False),
-            tool_call_id=call.call_id,
-        )
 
     def _run_tool_loop(
-        self,
-        user_id: str,
-        question: str,
-        history: List[CanonicalMessage],
-        messages: List[CanonicalMessage],
-        image_bytes: Optional[bytes],
-        tool_names: List[str],
-        rounds_used: int,
-        total_calls: int,
-        thinking_parts: List[str],
-        model: ModelSession,
-        datasource_ids: Optional[List[str]] = None,
-        session_key: str = "direct",
+        self, user_id: str, question: str, history: List[CanonicalMessage],
+        messages: List[CanonicalMessage], image_bytes: Optional[bytes],
+        tool_names: List[str], rounds_used: int, total_calls: int,
+        thinking_parts: List[str], model: ModelSession,
+        datasource_ids: Optional[List[str]] = None, session_key: str = "direct",
+        preset: Optional[AgentPreset] = None, run_state: Optional[Dict[str, Any]] = None,
+        persist_history: bool = True,
     ) -> AgentOutcome:
-        assert self.tool_runtime is not None
-        # Re-assert the datasource grant on the current thread: schemas() and
-        # execute() both consult it, and an approval may resume elsewhere.
-        binder = getattr(self.tool_runtime, "bind_agent_datasources", None)
-        if binder is not None:
-            binder(list(datasource_ids or []))
-        max_rounds = self.tool_runtime.config.max_tool_rounds
-        max_calls = self.tool_runtime.config.max_total_tool_calls
-        schemas = self.tool_runtime.schemas(tool_names)
-
-        while rounds_used < max_rounds:
-            response = self._complete_with_fallback(
-                ModelRequest(messages=messages, image=image_bytes, tools=schemas),
-                thinking_parts,
-                model,
-            )
-            rounds_used += 1
-            model_message = response.message
-            messages.append(model_message)
-            raw_calls = model_message.tool_calls
-            if not raw_calls:
-                answer = model_message.content.strip()
-                if not answer:
-                    raise ModelError(
-                        "模型档案 {} 结束工具循环时没有返回文字".format(
-                            model.identity.profile_id
-                        ),
-                        provider=model.identity.provider,
-                    )
-                # 硬拦截：模型输出文本格式工具调用（幻觉）时替换为友好提示
-                answer = sanitize_tool_call_text(answer)
-                return self._finish(
-                    user_id, history, question, answer, thinking_parts,
-                    session_key=session_key,
-                )
-            if total_calls + len(raw_calls) > max_calls:
-                answer = "本次任务需要的工具步骤超过安全上限，请缩小问题范围后重试。"
-                return self._finish(
-                    user_id, history, question, answer, thinking_parts,
-                    session_key=session_key,
-                )
-            audit_context = ToolAuditContext(
-                user_id=user_id,
-                provider=model.identity.provider,
-                profile_id=model.identity.profile_id,
-                model=response.actual_model or model.identity.configured_model,
-                session_id=(
-                    getattr(self._analytics_context, "value", None).run_id
-                    if getattr(self._analytics_context, "value", None)
-                    else ""
-                ),
-                agent_id=(
-                    getattr(self._analytics_context, "value", None).agent_id or ""
-                    if getattr(self._analytics_context, "value", None)
-                    else ""
-                ),
-            )
-            calls = [
-                self._parse_call(index, raw_call, tool_names, audit_context)
-                for index, raw_call in enumerate(raw_calls)
-            ]
-            total_calls += len(calls)
-            risky = [call for call in calls if call.requires_approval]
-            if risky:
-                approval_id = secrets.token_hex(3)
-                expires_at = datetime.now(timezone.utc) + timedelta(
-                    seconds=self.tool_runtime.config.approval_ttl_seconds
-                )
-                pending = PendingApproval(
-                    approval_id=approval_id,
-                    user_id=user_id,
-                    expires_at=expires_at,
-                    question=question,
-                    history=history,
-                    messages=messages,
-                    calls=calls,
-                    image_bytes=image_bytes,
-                    rounds_used=rounds_used,
-                    total_calls=total_calls,
-                    tool_names=tool_names,
-                    thinking_parts=list(thinking_parts),
-                    model_mode=model.mode,
-                    model_profile_id=model.profile_id,
-                    datasource_ids=list(
-                        getattr(self.tool_runtime, "bound_datasources", None) or []
-                    ),
-                    session_key=session_key,
-                )
+        """Drive the same transition engine for callers without durable storage."""
+        import base64
+        from src.core.services.react import ReactEngine, new_state
+        preset = preset or self.active_agent
+        state = run_state or new_state(messages, preset, question=question,
+            subject_key=user_id, tool_names=tool_names, rounds=rounds_used,
+            total_calls=total_calls, thinking=thinking_parts, model_mode=model.mode,
+            profile_id=model.profile_id,
+            image=base64.b64encode(image_bytes).decode() if image_bytes else None)
+        context = getattr(self._analytics_context, "value", None) or ModelCallContext(agent_id=preset.id)
+        if self.tool_runtime is not None:
+            binder = getattr(self.tool_runtime, "bind_agent_datasources", None)
+            if binder:
+                binder(datasource_ids or [])
+        engine = ReactEngine(self.model_router, self.tool_runtime, self._complete_with_fallback)
+        def approval(calls, ttl):
+            return {"approval_id": secrets.token_hex(3), "calls": calls,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=ttl)).timestamp()}
+        while True:
+            status = engine.advance(state, preset, None, context, make_approval=approval)
+            if status == "queued":
+                continue
+            if status == "waiting_approval":
+                value = state["approval"]
+                calls = [PreparedToolCall(int(item["key"].split(":")[1]), item["call"]["call_id"],
+                          item["call"]["name"], item["call"]["arguments"], True, item["preview"])
+                         for item in value["calls"]]
+                pending = PendingApproval(approval_id=value["approval_id"], user_id=user_id,
+                    expires_at=datetime.fromtimestamp(value["expires_at"], timezone.utc),
+                    question=question, history=history, messages=messages, calls=calls,
+                    image_bytes=image_bytes, rounds_used=state["rounds"], total_calls=state["total_calls"],
+                    tool_names=tool_names, thinking_parts=state["thinking"], model_mode=model.mode,
+                    model_profile_id=state["profile_id"], datasource_ids=datasource_ids or [],
+                    session_key=session_key, run_state=state, agent_id=preset.id)
                 self._approvals.put(user_id, pending)
                 return self._approval_outcome(pending)
-            direct_answers = [
-                self.tool_runtime.direct_response_text(call.name, call.result)
-                for call in calls
-            ]
-            if direct_answers and all(answer is not None for answer in direct_answers):
-                return self._finish(
-                    user_id,
-                    history,
-                    question,
-                    "\n\n".join(str(answer) for answer in direct_answers),
-                    thinking_parts,
-                    session_key=session_key,
-                )
-            messages.extend(self._tool_message(call) for call in calls)
-
-        answer = "本次任务达到工具调用轮次上限，请缩小问题范围后重试。"
-        return self._finish(
-            user_id, history, question, answer, thinking_parts,
-            session_key=session_key,
-        )
+            if status in {"paused", "waiting_input", "cancelled"}:
+                return FinalAnswer(state.get("input_question") or state.get("reason") or "任务已停止", status=status)
+            answer = state.get("answer") or state.get("reason") or "任务执行失败"
+            if not persist_history:
+                return FinalAnswer(answer, thinking="\n\n".join(state["thinking"]), status=status)
+            result = self._finish(user_id, history, question, answer, state["thinking"], session_key=session_key,
+                                  outcome_status=status)
+            return result
 
     def _approval_outcome(self, pending: PendingApproval) -> ApprovalRequired:
         ttl_seconds = (
@@ -1094,6 +996,17 @@ class AgentService:
         self, user_id: Union[str, TenantContext], approved: bool
     ) -> AgentOutcome:
         """Resolve the user's current approval request without exposing its id."""
+        if self.runs is not None and isinstance(user_id, TenantContext):
+            pending = self.runs.pending_for_subject(user_id)
+            if pending is None:
+                raise ToolError("没有待确认的操作，或请求已经失效")
+            self.runs.resolve_approval(
+                pending["run_id"], pending["tenant_id"], pending["state"]["approval"]["approval_id"], approved
+            )
+            result = self.runs.wait(pending["run_id"], timeout=2)
+            if result["status"] in {"queued", "running"}:
+                self.runs.enable_notifications(pending["run_id"])
+            return self.runs.outcome(result)
         key = self._subject_key(user_id)
         self._bind_tool_runtime(user_id)
         with self._lock_for(user_id):
@@ -1111,6 +1024,18 @@ class AgentService:
         now: Optional[datetime] = None,
     ) -> bool:
         """Atomically discard a matching approval once its deadline is reached."""
+        if self.runs is not None and isinstance(user_id, TenantContext):
+            try:
+                pending = self.runs.pending_for_subject(user_id)
+                if not pending or pending["state"]["approval"]["approval_id"] != approval_id:
+                    return False
+                if (now or datetime.now(timezone.utc)).timestamp() < pending["state"]["approval"]["expires_at"]:
+                    return False
+                return self.runs.store.expire_one(
+                    pending["run_id"], approval_id, (now or datetime.now(timezone.utc)).timestamp()
+                )
+            except ToolError:
+                return False
         key = self._subject_key(user_id)
         with self._lock_for(user_id):
             return self._approvals.expire(key, approval_id, now)
@@ -1118,90 +1043,83 @@ class AgentService:
     def resolve_approval(
         self, user_id: Union[str, TenantContext], approval_id: str, approved: bool
     ) -> AgentOutcome:
+        if self.runs is not None and isinstance(user_id, TenantContext):
+            pending = self.runs.pending_for_subject(user_id)
+            if pending is None:
+                raise ToolError("没有待确认的操作，或请求已经失效")
+            self.runs.resolve_approval(pending["run_id"], pending["tenant_id"], approval_id, approved)
+            result = self.runs.wait(pending["run_id"], timeout=2)
+            if result["status"] in {"queued", "running"}:
+                self.runs.enable_notifications(pending["run_id"])
+            return self.runs.outcome(result)
         key = self._subject_key(user_id)
         self._bind_tool_runtime(user_id)
         with self._lock_for(user_id):
             return self._resolve_approval_locked(key, approval_id, approved)
 
-    def _resolve_approval_locked(
-        self, user_id: str, approval_id: str, approved: bool
-    ) -> AgentOutcome:
+    def _resolve_approval_locked(self, user_id: str, approval_id: str, approved: bool) -> AgentOutcome:
         pending = self._approvals.take(user_id, approval_id)
-        resolved_calls: List[PreparedToolCall] = []
         assert self.tool_runtime is not None
-        # Restore the paused agent's datasource grant before replaying calls.
         binder = getattr(self.tool_runtime, "bind_agent_datasources", None)
-        if binder is not None:
-            binder(list(getattr(pending, "datasource_ids", []) or []))
-        for call in pending.calls:
-            if not call.requires_approval:
-                resolved_calls.append(call)
-            elif approved:
-                resolved_calls.append(
-                    replace(
-                        call,
-                        requires_approval=False,
-                        result=self.tool_runtime.execute(
-                            call.name, call.arguments, call.audit_context
-                        ),
-                    )
-                )
-            else:
-                resolved_calls.append(
-                    replace(
-                        call,
-                        requires_approval=False,
-                        result=ToolResult(False, error="用户拒绝了该本机操作"),
-                    )
-                )
-        pending.messages.extend(self._tool_message(call) for call in resolved_calls)
-        model = self.model_router.session(
-            pending.model_mode,
-            has_image=bool(pending.image_bytes),
-            start_profile_id=pending.model_profile_id,
-        )
+        if binder:
+            binder(pending.datasource_ids)
+        state = pending.run_state
+        state["approval_decisions"] = {
+            item["key"]: {"approved": approved, "call": item["call"]}
+            for item in state["approval"]["calls"]
+        }
+        state.pop("approval", None)
+        preset = self.agents.get(pending.agent_id)
+        if preset is None or not preset.enabled:
+            raise ToolError("原智能体已删除或停用，不能继续执行审批操作")
         return self._run_tool_loop(
-            user_id=pending.user_id,
-            question=pending.question,
-            history=pending.history,
-            messages=pending.messages,
-            image_bytes=pending.image_bytes,
-            tool_names=pending.tool_names,
-            rounds_used=pending.rounds_used,
-            total_calls=pending.total_calls,
-            thinking_parts=list(pending.thinking_parts),
-            model=model,
-            datasource_ids=list(getattr(pending, "datasource_ids", []) or []),
-            session_key=pending.session_key,
+            user_id,
+            pending.question,
+            pending.history,
+            pending.messages,
+            pending.image_bytes,
+            pending.tool_names,
+            pending.rounds_used,
+            pending.total_calls,
+            pending.thinking_parts,
+            self.model_router.session(pending.model_mode, start_profile_id=pending.model_profile_id),
+            pending.datasource_ids,
+            pending.session_key,
+            preset=preset,
+            run_state=state,
         )
 
     def generate(self, agent_id: str, prompt: str) -> str:
+        """Compatibility generation without a trusted tenant never gets tools."""
         preset = self.agents[agent_id]
         with self._model_lock:
-            model = self.model_router.session("auto")
-            thinking_parts: List[str] = []
-            response = self._complete_with_fallback(
-                ModelRequest(
-                    messages=self._messages_for(
-                        preset,
-                        [],
-                        prompt,
-                        model,
-                        include_tool_context=False,
-                    )
-                ),
-                thinking_parts,
-                model,
-            )
-            answer = response.message.content.strip()
-            if not answer:
-                raise ModelError(
-                    "模型档案 {} 没有返回文字内容".format(
-                        model.identity.profile_id
-                    ),
-                    provider=model.identity.provider,
-                )
-            return answer
+            model = self.model_router.session("auto", start_profile_id=preset.model)
+            messages = self._messages_for(preset, [], prompt, model, include_tool_context=False)
+            return self._run_tool_loop(
+                "generation", prompt, [], messages, None, [], 0, 0, [], model, preset=preset, persist_history=False
+            ).text
+
+    def task_command(self, subject, command, session_key="direct"):
+        if self.runs is None or not isinstance(subject, TenantContext):
+            return "当前没有后台智能体任务。"
+        active = [
+            run
+            for run in self.runs.store.list(subject.tenant_id, session_key)
+            if run["state"].get("subject_key") == self._subject_key(subject)
+            and run["status"] not in {"succeeded", "failed", "cancelled"}
+        ]
+        if not active:
+            return "当前没有未完成的智能体任务。"
+        run = active[0]
+        if command == "/stop":
+            self.runs.cancel(run["run_id"], subject.tenant_id)
+            return "已请求停止任务；正在执行且无法中断的操作结束后将停止。"
+        if command.startswith("/resume"):
+            self.runs.resume(run["run_id"], subject.tenant_id, command[len("/resume"):].strip())
+            return "任务已恢复，完成或需要处理时会通知。"
+        return "任务状态：{}\n{}".format(
+            run["status"], run["state"].get("reason") or run["state"].get("input_question", "")
+        )
 
     def clear_history(self, user_id: Union[str, TenantContext]) -> None:
         key = self._subject_key(user_id)

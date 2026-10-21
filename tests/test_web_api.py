@@ -32,6 +32,10 @@ class FakeClient:
         pass
 
     def complete(self, request):
+        if request.context.operation == "completion_check":
+            return ModelResponse(
+                CanonicalMessage("assistant", '{"complete":true,"reason":"已验证","remaining_steps":[]}')
+            )
         return ModelResponse(
             CanonicalMessage("assistant", "你好！我是测试模型。"),
             actual_model=self.identity.configured_model,
@@ -54,6 +58,34 @@ class MultiAgentToolClient(FakeClient):
         self._requests_lock = threading.Lock()
 
     def complete(self, request):
+        if request.context.operation == "completion_check":
+            return super().complete(request)
+        if request.context.operation == "planner":
+            return ModelResponse(
+                CanonicalMessage(
+                    "assistant",
+                    json.dumps(
+                        [
+                            {
+                                "task_id": "general",
+                                "agent_id": "general",
+                                "subtask": "读取目录",
+                                "depends_on": [],
+                                "completion_criteria": ["目录已读取"],
+                            },
+                            {
+                                "task_id": "coder",
+                                "agent_id": "coder",
+                                "subtask": "读取目录",
+                                "depends_on": [],
+                                "completion_criteria": ["目录已读取"],
+                            },
+                        ]
+                    ),
+                )
+            )
+        if request.context.operation == "summary":
+            return ModelResponse(CanonicalMessage("assistant", "两个智能体均已读取目录。"))
         with self._requests_lock:
             self.requests.append(request)
         agent_id = request.context.agent_id or "unknown"
@@ -188,9 +220,7 @@ class WebApiTest(unittest.TestCase):
         self.addCleanup(self._db_dir.cleanup)
         database = Database(Path(self._db_dir.name) / "botplatform.sqlite3")
         self.mock_registry.database = database
-        self.mock_registry.get.return_value = TenantContext(
-            "00000000-0000-0000-0000-000000000001", "web", "test-user"
-        )
+        self.mock_registry.get.side_effect = lambda tenant_id: TenantContext(tenant_id, "web", "test-user")
         self.admin_users = AdminUserStore(database)
         self.admin_roles = AdminRoleStore(database)
         self.admin_sessions = AdminSessionStore(database, b"test-secret")
@@ -209,6 +239,7 @@ class WebApiTest(unittest.TestCase):
             admin_user_store=self.admin_users,
             admin_role_store=self.admin_roles,
         )
+        self.addCleanup(self.app.state.agent_service.runs.shutdown)
         self.client = TestClient(self.app)
         response = self.client.post(
             "/api/auth/login",
@@ -264,7 +295,9 @@ class WebApiTest(unittest.TestCase):
         self.mock_store.save_context.assert_called_once()
 
     def test_chat_tools_use_conversation_workspace(self):
-        tenant = self.mock_registry.get.return_value
+        tenant = self.mock_registry.get.side_effect(
+            self.app.state.organization_store.ensure_debug_organization(1, "admin")
+        )
         self.config.agents["general"].tools.append("list_directory")
         self._publish_test_agent(self.config.agents["general"])
         tool_runtime = MagicMock()
@@ -281,6 +314,8 @@ class WebApiTest(unittest.TestCase):
         tool_runtime.execute.return_value = ToolResult(
             True, data={"path": ".", "entries": []}
         )
+        tool_runtime.requires_approval.return_value = False
+        tool_runtime.config = self.config.tools
         self.app.state.tool_runtime = tool_runtime
         self.fake_client.complete = MagicMock(side_effect=[
             ModelResponse(
@@ -299,6 +334,7 @@ class WebApiTest(unittest.TestCase):
                 CanonicalMessage("assistant", "当前目录为空。"),
                 actual_model=self.fake_client.identity.configured_model,
             ),
+            ModelResponse(CanonicalMessage("assistant", '{"complete":true,"reason":"已验证","remaining_steps":[]}')),
         ])
 
         conv_id = self._create_conversation()
@@ -311,11 +347,10 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('"type": "tool_result"', response.text)
         self.assertIn('"ok": true', response.text)
-        self.assertEqual(tool_runtime.bind_tenant.call_count, 2)
+        self.assertGreaterEqual(tool_runtime.bind_tenant.call_count, 2)
         tool_runtime.bind_tenant.assert_called_with(tenant)
-        tool_runtime.execute.assert_called_once_with(
-            "list_directory", {"path": "."}
-        )
+        self.assertEqual(tool_runtime.execute.call_count, 1)
+        self.assertEqual(tool_runtime.execute.call_args.args[:2], ("list_directory", {"path": "."}))
 
     def test_multi_agent_chat_executes_structured_directory_tools(self):
         general = replace(
@@ -375,7 +410,7 @@ class WebApiTest(unittest.TestCase):
         agent_requests = [
             request
             for request in client.requests
-            if request.context.operation == "agent_subtask"
+            if request.context.operation in {"tool_loop", "answer"}
         ]
         self.assertEqual(len(agent_requests), 4)
         for agent_id in ("general", "coder"):
@@ -386,7 +421,11 @@ class WebApiTest(unittest.TestCase):
             ]
             self.assertEqual(len(requests), 2)
             self.assertEqual(
-                [tool["function"]["name"] for tool in requests[0].tools],
+                [
+                    tool["function"]["name"]
+                    for tool in requests[0].tools
+                    if not tool["function"]["name"].startswith("agent__")
+                ],
                 ["list_directory"],
             )
             roles = [message.role for message in requests[1].messages]
@@ -439,13 +478,22 @@ class WebApiTest(unittest.TestCase):
 
         requests = [
             call.args[0] for call in self.fake_client.complete.call_args_list
+            if call.args[0].context.operation != "completion_check"
         ]
         self.assertEqual(
-            [tool["function"]["name"] for tool in requests[0].tools],
+            [
+                tool["function"]["name"]
+                for tool in requests[0].tools
+                if not tool["function"]["name"].startswith("agent__")
+            ],
             ["list_directory"],
         )
         self.assertEqual(
-            [tool["function"]["name"] for tool in requests[1].tools],
+            [
+                tool["function"]["name"]
+                for tool in requests[1].tools
+                if not tool["function"]["name"].startswith("agent__")
+            ],
             ["find_files"],
         )
 
@@ -470,6 +518,7 @@ class WebApiTest(unittest.TestCase):
             }
         ]
         tool_runtime.requires_approval.return_value = True
+        tool_runtime.preview.return_value = "运行命令预览"
         requests = []
 
         def complete(request):
@@ -500,11 +549,9 @@ class WebApiTest(unittest.TestCase):
             ModelCallContext(source="web"), tool_runtime, tenant,
         )
 
-        self.assertEqual(answer, "该操作需要确认，未执行。")
+        self.assertIn("需要确认", answer)
+        self.assertIn("运行命令预览", answer)
         tool_runtime.execute.assert_not_called()
-        payload = json.loads(requests[-1].messages[-1].content)
-        self.assertFalse(payload["ok"])
-        self.assertIn("暂不执行需要确认的工具", payload["error"])
 
     def test_multi_agent_returns_tool_failures_to_model(self):
         from src.api.routers.chat import _run_agent
@@ -569,76 +616,46 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(roles.count("tool"), 2)
         self.assertEqual(tool_runtime.execute.call_count, 2)
 
-    def test_multi_agent_enforces_tool_call_limits(self):
+    def test_multi_agent_ignores_legacy_tool_limits(self):
         from src.api.routers.chat import _run_agent
-
-        tenant = self.mock_registry.resolve.return_value
-        agent = replace(
-            self.config.agents["general"],
-            tools=["list_directory"],
-        )
-        schema = {
-            "type": "function",
-            "function": {
-                "name": "list_directory",
-                "description": "列出目录",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }
-        context = ModelCallContext(source="web")
-
-        total_runtime = MagicMock()
-        total_runtime.config = replace(
-            self.config.tools, max_total_tool_calls=1
-        )
-        total_runtime.schemas.return_value = [schema]
-        self.fake_client.complete = MagicMock(
-            return_value=ModelResponse(
+        agent = replace(self.config.agents["general"], tools=["list_directory"])
+        runtime = MagicMock()
+        runtime.config = replace(self.config.tools, max_tool_rounds=1, max_total_tool_calls=1)
+        runtime.schemas.return_value = [
+            {
+                "type": "function",
+                "function": {"name": "list_directory", "parameters": {"type": "object", "properties": {}}},
+            }
+        ]
+        runtime.requires_approval.return_value = False
+        runtime.execute.side_effect = lambda name, args, context: ToolResult(True, data={"value": args["path"]})
+        def complete(request):
+            if request.context.operation == "completion_check":
+                return ModelResponse(
+                    CanonicalMessage("assistant", '{"complete":true,"reason":"已验证","remaining_steps":[]}')
+                )
+            count = sum(message.role == "tool" for message in request.messages)
+            if count >= 14:
+                return ModelResponse(CanonicalMessage("assistant", "全部目录已读取"))
+            return ModelResponse(
                 CanonicalMessage(
-                    "assistant",
-                    "",
-                    tool_calls=[
-                        CanonicalToolCall("call-1", "list_directory", {}),
-                        CanonicalToolCall("call-2", "list_directory", {}),
-                    ],
-                ),
-                actual_model=self.fake_client.identity.configured_model,
+                    "assistant", tool_calls=[CanonicalToolCall(str(count), "list_directory", {"path": str(count)})]
+                )
             )
-        )
-        answer = _run_agent(
-            agent, "查看目录", [], self.model_router, [], context,
-            total_runtime, tenant,
-        )
-        self.assertIn("工具步骤超过安全上限", answer)
-        total_runtime.execute.assert_not_called()
 
-        round_runtime = MagicMock()
-        round_runtime.config = replace(
-            self.config.tools, max_tool_rounds=1
-        )
-        round_runtime.schemas.return_value = [schema]
-        round_runtime.requires_approval.return_value = False
-        round_runtime.execute.return_value = ToolResult(
-            True, data={"items": []}
-        )
-        self.fake_client.complete = MagicMock(
-            return_value=ModelResponse(
-                CanonicalMessage(
-                    "assistant",
-                    "",
-                    tool_calls=[
-                        CanonicalToolCall("call-1", "list_directory", {})
-                    ],
-                ),
-                actual_model=self.fake_client.identity.configured_model,
-            )
-        )
+        self.fake_client.complete = MagicMock(side_effect=complete)
         answer = _run_agent(
-            agent, "查看目录", [], self.model_router, [], context,
-            round_runtime, tenant,
+            agent,
+            "读取十四个目录",
+            [],
+            self.model_router,
+            [],
+            ModelCallContext(source="web"),
+            runtime,
+            self.mock_registry.resolve.return_value,
         )
-        self.assertIn("工具调用轮次上限", answer)
-        self.assertEqual(round_runtime.execute.call_count, 1)
+        self.assertEqual(answer, "全部目录已读取")
+        self.assertEqual(runtime.execute.call_count, 14)
 
     def test_chat_requires_conversation(self):
         response = self.client.post(

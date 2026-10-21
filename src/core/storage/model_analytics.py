@@ -253,11 +253,13 @@ class ModelAnalyticsStore:
                 if call_status == "cancelled"
                 else "failed"
             )
-            connection.execute(
-                "UPDATE model_runs SET status=?, finished_at=?, error_category=? "
-                "WHERE run_id=?",
-                (run_status, now.isoformat(), error_category, run_id),
-            )
+            # A model call finishing is not the end of its enclosing agent
+            # run. Explicit finish_run() owns the task's terminal status.
+            if not context.managed_run:
+                connection.execute(
+                    "UPDATE model_runs SET status=?, finished_at=?, error_category=? WHERE run_id=?",
+                    (run_status, now.isoformat(), error_category, run_id),
+                )
         if cost_micros is not None and cost_micros >= 0:
             self.refresh_budget_alerts(now)
 

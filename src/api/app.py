@@ -106,6 +106,14 @@ def create_app(config, model_router, registry, conversation_store,
                 storage_path=credential_root / "integration_credentials.json"
             ),
         )
+    if agent_service is None:
+        from src.core.services.agent import AgentService
+        agent_service = AgentService(model_router, config.app, config.agents,
+            tool_runtime=tool_runtime, conversation_store=conversation_store,
+            settings_store=settings_store, knowledge_service=knowledge_service,
+            model_analytics_store=model_analytics_store, skills=config.skills,
+            resource_store=resource_store)
+    agent_service.enable_runs(registry, organization_store, notification_service)
     if workflow_service is None:
         from src.core.workflows import WorkflowService
 
@@ -140,6 +148,8 @@ def create_app(config, model_router, registry, conversation_store,
     # lifespan hook must not close the shared services a second time.
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if app.state.agent_service.runs is not None:
+            app.state.agent_service.runs.start()
         app.state.workflow_service.start()
         try:
             yield
@@ -147,6 +157,8 @@ def create_app(config, model_router, registry, conversation_store,
             app.state.workflow_service.shutdown()
             if not app.state.owns_services:
                 return
+            if app.state.agent_service.runs is not None:
+                app.state.agent_service.runs.shutdown()
             if app.state.scheduler is not None:
                 app.state.scheduler.shutdown()
             if app.state.script_service is not None:
@@ -375,6 +387,8 @@ def create_app(config, model_router, registry, conversation_store,
     app.include_router(content_v2.router)
     app.include_router(model_analytics.router)
     app.include_router(chat.router)
+    from src.api.routers.agent_runs import router as agent_runs_router
+    app.include_router(agent_runs_router)
     app.include_router(knowledge.router)
     app.include_router(drive.router)
     app.include_router(plugins.router)

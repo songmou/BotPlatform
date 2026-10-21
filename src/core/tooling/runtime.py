@@ -251,8 +251,8 @@ class ToolRuntime:
             )
             payload = item.get("payload")
             return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
+        except Exception as exc:
+            raise ToolError("无法读取组织工具授权，已暂停执行") from exc
 
     def get_tool_state(self, name: str) -> Dict[str, Any]:
         state = self._tool_states.get(name, {})
@@ -485,6 +485,22 @@ class ToolRuntime:
         if state is not None and "require_approval" in state:
             return state["require_approval"]
         return name in APPROVAL_TOOLS
+
+    def bind_cancellation(self, cancelled=None) -> None:
+        """Bind a cooperative cancellation predicate on this worker thread."""
+        self._binding.cancelled = cancelled
+
+    def approval_is_mandatory(self, name: str) -> bool:
+        """Return whether preauthorization is forbidden for this tool."""
+        if name in set(self._organization_tool_policy().get("require_approval_tools") or []):
+            return True
+        if self._tool_states.get(name, {}).get("require_approval") is True:
+            return True
+        definition = self.plugin_manager.definition(name) if self.plugin_manager else None
+        if definition is None:
+            plugin = self._plugin_tools.get(name)
+            definition = plugin.tool_definitions.get(name) if plugin else None
+        return bool(definition and definition.approval_policy == "required")
 
     def direct_response_text(
         self, name: str, result: Optional[ToolResult]
@@ -1607,6 +1623,9 @@ class ToolRuntime:
 
     def _tool_run_command(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         prepared = self.command_runner.prepare(arguments)
+        cancelled = getattr(self._binding, "cancelled", None)
+        if cancelled is not None:
+            return self.command_runner.execute(prepared, cancelled=cancelled)
         return self.command_runner.execute(prepared)
 
     def _git_network_timeout(self) -> int:

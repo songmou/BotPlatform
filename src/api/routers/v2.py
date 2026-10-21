@@ -1010,9 +1010,10 @@ def chat_in_organization_conversation(
         async for chunk in response.body_iterator:
             raw = chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
             payload = None
-            if raw.startswith("data: "):
+            data_lines = [line[6:] for line in raw.splitlines() if line.startswith("data: ")]
+            if data_lines:
                 try:
-                    payload = json.loads(raw[6:].strip())
+                    payload = json.loads("\n".join(data_lines))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     payload = None
             if isinstance(payload, dict) and payload.get("type") == "done":
@@ -1156,7 +1157,7 @@ _CAPABILITY_SAFE_FIELDS = {
     "agents": {
         "id", "name", "role", "description", "system_prompt", "capabilities", "tools",
         "plugin_tools", "skills", "mcp_servers", "datasources", "model", "greeting",
-        "greeting_hints", "enabled", "temperature", "max_tokens",
+        "greeting_hints", "enabled", "temperature", "max_tokens", "context_window_tokens", "automatic_tools",
     },
     "models": {
         "id", "provider", "model", "modality", "capabilities", "enabled",

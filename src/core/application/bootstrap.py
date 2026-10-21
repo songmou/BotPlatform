@@ -123,6 +123,8 @@ class BotRuntime:
         if self._started:
             return
         self._started = True
+        if self.agent_service.runs:
+            self.agent_service.runs.start()
         self.plugin_manager.start()
         self.notification_dispatcher.start()
         self.scheduler.start()
@@ -140,6 +142,8 @@ class BotRuntime:
             return
         self._closed = True
         self.scheduler.shutdown()
+        if self.agent_service.runs:
+            self.agent_service.runs.shutdown()
         self.script_service.shutdown()
         if self.tool_runtime:
             self.tool_runtime.close()
@@ -286,6 +290,7 @@ def build_bot_runtime(
             skills=project_config.skills,
             resource_store=services.resource_store,
         )
+        agent_service.enable_runs(tenant_registry, services.organization_store, notification_service)
         scheduler = SchedulerService(
             credentials=None,
             tasks=project_config.schedules,
